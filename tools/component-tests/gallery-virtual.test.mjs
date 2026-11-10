@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { componentTest, mount, unmount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
-import { installBackend, seedFromRows, mkRow, setCurrentRows, setPlan, resetPlan } from './fixtures.mjs';
+import { installBackend, seedFromRows, mkRow, setCurrentRows, resetPlan } from './fixtures.mjs';
 import {
   GALLERY_CARD_MIN_HEIGHT,
   GALLERY_COLUMN_GAP,
@@ -298,8 +298,7 @@ componentTest('OPT-017C 画廊灯箱：打开→关闭后滚动位置不动、�
 
 componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、窗口下标不错位、无重复挂载', { timeout: 60000 }, async () => {
   installBackend();
-  /* 本用例覆写 list_articles 的分页行为（keyset 续页）——先复位再覆写，
-     结束（含断言失败路径）必须还原，避免污染后续 App 级用例的启动装载。 */
+  /* 以已加载60/完整120成员的既定会话隔离渲染追加边界；首屏500另有生产会话回归。 */
   resetPlan();
   resetStore();
 
@@ -307,19 +306,7 @@ componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、�
   const firstBatch = pool.slice(0, 60);
   seedFromRows(firstBatch, { layout: 'image' });
   setCurrentRows(pool);
-  /* 假后端按 keyset 续页（与后端 ORDER BY published_at, id 的 newest 口径一致）。 */
-  setPlan({
-    list_articles: (args) => {
-      const a = args?.args ?? {};
-      const sorted = [...pool].filter((r) => r.feed_id === IMAGE_FEED)
-        .sort((x, y) => (Date.parse(y.published_at) - Date.parse(x.published_at)) || (y.id - x.id));
-      const rest = a.last_published != null && a.last_id != null
-        ? sorted.filter((r) => r.published_at < a.last_published
-          || (r.published_at === a.last_published && r.id < Number(a.last_id)))
-        : sorted;
-      return Promise.resolve(rest.slice(0, a.limit ?? rest.length));
-    },
-  });
+  const { createReadingSession, captureReadingQuery } = await import('../../dist-test/store/readingSession.js');
 
   try {
     const { createElement, act } = await import('react');
@@ -334,6 +321,7 @@ componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、�
     const anchorRow = firstBatch[firstBatch.length - 1];
     await act(async () => {
       useAppStore.setState({
+        readingSession: { ...createReadingSession(-1, captureReadingQuery({ layout: 'image', view: 'all', scope: 'all', filter: 'unread', sort: 'newest' }), pool.map(row => String(row.id))), ready: true, loadedCount: 60 },
         articlesExhausted: false,
         articlesLimit: 60,
         articlesCursor: {

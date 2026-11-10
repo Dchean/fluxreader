@@ -433,14 +433,12 @@ impl GReaderClient {
         password: &str,
         http: &Client,
     ) -> AppResult<Option<Self>> {
-        let resp = http
-            .post(format!("{base}/accounts/ClientLogin"))
-            .form(&[
+        let resp =
+            crate::sync_http::send(http.post(format!("{base}/accounts/ClientLogin")).form(&[
                 ("Email", username),
                 ("Passwd", password),
                 ("output", "json"),
-            ])
-            .send()
+            ]))
             .await?;
         let status = resp.status().as_u16();
 
@@ -482,12 +480,12 @@ impl GReaderClient {
 
     /// GET 请求（带 `Authorization: GoogleLogin auth=<token>`）。
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> AppResult<T> {
-        let resp = self
-            .http
-            .get(self.url(path))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
-            .send()
-            .await?;
+        let resp = crate::sync_http::send(
+            self.http
+                .get(self.url(path))
+                .header("Authorization", format!("GoogleLogin auth={}", self.token)),
+        )
+        .await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             return Err(AppError::network(format!("GET {path} → {}", resp.status()))
@@ -515,13 +513,21 @@ impl GReaderClient {
     }
 
     async fn fetch_action_token(&self) -> AppResult<String> {
-        let resp = self
-            .http
-            .get(self.url("/reader/api/0/token"))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("获取 action token 失败：网络错误（{e}）")))?;
+        let resp = crate::sync_http::send(
+            self.http
+                .get(self.url("/reader/api/0/token"))
+                .header("Authorization", format!("GoogleLogin auth={}", self.token)),
+        )
+        .await
+        .map_err(|mut error| {
+            let kind = if error.code == "network" {
+                "网络错误："
+            } else {
+                ""
+            };
+            error.message = format!("获取 action token 失败：{kind}{}", error.message);
+            error
+        })?;
         let status = resp.status().as_u16();
         if status == 404 {
             // 兼容无 /token 的实现：明确 404 才回退到登录 auth（见方法注释的边界说明）。
@@ -564,13 +570,13 @@ impl GReaderClient {
         let token = self.action_token().await?.to_string();
         let mut params: Vec<(&str, String)> = vec![("T", token)];
         params.extend_from_slice(form);
-        self.http
-            .post(self.url(path))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("POST {path} 网络失败（{e}）")))
+        crate::sync_http::send(
+            self.http
+                .post(self.url(path))
+                .header("Authorization", format!("GoogleLogin auth={}", self.token))
+                .form(&params),
+        )
+        .await
     }
 
     async fn post_with_action_token(

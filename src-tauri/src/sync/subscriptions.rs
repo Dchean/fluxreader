@@ -1458,7 +1458,26 @@ pub(super) async fn pull_feeds(
         // setting 原值保留（修复后下一轮自然重试）；绝不能把「未知」当「空表」
         // 放行导入（会复活用户已删除的订阅）。
         let remote_urls: Vec<String> = remote_subs.iter().map(|rf| rf.url.clone()).collect();
-        let tombstones_known = match db::prune_feed_tombstones(&conn, &remote_urls) {
+        let tombstones_known = match (|| -> AppResult<()> {
+            let mut tombstone_urls = remote_urls.clone();
+            let remote_ids: std::collections::HashSet<i64> = remote_subs
+                .iter()
+                .filter_map(|rf| greader::parse_feed_numeric_id(&rf.id))
+                .collect();
+            // A stable remote ID still present under a changed URL has not confirmed deletion.
+            // Keep the old local URL tombstone until that identity is actually absent.
+            let mut stmt = conn.prepare(
+                "SELECT remote_id,feed_url FROM feeds WHERE active=0 AND remote_id IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (remote_id, url) = row?;
+                if remote_ids.contains(&remote_id) {
+                    tombstone_urls.push(url);
+                }
+            }
+            db::prune_feed_tombstones(&conn, &tombstone_urls)
+        })() {
             Ok(()) => true,
             Err(e) => {
                 report.errors.push(format!(
@@ -1638,7 +1657,7 @@ pub(super) async fn pull_feeds(
         // 查询失败不阻塞本轮（订阅层是尽力而为）：记错误并跳过删除段
         let candidates: Vec<(i64, String, i64)> = match conn
             .prepare(
-                "SELECT id, feed_url, remote_id FROM feeds WHERE origin = 'remote' AND remote_id IS NOT NULL",
+                "SELECT id, feed_url, remote_id FROM feeds WHERE active = 1 AND origin = 'remote' AND remote_id IS NOT NULL",
             )
             .and_then(|mut stmt| {
                 let rows =

@@ -408,7 +408,7 @@ async fn malformed_contents_body_is_verification_failure() {
 }
 
 #[tokio::test]
-async fn broadcast_primary_confirmed_sibling_missing_settles_with_partial_warning() {
+async fn exact_target_ack_is_independent_of_missing_cross_source_entry() {
     let server = MockGReader::start().await.expect("start mock");
     let shared_url = "https://ack.example/shared";
     let primary = server.add_entry_ret(10, shared_url, "primary", false, false);
@@ -448,11 +448,11 @@ async fn broadcast_primary_confirmed_sibling_missing_settles_with_partial_warnin
         .await
         .expect("states phase");
     assert!(
-        report
+        !report
             .errors
             .iter()
-            .any(|e| e.contains("partial") && e.contains("广播副本")),
-        "主目标确认后，缺失副本应作为 partial warning 可见：{:?}",
+            .any(|e| e.contains("广播副本") || e.contains("partial")),
+        "其他源缺失不影响当前精确目标ACK: {:?}",
         report.errors
     );
 
@@ -480,6 +480,18 @@ async fn unbound_queue_item_is_pushed_after_pull_binding_in_same_states_round() 
         let conn = db.lock().await;
         let aid =
             seed_unbound_article(&conn, "https://ack.example/pull-bind-feed", article_url, 10);
+        conn.execute("UPDATE articles SET title='pull-bind' WHERE id=?1", [aid])
+            .unwrap();
+        db::backfill_article_content(
+            &conn,
+            aid,
+            "<p>Mock fetched content</p>",
+            "Mock fetched content",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         db::set_read_with_enqueue(&conn, aid, true).unwrap();
         let (status, _class, _last_error) = queue_row(&conn).expect("queued before pull");
         assert_eq!(status, "bindable_retry", "首轮推送前身份应未绑定");

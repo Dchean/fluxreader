@@ -8,7 +8,7 @@
 use crate::db;
 use crate::error::AppResult;
 use crate::state::AppState;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 /* ============================================================
 模块根共享项
@@ -24,44 +24,113 @@ pub(crate) fn read_dedup_flag(conn: &rusqlite::Connection) -> bool {
 /* ============================================================
 即时状态推送调度（防抖合批）
 set_read/set_starred/mark_all_read 入队后调 schedule_state_push：
-- AtomicBool 防重入：已有一个推送任务在飞时只标记"再来一轮"
+- 每库有界邮箱与单消费者，空闲等待仍可收到下一操作
 - 800ms 防抖：快速滚动批量标读只发一次 PUT
-- 失败静默（队列保留）→ 下次变更或下轮同步自动重推
+- 失败保留队列，5秒至5分钟指数退避重试；服务端Retry-After另设请求冷却
 ============================================================ */
 
-static STATE_PUSH_FLYING: AtomicBool = AtomicBool::new(false);
-static STATE_PUSH_PENDING: AtomicBool = AtomicBool::new(false);
+type StatePushRegistry = std::collections::HashMap<
+    usize,
+    (
+        std::sync::Weak<tokio::sync::Mutex<rusqlite::Connection>>,
+        tokio::sync::mpsc::Sender<()>,
+    ),
+>;
+static STATE_PUSH_WORKERS: OnceLock<StdMutex<StatePushRegistry>> = OnceLock::new();
 const STATE_PUSH_DEBOUNCE_MS: u64 = 800;
 
-pub(crate) fn schedule_state_push(state: &AppState) {
-    STATE_PUSH_PENDING.store(true, Ordering::SeqCst);
-    if STATE_PUSH_FLYING.swap(true, Ordering::SeqCst) {
-        return; // 已有任务在飞：它收尾时会看到 PENDING 再跑一轮
-    }
-    let db = state.db.clone();
-    let http = state.http.clone();
-    tauri::async_runtime::spawn(async move {
-        // Drop 守卫：循环任何出口（含 push_states_now 内部未来可能出现的
-        // panic 展开）都复位 FLYING——否则一次 panic 后推送永久静默
-        struct FlyingGuard;
-        impl Drop for FlyingGuard {
-            fn drop(&mut self) {
-                STATE_PUSH_FLYING.store(false, Ordering::SeqCst);
+struct StatePushRegistration {
+    key: usize,
+    sender: tokio::sync::mpsc::Sender<()>,
+}
+
+impl Drop for StatePushRegistration {
+    fn drop(&mut self) {
+        if let Some(registry) = STATE_PUSH_WORKERS.get() {
+            let mut workers = registry.lock().unwrap_or_else(|e| e.into_inner());
+            // tokio 1.54.1 Sender::same_channel distinguishes a replacement worker.
+            if workers
+                .get(&self.key)
+                .is_some_and(|(_, tx)| tx.same_channel(&self.sender))
+            {
+                workers.remove(&self.key);
             }
         }
-        let _guard = FlyingGuard;
+    }
+}
+
+/// One persistent bounded mailbox per database. The receiver remains alive while idle,
+/// so there is no "decided to exit / clear flying" handoff window.
+#[doc(hidden)]
+pub fn schedule_state_push_for_db(
+    database: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+) {
+    let key = Arc::as_ptr(database) as usize;
+    let mut workers = STATE_PUSH_WORKERS
+        .get_or_init(|| StdMutex::new(Default::default()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    workers.retain(|_, (db, tx)| db.strong_count() > 0 && !tx.is_closed());
+    if let Some((_, sender)) = workers.get(&key) {
+        let _ = sender.try_send(());
+        return;
+    }
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let db = Arc::downgrade(database);
+    let runtime = crate::sync::runtime::for_db(database);
+    let http = http.clone();
+    workers.insert(key, (db.clone(), sender.clone()));
+    let _ = sender.try_send(());
+    tauri::async_runtime::spawn(async move {
+        let _registration = StatePushRegistration { key, sender };
+        let mut retry_delay = std::time::Duration::from_secs(5);
+        let mut retry = false;
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(STATE_PUSH_DEBOUNCE_MS)).await;
-            if !STATE_PUSH_PENDING.swap(false, Ordering::SeqCst) {
-                break;
+            if retry {
+                tokio::select! {
+                    _=runtime.wait_for_stop()=>return,
+                    message=receiver.recv()=>if message.is_none(){return;},
+                    _=tokio::time::sleep(retry_delay)=>{},
+                }
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(300));
+            } else {
+                tokio::select! {
+                    _=runtime.wait_for_stop()=>return,
+                    message=receiver.recv()=>if message.is_none(){return;},
+                    _=tokio::time::sleep(std::time::Duration::from_secs(30))=>{
+                        if db.strong_count()==0{return;} else {continue;}
+                    },
+                }
             }
-            crate::sync::push_states_now(&db, &http).await;
-            // push 期间又入队 → 继续循环；否则退出并放行下一个调度
-            if !STATE_PUSH_PENDING.load(Ordering::SeqCst) {
-                break;
+            tokio::select! {
+                _=runtime.wait_for_stop()=>return,
+                _=tokio::time::sleep(std::time::Duration::from_millis(STATE_PUSH_DEBOUNCE_MS))=>{},
+            }
+            while receiver.try_recv().is_ok() {}
+            let Some(database) = db.upgrade() else {
+                return;
+            };
+            crate::sync::push_states_now(&database, &http).await;
+            retry = {
+                let conn = database.lock().await;
+                match (
+                    crate::sync::current_account(&conn),
+                    db::sync_queue_stats(&conn),
+                ) {
+                    (Ok(Some(_)), Ok(stats)) => stats.waiting > 0,
+                    _ => false,
+                }
+            };
+            if !retry {
+                retry_delay = std::time::Duration::from_secs(5);
             }
         }
     });
+}
+
+pub(crate) fn schedule_state_push(state: &AppState) {
+    schedule_state_push_for_db(&state.db, &state.http);
 }
 
 /// 后端同步凭据是否已配置（folders/articles/sync 三处共用，故留在模块根）。

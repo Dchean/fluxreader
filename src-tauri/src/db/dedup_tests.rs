@@ -8,7 +8,7 @@ fn new_article(url: &str, guid: &str) -> NewArticle {
         author: None,
         summary: None,
         content_html: None,
-        body_text: "b".into(),
+        body_text: format!("body-{guid}"),
         image_url: None,
         enclosure_url: None,
         enclosure_mime: None,
@@ -91,8 +91,8 @@ fn smart_dedup_no_longer_drops_cross_feed_identity() {
         false,
     )
     .unwrap();
-    assert_eq!(same1, id1, "同源同 URL 是同一行");
-    assert!(!new4, "同源重放不新增行");
+    assert_ne!(same1, id1, "不同真实GUID保留独立身份");
+    assert!(new4, "不同真实GUID独立入库");
 
     // 开关值不再改变入库结果：同源同 URL（即使新 guid）仍是源内同一行——
     // 「同一订阅源内 URL 稳定」是身份规则，与智能去重开关无关。
@@ -103,8 +103,8 @@ fn smart_dedup_no_longer_drops_cross_feed_identity() {
         false,
     )
     .unwrap();
-    assert_eq!(again2, id2, "同源同 URL 始终命中同一行（稳定身份）");
-    assert!(!new5);
+    assert_ne!(again2, id2, "URL不能覆盖不同真实GUID");
+    assert!(new5);
 
     let _ = (f1, f2);
 }
@@ -136,9 +136,9 @@ fn conservative_url_rules_keep_true_dedup_and_separate_business_params() {
     let (_, n1) = up("https://n.example/post", "g1");
     assert!(n1);
     let (_, n2) = up("https://n.example/post?utm_source=rss&fbclid=abc", "g2");
-    assert!(!n2, "utm/fbclid 变体必须仍被去重");
+    assert!(n2, "不同真实GUID不因URL归一吞身份");
     let (_, n3) = up("https://n.example/post?mc_cid=1", "g3");
-    assert!(!n3, "mc_cid 变体必须仍被去重");
+    assert!(n3, "不同真实GUID不因URL归一吞身份");
 
     // 论坛主题号（F12 核心反例）：t=123 与 t=456 必须分别入库
     let (_, n4) = up("https://forum.example/viewtopic.php?t=123", "g4");
@@ -163,7 +163,7 @@ fn conservative_url_rules_keep_true_dedup_and_separate_business_params() {
     let (_, n12) = up("https://x.com/u/status/123", "g12");
     assert!(n12);
     let (_, n13) = up("https://x.com/u/status/123?s=20&t=abc", "g13");
-    assert!(!n13, "X 状态页的 t/s 变体必须仍被去重");
+    assert!(n13, "URL规范化不能替代真实GUID");
 
     // 伪域名不具备 X 状态页例外
     let (_, n14) = up("https://x.com.evil/u/status/123", "g14");
@@ -600,8 +600,8 @@ fn display_dedup_is_per_scope_and_source_reachable() {
 
     // 全部 × article 布局：U1{U1@f1 最小}=代表 X1；U2、U3 各一行 → 3
     let all_article = ids_of(conn, &dq(None, None, false, Some("article")));
-    assert_eq!(all_article.len(), 3, "跨源同 URL 在全部视图折叠为 1");
-    assert!(all_article.contains(&fx.x1) && !all_article.contains(&fx.x2));
+    assert_eq!(all_article.len(), 4, "跨源同URL仍各自可见");
+    assert!(all_article.contains(&fx.x1) && all_article.contains(&fx.x2));
 
     // 单源 f2：自己的 U1 副本（X2）必须可达（旧全局去重会吞掉它）
     let f2_article = ids_of(conn, &dq(Some(fx.f2), None, false, Some("article")));
@@ -695,18 +695,11 @@ fn display_dedup_counts_and_mark_all_share_one_set() {
 
     let marked =
         mark_all_read_with_enqueue(conn, None, None, false, None, Some("article")).unwrap();
-    assert_eq!(
-        marked, 4,
-        "标读数量 = 目标集合内真实改变行数（X2/Y1/Z1 范围未读 + S1 同组跨 scope 广播）"
-    );
+    assert_eq!(marked, 3, "标读仅限目标源范围，不跨源广播");
     assert_eq!(row_at(conn, fx.x2).1, 1, "范围未读副本被标读");
     assert_eq!(row_at(conn, fx.y1).1, 1);
     assert_eq!(row_at(conn, fx.z1).1, 1);
-    assert_eq!(
-        row_at(conn, fx.s1).1,
-        1,
-        "同组跨 scope 兄弟按 read 广播政策一并标读（不依赖远端收敛）"
-    );
+    assert_eq!(row_at(conn, fx.s1).1, 0, "另一源保持未读");
     // 入队集合 = 标读集合（键集一致）
     let queued = {
         let mut stmt = conn
@@ -719,7 +712,7 @@ fn display_dedup_counts_and_mark_all_share_one_set() {
             .unwrap();
         rows
     };
-    let mut want = vec![fx.x2, fx.y1, fx.z1, fx.s1];
+    let mut want = vec![fx.x2, fx.y1, fx.z1];
     want.sort_unstable();
     assert_eq!(queued, want, "入队集合 == 标读集合 == 读目标集合");
     assert!(
@@ -735,8 +728,8 @@ fn display_dedup_counts_and_mark_all_share_one_set() {
     assert_eq!(pos_y1, Some(1), "显示集合内位置 == 列表位置");
     assert_eq!(
         article_index(conn, &all_article, fx.x2).unwrap(),
-        None,
-        "被折叠副本在全部 scope 无位置（锚定不会指向不可见行）"
+        Some(2),
+        "跨源副本在全部scope各自可见可锚定"
     );
     let f2_scope = dq(Some(fx.f2), None, false, Some("article"));
     assert_eq!(
@@ -747,7 +740,7 @@ fn display_dedup_counts_and_mark_all_share_one_set() {
 
     // 搜索与显示集合同口径（全局 scope）：开 1 条、关 3 条（含 social 副本）
     let on = search_articles(conn, "同一篇", 50).unwrap();
-    assert_eq!(on.len(), 1, "搜索折叠到全局代表");
+    assert_eq!(on.len(), 3, "不同源搜索各自独立");
     set_smart_dedup(conn, false);
     let off = search_articles(conn, "同一篇", 50).unwrap();
     assert_eq!(off.len(), 3, "关闭后搜索逐行可见");
@@ -829,15 +822,18 @@ fn display_dedup_search_representative_within_match_set() {
 
     // 共同词都命中：在匹配集合内折叠到最小 id = A
     let r = search_articles(&conn, "shared-word", 50).unwrap();
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0].id, a, "都命中时按匹配集合最小 id 折叠");
+    assert_eq!(r.len(), 2);
+    assert!(
+        r.iter().any(|r| r.id == a) && r.iter().any(|r| r.id == b),
+        "跨源搜索不能折叠"
+    );
 
     // 命中行可真实打开/定位：A 在当前列表 scope（全部 × article）有位置
     let q = dq(None, None, false, Some("article"));
     assert_eq!(
         article_index(&conn, &q, a).unwrap(),
-        Some(0),
-        "搜索代表在列表 scope 可锚定（打开路径可用）"
+        Some(1),
+        "较早条目在独立列表第二位可锚定"
     );
 
     // 关闭开关：逐行可见，B 也可被安全打开
@@ -1240,8 +1236,24 @@ fn feed_scope_dedup_counts_match_row_level_reference() {
             ],
         )
         .unwrap();
+        let aid = conn.last_insert_rowid();
+        if let Some(norm) = norm {
+            let input = super::contents::ContentInput {
+                content_html: None,
+                body_text: norm.to_string(),
+                extraction_source: "rss".into(),
+                fulltext_extracted: false,
+                url_norm: None,
+            };
+            let (cid, _, _) = super::contents::ensure_content(&conn, &input, Some(aid)).unwrap();
+            conn.execute(
+                "UPDATE articles SET content_id=?1,rss_content_id=?1 WHERE id=?2",
+                rusqlite::params![cid, aid],
+            )
+            .unwrap();
+        }
         rows.push((
-            conn.last_insert_rowid(),
+            aid,
             *fi,
             norm.map(str::to_string),
             *read != 0,
@@ -1263,9 +1275,9 @@ fn feed_scope_dedup_counts_match_row_level_reference() {
             .filter(|r| {
                 view(r)
                     && r.2.as_ref().map_or(true, |n| {
-                        !in_scope
-                            .iter()
-                            .any(|o| o.0 < r.0 && o.2.as_deref() == Some(n.as_str()) && view(o))
+                        !in_scope.iter().any(|o| {
+                            o.0 < r.0 && o.1 == r.1 && o.2.as_deref() == Some(n.as_str()) && view(o)
+                        })
                     })
             })
             .count() as i64

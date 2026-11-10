@@ -38,7 +38,9 @@ fn item_feed_remote_id(e: &ItemContent) -> Option<i64> {
 fn unbound_page_feeds(page: &[ItemContent], maps: &db::SyncMatchMaps) -> BTreeSet<i64> {
     page.iter()
         .filter_map(item_feed_remote_id)
-        .filter(|feed_id| !maps.feed_mf_to_id.contains_key(feed_id))
+        .filter(|feed_id| {
+            !maps.feed_mf_to_id.contains_key(feed_id) && !maps.excluded_feed_ids.contains(feed_id)
+        })
         .collect()
 }
 
@@ -876,29 +878,23 @@ fn reconcile_fever_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
+        if !maps.article_source_is_current(conn, aid)? {
+            continue;
+        }
         // OPT-007：字段版本快照（pull 起点；缺失按 (0,0) 保守处理）——
         // 任务卡负例①② 的 Fever 侧对称锁定。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
         // TASK-112 政策（FEVER_READ_DIRECTION = UnreadSetBidirectional 双向权威）：
         // unread 集合权威——命中 → 本地未读（可复活未读）；未命中 → 本地已读。
-        // N4（R2 裁定）：**本轮已有已读信号（own 或跨副本广播）落定的行，轮终
-        // 权威对账不得立刻撤销同一广播**——仅在"把本地已读翻回未读"这一方向让位；
-        // 无本轮读信号时双向权威照旧（历史本地已读不永久阻挡之后的远端显式 unread；
-        // 下一轮 explicit_read_ids 已清空，unread 正常生效，pending/版本守卫优先）。
-        let same_round_read_signal = maps.explicit_read_ids.contains(&aid);
         let remote_read = !unread_set.contains(remote_id);
-        let read_rows = if same_round_read_signal && !remote_read {
-            0
-        } else {
-            conflict_policy::apply_read_by_policy(
-                conn,
-                conflict_policy::FEVER_READ_DIRECTION,
-                remote_read,
-                aid,
-                snap_read,
-                maps.pending_read_ids.contains(&aid),
-            )?
-        };
+        let read_rows = conflict_policy::apply_read_by_policy(
+            conn,
+            conflict_policy::FEVER_READ_DIRECTION,
+            remote_read,
+            aid,
+            snap_read,
+            maps.pending_read_ids.contains(&aid),
+        )?;
         // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
         let star_rows = conflict_policy::apply_star_by_policy(
@@ -985,11 +981,9 @@ mod tests {
     /// 字段版本快照）。`pending=true` 表示**读/藏两字段都有**未推送意图（逐字段
     /// 判定的旧口径对照）；版本快照取 (0,0) = 与夹具行（raw SQL 写入、版本 0）
     /// 相等，即「拉取期间无本地写入」的默认起点。
-    fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
+    fn maps_for(conn: &Connection, remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
-            url_to_id: Default::default(),
-            feed_url_to_id: Default::default(),
-            url_norm_to_ids: Default::default(),
+            source_versions: db::sync_match_maps(conn).unwrap().source_versions,
             id_to_mf_id: Default::default(),
             id_to_feed_mf: Default::default(),
             pending_ids: if pending {
@@ -1007,9 +1001,9 @@ mod tests {
             } else {
                 Default::default()
             },
-            explicit_read_ids: Default::default(),
             id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
+            excluded_feed_ids: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
         }
     }
@@ -1043,7 +1037,14 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        reconcile_fever_state(&conn, &[201], &[], &maps_for(201, aid, false), &mut report).unwrap();
+        reconcile_fever_state(
+            &conn,
+            &[201],
+            &[],
+            &maps_for(&conn, 201, aid, false),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(
             !is_read(&conn, aid),
@@ -1060,7 +1061,14 @@ mod tests {
         let aid = seed_bound(&conn, 202);
 
         let mut report = SyncReport::default();
-        reconcile_fever_state(&conn, &[], &[], &maps_for(202, aid, false), &mut report).unwrap();
+        reconcile_fever_state(
+            &conn,
+            &[],
+            &[],
+            &maps_for(&conn, 202, aid, false),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(is_read(&conn, aid), "unread 未命中必须落地本地已读");
         assert_eq!(report.merged_states, 1, "未命中侧恰好一次状态写入");
@@ -1082,7 +1090,7 @@ mod tests {
         // saved 集合只含 204：203 未命中（远端已取消收藏），204 命中。
         let maps = db::SyncMatchMaps {
             mf_id_to_article: [(203, starred), (204, unstarred)].into_iter().collect(),
-            ..maps_for(203, starred, false)
+            ..maps_for(&conn, 203, starred, false)
         };
         reconcile_fever_state(&conn, &[203, 204], &[204], &maps, &mut report).unwrap();
 
@@ -1116,7 +1124,14 @@ mod tests {
 
         let mut report = SyncReport::default();
         // 远端快照：unread 命中 + saved 未命中——若无 pending 保护会同时翻转两列。
-        reconcile_fever_state(&conn, &[205], &[], &maps_for(205, aid, true), &mut report).unwrap();
+        reconcile_fever_state(
+            &conn,
+            &[205],
+            &[],
+            &maps_for(&conn, 205, aid, true),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(
             is_read(&conn, aid),
@@ -1139,7 +1154,7 @@ mod tests {
         let conn = conn();
         let aid = seed_bound(&conn, 206);
         db::set_read(&conn, aid, true).unwrap(); // 本地标读：read_version 0→1
-        let mut maps = maps_for(206, aid, false);
+        let mut maps = maps_for(&conn, 206, aid, false);
         maps.id_to_versions.insert(aid, (0, 0)); // pull 起点快照早于该本地写入
 
         let mut report = SyncReport::default();
@@ -1288,5 +1303,44 @@ mod tests {
             vec![102, 103],
             "取补集后：无正文 102 与未绑定 103 仍回补，已有正文 101 被排除"
         );
+    }
+    #[test]
+    fn authority_rejects_retired_and_reactivated_source_snapshots() {
+        for reactivate in [false, true] {
+            let conn = conn();
+            let aid = seed_bound(&conn, 907);
+            db::set_starred(&conn, aid, true).unwrap();
+            let maps = db::sync_match_maps(&conn).unwrap();
+            let (feed, folder): (i64, i64) = conn.query_row(
+                "SELECT f.id,f.folder_id FROM feeds f JOIN articles a ON a.feed_id=f.id WHERE a.id=?1",
+                [aid], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+            db::delete_feed(&conn, feed).unwrap();
+            if reactivate {
+                assert_eq!(
+                    db::insert_feed(
+                        &conn,
+                        "https://f.example/907.rss",
+                        None,
+                        "F",
+                        None,
+                        folder,
+                        "inherit",
+                        false,
+                        false
+                    )
+                    .unwrap(),
+                    feed
+                );
+            }
+            let mut rebuilt = db::sync_match_maps(&conn).unwrap();
+            // Preserve the old entry map too, exercising both commit rejection and snapshot rebuild.
+            rebuilt.mf_id_to_article = maps.mf_id_to_article.clone();
+            rebuilt.keep_field_versions_from(&maps);
+            let mut report = SyncReport::default();
+            reconcile_fever_state(&conn, &[], &[], &rebuilt, &mut report).unwrap();
+            assert!(is_starred(&conn, aid));
+            assert!(!is_read(&conn, aid));
+            assert_eq!(report.merged_states, 0);
+        }
     }
 }

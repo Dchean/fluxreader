@@ -104,6 +104,7 @@ dependencies = [
  "log",
  "md-5",
  "opml",
+ "quick-xml",
  "reqwest 0.12.28",
  "rusqlite",
  "rusqlite_migration",

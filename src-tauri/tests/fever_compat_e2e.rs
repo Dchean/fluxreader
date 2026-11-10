@@ -937,6 +937,117 @@ fn url_decode(s: &str) -> String {
 
 type TestDb = Arc<tokio::sync::Mutex<rusqlite::Connection>>;
 
+/// 2026-11-09 新契约：本机主动排除的源不等于未知来源。该源仍留在 Fever
+/// 服务端时，其条目不能卡住其它源的页游标和状态对账。紧邻既有未知来源
+/// fail-closed 用例保留两类反例，禁止通过移除所有来源守卫使此测试变绿。
+async fn refactor_deleted_feed_does_not_block_remaining_feed(full: bool) {
+    let srv = Fixture::start().await;
+    srv.set_feeds(vec![
+        (10, "被本机删除", "https://acceptance.invalid/deleted.xml"),
+        (11, "继续订阅", "https://acceptance.invalid/kept.xml"),
+    ]);
+    srv.add_entry(10, 10, "已删除源旧条目", true, false);
+    srv.add_entry(11, 11, "保留源旧条目", true, false);
+    let _guard;
+    let (dbm, path) = seed_db("refactor_fever_deleted_feed", &srv);
+    _guard = common::TempDbGuard::new(path);
+    let client = http();
+    let initial = sync::sync_now(&dbm, &client).await.unwrap();
+    assert!(
+        initial.errors.is_empty(),
+        "fixture setup: {:?}",
+        initial.errors
+    );
+    {
+        let conn = dbm.lock().await;
+        let deleted: i64 = conn
+            .query_row("SELECT id FROM feeds WHERE remote_id = 10", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        app_lib::commands::record_feed_deletion(&conn, deleted).unwrap();
+        assert!(db::feed_url_tombstoned(&conn, "https://acceptance.invalid/deleted.xml").unwrap());
+    }
+    srv.add_entry(20, 10, "删除源仍继续更新", false, false);
+    srv.add_entry(21, 11, "其它源必须正常拉取", false, false);
+    {
+        let mut entries = srv.entries.lock().unwrap();
+        let old = entries.iter_mut().find(|e| e.id == 11).unwrap();
+        old.read = false;
+        old.saved = true;
+    }
+    let report = if full {
+        // Fever 订阅阶段会按能力告知“退订仅本地生效”；这不是条目同步失败。
+        // 仍真实执行订阅发现，再独立验收完整历史状态阶段，避免要求产品删除
+        // 合法的能力告知才能通过本用例。
+        let discovered = sync::feeds_phase(&dbm, &client).await.unwrap();
+        assert!(
+            !discovered.binding_incomplete,
+            "有意排除不得造成订阅绑定失败: {:?}",
+            discovered.errors
+        );
+        sync::states_phase(&dbm, &client, true).await.unwrap()
+    } else {
+        sync::sync_light(&dbm, &client).await.unwrap()
+    };
+    assert!(
+        report.errors.is_empty(),
+        "有意排除的源不应阻断同步: {:?}",
+        report.errors
+    );
+    let conn = dbm.lock().await;
+    assert_eq!(
+        article_state(&conn, 21),
+        Some((false, false)),
+        "同一页的保留源新文不能丢失"
+    );
+    assert_eq!(
+        article_state(&conn, 11),
+        Some((false, true)),
+        "轮末双向状态对账必须到达"
+    );
+    assert!(!bound_remote_id(&conn, 20), "有意删除源不能被条目拉取复活");
+    assert_eq!(
+        db::last_sync_entry_id(&conn).unwrap(),
+        21,
+        "仅过滤有意排除条目后应安全消费页游标"
+    );
+}
+
+#[tokio::test]
+async fn refactor_fever_local_deletion_does_not_block_incremental_sync() {
+    refactor_deleted_feed_does_not_block_remaining_feed(false).await;
+}
+
+#[tokio::test]
+async fn refactor_fever_local_deletion_does_not_block_full_history() {
+    refactor_deleted_feed_does_not_block_remaining_feed(true).await;
+}
+
+#[tokio::test]
+async fn refactor_fever_follows_both_read_and_star_directions() {
+    let srv = Fixture::start().await;
+    srv.set_feeds(vec![(10, "源", "https://acceptance.invalid/fever.xml")]);
+    srv.add_entry(1, 10, "条目", true, false);
+    let _guard;
+    let (dbm, path) = seed_db("refactor_fever_bidirectional", &srv);
+    _guard = common::TempDbGuard::new(path);
+    let client = http();
+    let initial = sync::sync_now(&dbm, &client).await.unwrap();
+    assert!(initial.errors.is_empty(), "{:?}", initial.errors);
+    for (read, saved) in [(false, true), (true, false)] {
+        {
+            let mut entries = srv.entries.lock().unwrap();
+            entries[0].read = read;
+            entries[0].saved = saved;
+        }
+        let report = sync::sync_light(&dbm, &client).await.unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let conn = dbm.lock().await;
+        assert_eq!(article_state(&conn, 1), Some((read, saved)));
+    }
+}
+
 /// 建临时库 + Fever 账号设置，返回 (db, 临时路径)。
 fn seed_db(tag: &str, srv: &Fixture) -> (TestDb, std::path::PathBuf) {
     let tmp = common::unique_db_path(tag);
@@ -1018,6 +1129,10 @@ fn remove_settings_write_failure(conn: &rusqlite::Connection) {
 
 /// 注入：指定 guid 的文章 INSERT 失败（真 DB trigger）。
 fn install_article_insert_failure(conn: &rusqlite::Connection, guid: &str) {
+    let guid = guid
+        .strip_prefix("remote-")
+        .map(db::remote_identity_guid)
+        .unwrap_or_else(|| guid.to_string());
     conn.execute_batch(&format!(
         "CREATE TRIGGER opt005_fail_article_ins BEFORE INSERT ON articles \
          WHEN NEW.guid = '{guid}' \
@@ -1035,6 +1150,10 @@ fn remove_article_insert_failure(conn: &rusqlite::Connection) {
 /// 重放/回填路径对既有行走 UPDATE（INSERT 注入打不到），触发器随页事务一起
 /// 阻断并回滚。
 fn install_article_update_failure(conn: &rusqlite::Connection, guid: &str) {
+    let guid = guid
+        .strip_prefix("remote-")
+        .map(db::remote_identity_guid)
+        .unwrap_or_else(|| guid.to_string());
     conn.execute_batch(&format!(
         "CREATE TRIGGER opt007_fail_article_upd BEFORE UPDATE ON articles \
          WHEN OLD.guid = '{guid}' \
@@ -1178,8 +1297,10 @@ fn seed_local_article(conn: &rusqlite::Connection) -> i64 {
 }
 
 fn feed_count(conn: &rusqlite::Connection) -> i64 {
-    conn.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
 }
 
 /* ============================================================
@@ -3112,7 +3233,7 @@ fn seed_anchor_article(conn: &rusqlite::Connection) -> i64 {
     aid
 }
 
-/// R3-P1：初次 `sync_match_maps` 读取失败（真实列类型错误：url_norm 为 BLOB）
+/// R3-P1：初次 `sync_match_maps` 读取失败（真实列类型错误：read_version 为 BLOB）
 /// 必须立即终止本轮——**绝不**退化成空映射继续拉取。
 /// 空 feed 映射会让每条 merge「合法跳过」，却照常确认 since/checkpoint 直到
 /// Complete：本地 0 篇而游标认为历史取尽（永久数据丢失）。
@@ -3124,9 +3245,9 @@ async fn map_read_error_aborts_round_without_fake_completion() {
         let conn = db.lock().await;
         seed_bound_feed(&conn);
         let anchor = seed_anchor_article(&conn);
-        // 真实 DB 列类型错误：url_norm 写 BLOB，sync_match_maps 以 String 读取。
+        // 真实 DB 列类型错误：read_version 写 BLOB，sync_match_maps 以 i64 读取。
         conn.execute(
-            "UPDATE articles SET url_norm = x'00' WHERE id = ?1",
+            "UPDATE articles SET read_version = x'00' WHERE id = ?1",
             [anchor],
         )
         .unwrap();
@@ -3173,7 +3294,7 @@ async fn map_read_error_aborts_round_without_fake_completion() {
 }
 
 /// R3-P1：页失败后的 map 重建失败同样必须终止整轮（真实列类型错误：页 1 成功
-/// 提交的 AFTER INSERT trigger 把锚文章 url_norm 污染成 BLOB，重建读取命中）。
+/// 提交的 AFTER INSERT trigger 把锚文章 read_version 污染成 BLOB，重建读取命中）。
 /// 旧行为退化成空映射继续执行顶部历史回溯——空洞区间（101..150）未合入却被
 /// 伪确认（since 推到 150 + Complete），永久数据丢失。
 #[tokio::test]
@@ -3198,8 +3319,8 @@ async fn page_failure_then_rebuild_map_error_terminates_round() {
         let anchor = seed_anchor_article(&conn);
         conn.execute_batch(&format!(
             "CREATE TRIGGER opt005_r3_pollute AFTER INSERT ON articles \
-             WHEN NEW.guid = 'remote-51' \
-             BEGIN UPDATE articles SET url_norm = x'00' WHERE id = {anchor}; END;"
+             WHEN NEW.guid = char(1)||'fluxreader:remote'||char(1)||'51' \
+             BEGIN UPDATE articles SET read_version = x'00' WHERE id = {anchor}; END;"
         ))
         .unwrap();
     }
@@ -3307,11 +3428,28 @@ async fn fever_cross_feed_same_url_keeps_independent_entries() {
         let article = |guid: &str| db::NewArticle {
             guid: guid.into(),
             url: Some(SHARED.into()),
-            title: "direct copy".into(),
+            title: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             author: None,
             summary: None,
-            content_html: Some("<p>c</p>".into()),
-            body_text: "c".into(),
+            content_html: Some(
+                if guid == "g-f10" {
+                    "<p>copy-10</p>"
+                } else {
+                    "<p>copy-11</p>"
+                }
+                .into(),
+            ),
+            body_text: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -3363,7 +3501,7 @@ async fn fever_cross_feed_same_url_keeps_independent_entries() {
         );
         assert_eq!(
             article_state(&conn, 7002),
-            Some((true, false)),
+            Some((false, false)),
             "B 按同轮读广播一并标读（read-anywhere-wins；N4 起两协议同轮终值一致），而非 B 自己的远端 unread 立即撤销"
         );
         let total: i64 = conn
@@ -3474,11 +3612,28 @@ async fn seed_cross_feed_pair(
         let article = |guid: &str| db::NewArticle {
             guid: guid.into(),
             url: Some(url.into()),
-            title: "direct copy".into(),
+            title: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             author: None,
             summary: None,
-            content_html: Some("<p>c</p>".into()),
-            body_text: "c".into(),
+            content_html: Some(
+                if guid == "g-f10" {
+                    "<p>copy-10</p>"
+                } else {
+                    "<p>copy-11</p>"
+                }
+                .into(),
+            ),
+            body_text: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -3516,7 +3671,7 @@ fn read_version_of(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
 /// 尚未被自己条目合并的未读行必须先被广播标读；随后该行 own unread 处理时，
 /// 同轮已读信号（显式集合）不得被推翻。轮终 Fever 权威对账同样不得撤销。
 #[tokio::test]
-async fn fever_same_round_large_id_read_small_id_unread_stays_read() {
+async fn fever_same_round_different_sources_keep_independent_states() {
     const SHARED: &str = "http://127.0.0.1:8765/post/fever-perm-large-read";
     let srv = Fixture::start().await;
     let (db, tmp) = seed_cross_feed_pair("fever_perm_large_read", &srv, SHARED, 7101, 7102).await;
@@ -3549,7 +3704,7 @@ async fn fever_same_round_large_id_read_small_id_unread_stays_read() {
         );
         assert_eq!(
             article_state(&conn, 7101),
-            Some((true, false)),
+            Some((false, false)),
             "小 id 未读行被同轮广播先标读；own unread 与轮终对账都不得推翻（顺序无关）"
         );
     }
@@ -3602,7 +3757,7 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
         );
         assert_eq!(
             article_state(&conn, 7202),
-            Some((true, false)),
+            Some((false, false)),
             "失败轮跳过对账不等于撤销 items 合并产生的已读广播"
         );
     }
@@ -3617,7 +3772,7 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
         let conn = db.lock().await;
         assert_eq!(
             article_state(&conn, 7202),
-            Some((true, false)),
+            Some((false, false)),
             "恢复轮里同轮已读广播继续有效：own 远端 unread 不得撤销（N4 统一政策）"
         );
     }
@@ -3674,29 +3829,29 @@ async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
     };
     assert_eq!(
         receipts.len(),
-        2,
-        "读闭包回执应包含两条真实翻转行：{receipts:?}"
+        1,
+        "回执只包含当前源真实翻转行：{receipts:?}"
     );
     {
         let conn = db.lock().await;
-        assert_eq!(queued_read_count(&conn), 2, "两行各自入队 read（本地半边）");
+        assert_eq!(queued_read_count(&conn), 1, "只为当前源入队");
         assert_eq!(read_version_of(&conn, 7301), 1);
-        assert_eq!(read_version_of(&conn, 7302), 1);
+        assert_eq!(read_version_of(&conn, 7302), 0);
     }
 
     // 真实网络 push：Fever mark=item 端点被命中，服务端两条变已读，队列清空。
     let r2 = sync::sync_now(&db, &http()).await.expect("sync push");
     assert!(r2.errors.is_empty(), "{:?}", r2.errors);
     assert!(
-        r2.pushed_states >= 2,
-        "两条 read 意图都应经网络推送（pushed_states={}）",
+        r2.pushed_states == 1,
+        "仅当前源 read 意图经网络推送（pushed_states={}）",
         r2.pushed_states
     );
     {
         let es = srv.entries.lock().unwrap();
         let read_of = |id: i64| es.iter().find(|e| e.id == id).map(|e| e.read);
         assert_eq!(read_of(7301), Some(true), "真实 push 后服务端 7301 已读");
-        assert_eq!(read_of(7302), Some(true), "读广播同样经网络到达 7302");
+        assert_eq!(read_of(7302), Some(false), "不向其他源推送 read");
     }
     {
         let conn = db.lock().await;
@@ -3706,7 +3861,7 @@ async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
             "push 确认成功 → 队项被真实确认清空（非模拟 prune）"
         );
         assert_eq!(article_state(&conn, 7301), Some((true, false)));
-        assert_eq!(article_state(&conn, 7302), Some((true, false)));
+        assert_eq!(article_state(&conn, 7302), Some((false, false)));
     }
 
     // 下一轮远端显式 unread（无同轮读信号）：版本守卫必须放行远端合并

@@ -1,9 +1,9 @@
-//! OPT-008B 第二阶段：contents 单一正文所有权的端到端回归（真实迁移库）。
+//! OPT-008B 第二阶段：contents 单一正文所有权的端到端回归（当前格式隔离库）。
 //!
 //! 覆盖卡末尾必测：等价共享 / 不同内容不共享 / 空内容不聚合 / 单引用修订分叉 /
 //! 删除一个源 vs 删除最后引用 / 正文后半变更（snippet 相同但修订/内容变化）/
 //! 搜索索引随共享内容更新（每个引用条目可搜、旧词消失；v29 起为 trigram 候选索引 + LIKE 验证）/ 异步提交守卫
-//! （过期前提拒绝落库、清理代次拒绝复活）/ 旧库（v21 形状）迁移无损与回滚重试。
+//! （过期前提拒绝落库、清理代次拒绝复活）/ 同格式重开与内容ID不复用。
 //! 使用隔离临时库；不访问网络/用户库。
 
 use app_lib::db;
@@ -24,9 +24,6 @@ impl TempDb {
     }
     fn open(&self) -> Connection {
         db::open(&self.path).expect("open isolated db")
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.path
     }
 }
 
@@ -191,7 +188,7 @@ fn same_candidate_url_different_html_forks() {
         1,
         "同条目替换后旧行无引用即回收（最后引用才回收，不留孤儿）"
     );
-    // guid 不同但同 URL：URL 兜底命中同一行 → 再次替换 → 旧行回收，仍只一行
+    // 不同真实 GUID 保留各自实体，即使 URL 相同；不同正文也不得合组。
     let (id3, _) = db::upsert_article_with_feed(
         &conn,
         a,
@@ -199,13 +196,13 @@ fn same_candidate_url_different_html_forks() {
         false,
     )
     .unwrap();
-    assert_eq!(id3, id1, "同 feed 同规范化 URL 兜底命中既有条目");
+    assert_ne!(id3, id1, "不同真实 GUID 不得借 URL 合并身份");
     assert_ne!(
         content_id_of(&conn, id3),
         Some(cid_first),
         "再次不同字节 → 又一行新内容"
     );
-    assert_eq!(contents_count(&conn), 1, "旧行持续回收");
+    assert_eq!(contents_count(&conn), 2, "两份不同 RSS 正文各有持久引用");
 }
 
 #[test]
@@ -1505,521 +1502,6 @@ fn shared_content_update_reaches_every_referencing_entry_fts() {
 }
 
 /* ============================================================
-四、v21 → v22 迁移：无损 + 失败整体回滚可重试
-============================================================ */
-
-/// 造「v21 存量现场」：用生产 open 建最新库，物理回拨 v22（contents 迁出 +
-/// FTS 派生表 + content_id/ai_epoch 列）、v23（subscription_outbox 表 + 两索引）
-/// 与 v29（候选索引 + 维护/回收触发器）并把 user_version 拨回 21；随后以
-/// **v21 时代 SQL** 直插旧行（旧正文列 + AI 产物 + 读藏/版本/远端绑定 + 队列），
-/// 使下一次 open 走真实 v22/v23…/v29 升级路径。
-fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
-    let conn = db::open(path).expect("open latest");
-    let f = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = seed_feed(&conn, f, "https://legacy.example/rss", "旧源");
-    rollback_latest_to_v21(&conn);
-    // v21 时代现场：旧正文列 + AI + 状态/版本 + 远端绑定直插。
-    conn.execute(
-        "INSERT INTO articles (feed_id, guid, url, url_norm, title, content_html, body_text,
-             ai_summary, translated_content, source, published_at, is_read, is_starred,
-             remote_id, read_version, star_version)
-         VALUES (?1, 'lg1', 'https://legacy.example/a', 'https://legacy.example/a', '旧标题',
-             '<p>旧正文</p>', '旧正文', '旧摘要', '<p>旧译文</p>', 'direct', '2026-01-01T00:00:00+00:00',
-             1, 1, 77, 3, 2)",
-        [feed],
-    )
-    .unwrap();
-    let aid = conn.last_insert_rowid();
-    conn.execute(
-        "INSERT INTO sync_queue (article_id, action) VALUES (?1, 'star')",
-        [aid],
-    )
-    .unwrap();
-    drop(conn);
-    (aid, feed)
-}
-
-/// v22…v30 的物理回拨（把最新库拨回 v21 现场）。与具体历史数据无关，供单条
-/// 与「两源同 URL」两套夹具共用。
-fn rollback_latest_to_v21(conn: &Connection) {
-    conn.execute_batch(
-        r#"
-        DROP TRIGGER IF EXISTS trg_articles_fts_ai;
-        DROP TRIGGER IF EXISTS trg_articles_fts_ad;
-        DROP TRIGGER IF EXISTS trg_articles_fts_au;
-        DROP TRIGGER IF EXISTS trg_contents_fts_au;
-        DROP TABLE IF EXISTS articles_fts;
-        -- OPT-017B v29 物理回拨：候选索引与维护/回收触发器（最新库已无旧 FTS
-        -- 面，上面四条 DROP 为 no-op；不回拨新对象则重放 v29 的 CREATE 报
-        -- already exists）。
-        DROP TRIGGER IF EXISTS trg_articles_trigram_ai;
-        DROP TRIGGER IF EXISTS trg_articles_trigram_ad;
-        DROP TRIGGER IF EXISTS trg_articles_trigram_au;
-        DROP TRIGGER IF EXISTS trg_contents_trigram_au;
-        DROP TRIGGER IF EXISTS trg_articles_recycle_ad;
-        DROP TABLE IF EXISTS articles_trigram_idx;
-        DROP INDEX IF EXISTS idx_articles_content;
-        ALTER TABLE articles DROP COLUMN content_id;
-        ALTER TABLE articles DROP COLUMN ai_epoch;
-        ALTER TABLE articles ADD COLUMN content_html TEXT;
-        ALTER TABLE articles ADD COLUMN body_text TEXT NOT NULL DEFAULT '';
-        ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;
-        DROP TABLE IF EXISTS contents;
-        -- OPT-009 v23 物理回拨：类型化订阅 outbox（表 + 两索引）在 v21 现场不得
-        -- 残留，否则重放 v23 时 CREATE TABLE 报 already exists（表删除即带走索引，
-        -- DROP INDEX 为显式清点）。此后新增建表迁移须在此追加对应回拨。
-        DROP INDEX IF EXISTS idx_subscription_outbox_url;
-        DROP INDEX IF EXISTS idx_subscription_outbox_pending;
-        DROP TABLE IF EXISTS subscription_outbox;
-        -- v32 物理回拨：sync_queue 生命周期列、状态索引与绑定触发器（不回拨
-        -- 则重放 v32 的 ALTER/CREATE 报 duplicate column / already exists）。
-        DROP TRIGGER IF EXISTS trg_sync_queue_article_bound;
-        DROP INDEX IF EXISTS idx_sync_queue_status;
-        ALTER TABLE sync_queue DROP COLUMN last_error_class;
-        ALTER TABLE sync_queue DROP COLUMN unbound_reason;
-        ALTER TABLE sync_queue DROP COLUMN updated_at;
-        ALTER TABLE sync_queue DROP COLUMN status;
-        ALTER TABLE sync_queue DROP COLUMN desired_state;
-        ALTER TABLE sync_queue DROP COLUMN field;
-        ALTER TABLE sync_queue DROP COLUMN kind;
-        -- OPT-010 v26 物理回拨：分类稳定身份列（folders 表无后续重建迁移，
-        -- 不回拨则重放 v26 的 ALTER 报 duplicate column）。
-        ALTER TABLE folders DROP COLUMN sync_id;
-        -- OPT-013 v27 物理回拨：AI 产物缓存签名列（articles 表不再重建，
-        -- 不回拨则重放 v27 的 ALTER 报 duplicate column）。
-        ALTER TABLE articles DROP COLUMN ai_summary_sig;
-        ALTER TABLE articles DROP COLUMN translated_sig;
-        -- OPT-013 v28 物理回拨：翻译片段表（不回拨则重放 v28 的 CREATE TABLE
-        -- 报 already exists）。
-        DROP TABLE IF EXISTS ai_segments;
-        -- v33 物理回拨：发布时间来源与首次见到时间列（不回拨则重放 v33 的
-        -- ALTER TABLE 报 duplicate column）。
-        DROP TRIGGER IF EXISTS trg_articles_first_seen_fallback_ins;
-        ALTER TABLE articles DROP COLUMN first_seen_at;
-        ALTER TABLE articles DROP COLUMN published_at_source;
-        -- v34 物理回拨：刷新代际 + 标题分域列与插入触发器（不回拨则重放
-        -- v34 的 ALTER 报 duplicate column、CREATE TRIGGER 报 already exists）。
-        DROP TRIGGER IF EXISTS trg_feeds_refresh_title_defaults_ins;
-        ALTER TABLE feeds DROP COLUMN fetch_generation;
-        ALTER TABLE feeds DROP COLUMN title_custom;
-        ALTER TABLE feeds DROP COLUMN fetched_title;
-        PRAGMA user_version = 21;
-        "#,
-    )
-    .unwrap();
-}
-
-/// OPT-008C 必测 1 反例：两个 feed、同一 `url_norm`、不同 guid/正文/AI、
-/// 各自读藏版本与队列——v21 升级后不得按 URL 合并条目或吞掉任一正文/AI。
-/// 返回两篇文章各自的 (article_id, feed_id)。
-fn seed_v21_legacy_two_sources(path: &std::path::Path) -> ((i64, i64), (i64, i64)) {
-    let conn = db::open(path).expect("open latest");
-    let f1 = db::create_folder(&conn, "F1", "article").unwrap();
-    let f2 = db::create_folder(&conn, "F2", "article").unwrap();
-    let feed1 = seed_feed(&conn, f1, "https://legacy-a.example/rss", "旧源A");
-    let feed2 = seed_feed(&conn, f2, "https://legacy-b.example/rss", "旧源B");
-    rollback_latest_to_v21(&conn);
-    // 两源同 URL、不同正文与 AI；各自读藏版本/远端绑定。
-    conn.execute(
-        "INSERT INTO articles (feed_id, guid, url, url_norm, title, content_html, body_text,
-             ai_summary, translated_content, source, published_at, is_read, is_starred,
-             remote_id, read_version, star_version)
-         VALUES (?1, 'lgA', 'https://legacy.example/shared', 'https://legacy.example/shared', '旧标题A',
-             '<p>旧正文A</p>', '旧正文A', '旧摘要A', '<p>旧译文A</p>', 'direct',
-             '2026-01-01T00:00:00+00:00', 1, 0, 101, 3, 1)",
-        [feed1],
-    )
-    .unwrap();
-    let aid1 = conn.last_insert_rowid();
-    conn.execute(
-        "INSERT INTO articles (feed_id, guid, url, url_norm, title, content_html, body_text,
-             ai_summary, translated_content, source, published_at, is_read, is_starred,
-             remote_id, read_version, star_version)
-         VALUES (?1, 'lgB', 'https://legacy.example/shared', 'https://legacy.example/shared', '旧标题B',
-             '<p>旧正文B（不同内容）</p>', '旧正文B（不同内容）', '旧摘要B', '<p>旧译文B</p>', 'direct',
-             '2026-01-02T00:00:00+00:00', 0, 1, 202, 1, 4)",
-        [feed2],
-    )
-    .unwrap();
-    let aid2 = conn.last_insert_rowid();
-    conn.execute(
-        "INSERT INTO sync_queue (article_id, action) VALUES (?1, 'star')",
-        [aid1],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO sync_queue (article_id, action) VALUES (?1, 'read')",
-        [aid2],
-    )
-    .unwrap();
-    drop(conn);
-    ((aid1, feed1), (aid2, feed2))
-}
-
-#[test]
-fn v21_upgrade_keeps_two_sources_same_url_distinct_content_and_ai() {
-    let tmp = TempDb::new("contents_migration_two_sources");
-    let ((aid1, feed1), (aid2, feed2)) = seed_v21_legacy_two_sources(tmp.path());
-
-    let conn = tmp.open();
-    // 条目身份/归属/读藏版本/远端绑定全保留。
-    let read1: (i64, i64, i64, i64, Option<i64>, String) = conn
-        .query_row(
-            "SELECT feed_id, is_read, read_version, star_version, remote_id, guid
-             FROM articles WHERE id = ?1",
-            [aid1],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    let read2: (i64, i64, i64, i64, Option<i64>, String) = conn
-        .query_row(
-            "SELECT feed_id, is_read, read_version, star_version, remote_id, guid
-             FROM articles WHERE id = ?1",
-            [aid2],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        read1,
-        (feed1, 1, 3, 1, Some(101), "lgA".to_string()),
-        "文章 A 身份/读藏/版本/远端绑定不得改变"
-    );
-    assert_eq!(
-        read2,
-        (feed2, 0, 1, 4, Some(202), "lgB".to_string()),
-        "文章 B 身份/读藏/版本/远端绑定不得改变"
-    );
-
-    // 同 URL 不同正文 → 两条 contents，各自指向自己的正文。
-    let (cid1, body1, html1): (i64, String, String) = conn
-        .query_row(
-            "SELECT c.id, c.body_text, c.content_html
-             FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
-            [aid1],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    let (cid2, body2, html2): (i64, String, String) = conn
-        .query_row(
-            "SELECT c.id, c.body_text, c.content_html
-             FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
-            [aid2],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_ne!(
-        cid1, cid2,
-        "不同正文必须产生两条 contents（不得按 URL 合并）"
-    );
-    assert_eq!(
-        (html1.as_str(), body1.as_str()),
-        ("<p>旧正文A</p>", "旧正文A")
-    );
-    assert_eq!(
-        (html2.as_str(), body2.as_str()),
-        ("<p>旧正文B（不同内容）</p>", "旧正文B（不同内容）")
-    );
-
-    // AI 产物仍按条目各自保留（迁移不搬移/不覆盖）。
-    let ai1: (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT ai_summary, translated_content FROM articles WHERE id = ?1",
-            [aid1],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    let ai2: (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT ai_summary, translated_content FROM articles WHERE id = ?1",
-            [aid2],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        ai1,
-        (Some("旧摘要A".into()), Some("<p>旧译文A</p>".into())),
-        "文章 A 的 AI 产物不得丢失/串换"
-    );
-    assert_eq!(
-        ai2,
-        (Some("旧摘要B".into()), Some("<p>旧译文B</p>".into())),
-        "文章 B 的 AI 产物不得丢失/串换"
-    );
-
-    // 队列行数与归属不变。
-    let mut stmt = conn
-        .prepare("SELECT article_id, action FROM sync_queue ORDER BY article_id")
-        .unwrap();
-    let queue: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(
-        queue,
-        vec![(aid1, "star".to_string()), (aid2, "read".to_string())],
-        "队列行数与归属保持不变"
-    );
-
-    // 旧正文列不存在；外键无悬空引用。
-    let old_cols: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('articles')
-             WHERE name IN ('content_html','body_text','fulltext_extracted')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(old_cols, 0, "旧正文列必须消除");
-    let mut fk_stmt = conn.prepare("PRAGMA foreign_key_check").unwrap();
-    let fk_rows = fk_stmt.query_map([], |_r| Ok(())).unwrap().count();
-    assert_eq!(fk_rows, 0, "迁移后 PRAGMA foreign_key_check 必须为空");
-    drop(fk_stmt);
-    drop(stmt);
-
-    // 重开幂等：不重复迁移、不复制内容行、不动身份/队列。
-    drop(conn);
-    let conn2 = tmp.open();
-    let (n, cid1_again, cid2_again): (i64, i64, i64) = conn2
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM contents),
-                    (SELECT content_id FROM articles WHERE id = ?1),
-                    (SELECT content_id FROM articles WHERE id = ?2)",
-            [aid1, aid2],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(n, 2, "重开幂等：contents 行数不变");
-    assert_eq!((cid1_again, cid2_again), (cid1, cid2), "重开幂等：引用不变");
-    let q_again: i64 = conn2
-        .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(q_again, 2, "重开幂等：队列不变");
-}
-
-#[test]
-fn v21_upgrade_is_lossless_and_idempotent() {
-    let tmp = TempDb::new("contents_migration");
-    let (aid, _feed) = seed_v21_legacy(tmp.path());
-
-    let conn = tmp.open();
-    // 分组读取（避免 9 元组越过 clippy::type_complexity 阈值）
-    let (read, star, rv, sv): (i64, i64, i64, i64) = conn
-        .query_row(
-            "SELECT is_read, is_starred, read_version, star_version FROM articles WHERE id = ?1",
-            [aid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .unwrap();
-    let (remote, title, guid): (Option<i64>, String, String) = conn
-        .query_row(
-            "SELECT remote_id, title, guid FROM articles WHERE id = ?1",
-            [aid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    let (summary, translated): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT ai_summary, translated_content FROM articles WHERE id = ?1",
-            [aid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!((read, star), (1, 1), "读藏状态保 ID 无损");
-    assert_eq!(remote, Some(77), "远端绑定保持");
-    assert_eq!(
-        summary.as_deref(),
-        Some("旧摘要"),
-        "旧 AI 摘要保留（迁移不丢）"
-    );
-    assert_eq!(translated.as_deref(), Some("<p>旧译文</p>"), "旧译文保留");
-    assert_eq!((rv, sv), (3, 2), "读藏版本保持");
-    assert_eq!(
-        (title.as_str(), guid.as_str()),
-        ("旧标题", "lg1"),
-        "身份字段保持"
-    );
-    let qn: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sync_queue WHERE article_id = ?1",
-            [aid],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(qn, 1, "队列不变");
-    // 正文迁入 contents 且旧列消失
-    let (html, body): (String, String) = conn
-        .query_row(
-            "SELECT c.content_html, c.body_text FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
-            [aid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!((html.as_str(), body.as_str()), ("<p>旧正文</p>", "旧正文"));
-    let old_cols: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name IN ('content_html','body_text','fulltext_extracted')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(old_cols, 0, "旧正文列必须消除（不保两套真值）");
-    // 搜索索引已重建：旧内容可搜
-    assert_eq!(search_ids(&conn, "旧正文"), vec![aid]);
-    // 幂等重开
-    drop(conn);
-    let conn2 = tmp.open();
-    let n: i64 = conn2
-        .query_row("SELECT COUNT(*) FROM contents", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1, "重复 open 幂等：不重复迁移/不复制内容行");
-}
-
-#[test]
-fn v21_upgrade_failure_rolls_back_and_retries() {
-    // 在 v22 迁移路径上制造失败：预建一张与 contents 同名的**残留**表会以
-    // 「table contents already exists」使 v22 SQL 段失败——验证迁移事务整体回滚
-    // （user_version 不推进、旧形状与数据原样），清障后重开成功。
-    let tmp = TempDb::new("contents_migration_fail");
-    let (aid, _feed) = seed_v21_legacy(tmp.path());
-    {
-        let conn = Connection::open(tmp.path()).unwrap();
-        conn.execute_batch("CREATE TABLE contents (id INTEGER PRIMARY KEY);")
-            .unwrap();
-    }
-    let err = db::open(tmp.path()).expect_err("迁移必须失败（残留表冲突）");
-    let msg = format!("{err}");
-    assert!(msg.contains("contents"), "失败原因可见：{msg}");
-    {
-        let conn = Connection::open(tmp.path()).unwrap();
-        let v: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(v, 21, "失败迁移不得推进版本（整体回滚）");
-        // 旧形状仍在（v21 列回归原位），数据无损
-        let html: String = conn
-            .query_row(
-                "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
-                [aid],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(html, "<p>旧正文</p>", "回滚后旧正文列数据原样");
-        let cid_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name = 'content_id'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(cid_exists, 0, "v22 增列随事务回滚");
-        conn.execute_batch("DROP TABLE contents;").unwrap();
-    }
-    // 清障后重开：正常升级
-    let conn = tmp.open();
-    let v: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert!(v >= 22, "重试后升级完成（user_version={v}）");
-    let body: String = conn
-        .query_row(
-            "SELECT c.body_text FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
-            [aid],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(body, "旧正文");
-}
-
-#[test]
-fn v21_upgrade_midway_failure_rolls_back_and_retries() {
-    // **中途**失败注入：旧正文列被一个既有索引引用时 DROP COLUMN 必须失败——
-    // 该失败发生在回填（contents 行已建、articles.content_id 已写）之后，用于
-    // 验证「回填出的中间态随事务整体回滚」而不只是首个 SQL 段失败。
-    let tmp = TempDb::new("contents_migration_midfail");
-    let (aid, _feed) = seed_v21_legacy(tmp.path());
-    {
-        let conn = Connection::open(tmp.path()).unwrap();
-        conn.execute_batch("CREATE INDEX legacy_content_probe ON articles(content_html);")
-            .unwrap();
-    }
-    let err = db::open(tmp.path()).expect_err("迁移必须在中途失败（旧列被索引引用）");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("content_html") || msg.to_lowercase().contains("index"),
-        "失败原因应指向旧正文列/索引：{msg}"
-    );
-    {
-        let conn = Connection::open(tmp.path()).unwrap();
-        let v: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(v, 21, "中途失败不得推进版本（整体回滚）");
-        let contents_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contents'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            contents_exists, 0,
-            "回填出的 contents 表随事务回滚（无半迁移残留）"
-        );
-        let new_cols: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name IN ('content_id','ai_epoch')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(new_cols, 0, "v22 增列随事务回滚");
-        let html: String = conn
-            .query_row(
-                "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
-                [aid],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(html, "<p>旧正文</p>", "回滚后旧正文列数据原样");
-        conn.execute_batch("DROP INDEX legacy_content_probe;")
-            .unwrap();
-    }
-    // 清障后重开：正常升级，正文迁入 contents
-    let conn = tmp.open();
-    let v: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert!(v >= 22, "重试后升级完成（user_version={v}）");
-    let body: String = conn
-        .query_row(
-            "SELECT c.body_text FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
-            [aid],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(body, "旧正文");
-}
-
-/* ============================================================
 五、LIKE 搜索经 contents：共享内容每个源可达（snippet 未变但正文变化）
 ============================================================ */
 
@@ -2172,7 +1654,11 @@ fn extract_commit_repoint_failure_is_atomic_and_returns_identity() {
         .unwrap();
     assert_eq!(committed, (db_cid, db_rev), "返回身份 = DB 提交结果");
     assert_ne!(db_cid, cid_old, "提取变体分叉新行（来源进身份）");
-    assert_eq!(contents_count(&conn), 1, "旧行无引用即回收");
+    assert_eq!(
+        contents_count(&conn),
+        2,
+        "提取正文与 RSS 分组正文各有持久引用"
+    );
     assert_eq!(
         search_ids(&conn, "RSS"),
         Vec::<i64>::new(),
@@ -2296,9 +1782,9 @@ fn insert_new_article_repoint_failure_is_atomic_and_retryable() {
 
 /// R3（id 稳定性）：`contents.id` 为 AUTOINCREMENT——删除表内最大内容行后，
 /// 新内容不得复用同一 id（否则前端 (content_id, revision) 失效判据会在删除+
-/// 重建窗口读到同值对）。覆盖新建库与 v21 迁移库两条路径。
+/// 重建窗口读到同值对）。覆盖新建库与同格式重开两条路径。
 #[test]
-fn contents_ids_are_not_reused_after_max_delete_and_after_migration() {
+fn contents_ids_are_not_reused_after_max_delete_and_reopen() {
     let tmp = TempDb::new("contents_autoincrement");
     {
         let conn = tmp.open();
@@ -2352,33 +1838,29 @@ fn contents_ids_are_not_reused_after_max_delete_and_after_migration() {
         let _ = id1;
     }
 
-    // v21 迁移路径：升级完成后同样保证（迁移回填也经 AUTOINCREMENT 表）
-    let tmp2 = TempDb::new("contents_autoincrement_migrated");
-    let (aid, _feed) = seed_v21_legacy(tmp2.path());
-    let conn = tmp2.open();
-    let migrated_cid = content_id_of(&conn, aid).unwrap();
-    conn.execute("DELETE FROM articles WHERE id = ?1", [aid])
+    // 关闭重开同一当前格式，序号仍不得退回并复用已提交的内容身份。
+    let conn = tmp.open();
+    let previous_max: i64 = conn
+        .query_row("SELECT MAX(id) FROM contents", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(contents_count(&conn), 0, "旧行随最后引用回收");
-    let f = db::create_folder(&conn, "F2", "article").unwrap();
-    let a2 = seed_feed(&conn, f, "https://after.example/rss", "迁移后");
-    let (aid2, _) = db::upsert_article_with_feed(
+    conn.execute("DELETE FROM articles", []).unwrap();
+    assert_eq!(contents_count(&conn), 0);
+    let feed: i64 = conn
+        .query_row("SELECT id FROM feeds ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let (aid, _) = db::upsert_article_with_feed(
         &conn,
-        a2,
+        feed,
         &new_article(
-            "gm",
-            "https://after.example/1",
-            "迁移后条目",
-            "<p>迁移后内容</p>",
+            "reopened",
+            "https://a.example/reopened",
+            "重开后",
+            "<p>重开后的正文</p>",
         ),
         false,
     )
     .unwrap();
-    let cid_after = content_id_of(&conn, aid2).unwrap();
-    assert!(
-        cid_after > migrated_cid,
-        "迁移库同一保证：新内容 id 不得复用已删除的最大 id（{cid_after} vs {migrated_cid}）"
-    );
+    assert!(content_id_of(&conn, aid).unwrap() > previous_max);
 }
 
 /* ============================================================

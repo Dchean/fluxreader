@@ -1,3 +1,4 @@
+import { useCenterDwellAi } from './useAutomaticAi';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { scrollAwayRange, isUserScrollEvent, PROGRAMMATIC_SCROLL_SUPPRESS_MS } from './scrollAwayRead';
 import { elementScroll, useVirtualizer, type ReactVirtualizer, type VirtualItem } from '@tanstack/react-virtual';
@@ -22,13 +23,13 @@ import { Icons } from './icons';
 import { formatRelativeTime, formatDuration } from '../lib/format';
 import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
 import { proxyImageUrl } from '../lib/imageProxy';
-import { onCoverError } from '../lib/coverImage';
+import { galleryMediaKey } from '../lib/galleryMedia';
 import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
 import { refillDecision } from './timelineRefill';
-import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from './timelineAnchor';
+import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from '../lib/readingPosition';
 import { GALLERY_COLUMN_GAP, GALLERY_OVERSCAN, estimateGalleryCardHeight, galleryItemPlacement, galleryTabbableIndex, galleryVisibleIndexes, galleryWindowIndexes, resolveGalleryLaneCount } from './GalleryLayout';
 import { HydrateFailure } from './HydrateFailure';
 import { anyOverlayOpen } from './shortcutYield';
@@ -116,7 +117,7 @@ function TimelineRowItem({ vi, item, measureRef, children }: {
      避免内容瞬间替换造成的视觉跳动（"闪一下"）。
    - 列表切换后滚动位置归零（新列表从顶部阅读）。
      TASK-115 例外：切布局/视图/范围后**切回**且缓存命中时，按 per-filterKey
-     锚存档恢复到离开时的位置（返回位置统一规则，见 timelineAnchor.ts
+     锚存档恢复到离开时的位置（返回位置统一规则，见 readingPosition.ts
      头注规则表）；其余切换仍归零。
 
    展示口径：源名称/分类由 feedId 经解析表派生（不冗余存储）；
@@ -156,7 +157,7 @@ export function Timeline() {
   /* TASK-115②：最后选中的文章 id（关闭信号消费侧的归还目标）。activeArticleId
      跟随 effect 顺带记账——关闭阅读器的时刻它必然持有阅读器正在显示的文章
      （关闭后置 null 的分支不更新，ref 保留关闭前的值）。选型理由见
-     timelineAnchor.ts 头注 X2 节（store 不反向依赖 components 层）。 */
+     readingPosition.ts 头注 X2 节（store 不反向依赖 components 层）。 */
   const lastActiveArticleIdRef = useRef<string | null>(null);
   const focusTaskRef = useRef<{ frame?: number; timer?: ReturnType<typeof setTimeout> }>({});
   const cancelCardFocus = () => {
@@ -638,7 +639,7 @@ export function Timeline() {
      scrollToIndex(align:'start') 把锚卡片顶对齐视口顶，再按锚记录的 offsetPx
      微调 scrollTop = 精确还原视口（长卡片中部的停留位置不再只能恢复卡片顶；
      动态测量下卡片起点可能微移，属既有估算行高误差量级，如实接受——见
-     timelineAnchor.ts 头注①）。px≤0 不产生额外滚动；补偏发生在程序性滚动
+     readingPosition.ts 头注①）。px≤0 不产生额外滚动；补偏发生在程序性滚动
      抑制窗口内，不会被误判为用户滚动。 */
   const applyAnchorOffsetPx = (px: number) => {
     if (px <= 0) return;
@@ -697,7 +698,7 @@ export function Timeline() {
        再沿用既有弃锚语义——先存后清，顺序不可换。任何 filterKey 变化都是
        「离开」（含切排序/筛选）：存档按锚自身 filterKey 记账，回到该上下文
        才可能命中；切排序的新语境查不到档，裁定「不恢复」自然成立（规则表见
-       timelineAnchor.ts 头注）。 */
+       readingPosition.ts 头注）。 */
     stashTopAnchorForReturn();
     clearTopAnchor();
   }, [filterKey]);
@@ -756,7 +757,7 @@ export function Timeline() {
      程序性滚动回其新索引（新文章插入头部场景，抵消整体替换 + 头部插入造成的
      视觉跳动）；无锚 / filterKey 已变 / 锚 id 不在快照 → 回落现状（不强制顶部）。
      分流语义：
-     - 锚与 filterKey 一起记账（timelineAnchor），消费时逐字比对——用户主动
+     - 锚与 filterKey 一起记账（readingPosition），消费时逐字比对——用户主动
        切范围/布局/视图/排序后锚已被 clearTopAnchor 丢弃且比对也不通过，
        导航路径的 reload 亦不 bump nonce（三重隔离）；
      - 复用 activeArticleId 定位 effect 的既有程序性滚动抑制机制
@@ -793,7 +794,7 @@ export function Timeline() {
      锚来源、消费路径三者全部分离（双向隔离由回归网 t115 断言钉住）。
      声明顺序：必须在本文件更早的 filterKey 归零 effect 之后（同批 passive
      effect 按声明序执行——先归零后恢复，恢复定位是最终落点）。
-     恢复成功后 rearmTopAnchor 把活锚重锚到落点（理由见 timelineAnchor.ts：
+     恢复成功后 rearmTopAnchor 把活锚重锚到落点（理由见 readingPosition.ts：
      防节流窗口把活锚滞留在恢复前位置，用户随即再离开时存档过期锚）。 */
   const switchRestoreNonce = useAppStore((s) => s.switchRestoreNonce);
   useEffect(() => {
@@ -851,7 +852,7 @@ export function Timeline() {
       programmaticUntil: programmaticScrollUntilRef.current,
       now: performance.now(),
     });
-    /* TASK-111②：顶条锚记录（节流收口在 timelineAnchor.recordTopAnchor）——
+    /* TASK-111②：顶条锚记录（节流收口在 readingPosition.recordTopAnchor）——
        以当前可见首条目 id + filterKey 记账，供后台刷新落地后回位。程序性滚动
        （J/K / 回位）也照记：那是用户此刻的阅读位置。画廊不记录（列模型虚拟化
        与顶条锚的语义扩展不在本卡范围；回位消费侧同样回落，两侧口径一致）。
@@ -984,7 +985,7 @@ export function Timeline() {
         <div className="control-bar-main-row">
           <h3 className="view-title-text">{base}</h3>
           <div className="filter-sort-group">
-            {activeViewFilter !== 'unread' && (
+            {activeViewFilter === 'all' && (
               <button className="toggle-action-btn" onClick={toggleTimelineFilter} title={timelineFilter === 'all' ? '显示全部' : '仅显示未读'}>
                 <Icons.unreadDot />
                 <span>{timelineFilter === 'all' ? '全部' : '未读'}</span>
@@ -1168,7 +1169,7 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const activeArticleId = useAppStore((s) => s.activeArticleId);
-  const feedName = useAppStore((s) => s.feedIndex.get(art.feedId)?.feed.name ?? '');
+  const feedName = useAppStore((s) => (s.sourceIndex.get(art.feedId) ?? s.feedIndex.get(art.feedId))?.feed.name ?? '');
   const selected = activeArticleId === art.id;
 
   return (
@@ -1236,7 +1237,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const showToast = useAppStore((s) => s.showToast);
   const openLightbox = useAppStore((s) => s.openLightbox);
-  const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
+  const binding = useAppStore((s) => s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId));
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   /* TASK-122：正文/AI 读取单点——selectArticleBody（真值源 bodyById）。
      错误态/空正文终态/加载中都从记录 state 派生（原 hydrationErrors/hydratedIds
@@ -1261,6 +1262,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
      水合（避免几百张卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
   const cardRef = useRef<HTMLDivElement>(null);
+  useCenterDwellAi(item.id, cardRef);
   const setCardNode = useCallback((node: HTMLDivElement | null) => {
     hydrateRef.current = node;
     cardRef.current = node;
@@ -1271,8 +1273,8 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   /* 三态：null=跟随 feed 配置，true=手动展开，false=手动收起 */
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   /* fix-8：跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但尚无译文时
-     按收起处理，不再渲染空壳译文块（自动生成本身只在 Reader 打开文章时触发，
-     卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「翻译」仍会就地触发生成。 */
+     按收起处理，不再渲染空壳译文块（自动生成仅在中心连续停顿后触发，
+     挂载/焦点本身不触发付费请求）；手动点「翻译」仍会就地触发生成。 */
   const showTranslate = transOverride ?? (translationState === 'partial' || autoAiBlockOpen(
     feedConfig.autoTranslate,
     !!body.translatedContent,
@@ -1574,66 +1576,57 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
-  const openLightbox = useAppStore((s) => s.openLightbox);
+  const openGalleryLightbox = useAppStore((s) => s.openGalleryLightbox);
   const selectArticle = useAppStore((s) => s.selectArticle);
   const activeArticleId = useAppStore((s) => s.activeArticleId);
   const selected = activeArticleId === item.id;
-  const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
-  /* 封面图防盗链代理：需要代理的图床（如 doubanio.com）走后端 fetch_image 拿
-     bytes 转 data: URL；不需要的图原样直连。空 imageUrl（源没给图）则 src 为空，
-     由 CSS 的 object 兜底显示。 */
-  const [proxiedSrc, setProxiedSrc] = useState<string | null>(null);
+  const feedName = useAppStore((s) => (s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId))?.feed.name ?? '');
+  const pendingGallery = useAppStore((s) => s.lightboxGallery?.entryId === item.id && !s.lightboxUrl
+    ? s.lightboxGallery.status : null);
+  const mediaKey = galleryMediaKey(item);
+  /* 代理结果绑定源快照；条目修订后首帧也不能复用上一张图的 data URL。 */
+  const [proxied, setProxied] = useState<{ key: string; url: string | null } | null>(null);
   useEffect(() => {
     let alive = true;
     const src = item.imageUrl;
-    if (!src) return; // 无图：proxiedSrc 保持初始 null，走「无图」占位分支
+    if (!src) return;
     void proxyImageUrl(src, item.url).then((dataUrl) => {
       if (!alive) return;
-      setProxiedSrc(dataUrl); // data: URL 或 null（不需要代理/失败）
+      setProxied({ key: mediaKey, url: dataUrl });
     });
     return () => { alive = false; };
-  }, [item.imageUrl, item.url]);
-  /* fix-9（自检 UI-P2-1）：直连再失败不再留浏览器破图——记入共享封面失败态
-     （lib/coverImage 的 onCoverError，与另四处同源）并就地出 cover-fallback 占位，
-     五个封面位的失败视觉语言统一。 */
-  const [imgFailed, setImgFailed] = useState(false);
-  /* 换图源（imageUrl 变化）时清失败态：渲染期对比上一渲染的派生调整
-     （React 官方模式，避免 set-state-in-effect 警告） */
-  const [prevImageUrl, setPrevImageUrl] = useState(item.imageUrl);
-  if (prevImageUrl !== item.imageUrl) {
-    setPrevImageUrl(item.imageUrl);
-    setImgFailed(false);
-  }
-  const imgSrc = proxiedSrc ?? item.imageUrl;
-  /* 打开有效图片才算阅读动作，自动标读与文章/播客消费同一设置。 */
-  const openImage = () => {
-    /* 灯箱用代理后的 data: URL（若有）：豆瓣等防盗链图，原始 URL 在灯箱里
-       no-referrer 也会 418；代理成功则用 data: URL 放大。 */
-    const lightboxSrc = proxiedSrc ?? item.imageUrl;
+  }, [item.imageUrl, item.url, mediaKey]);
+  const [failure, setFailure] = useState<{ key: string; src: string } | null>(null);
+  const imgSrc = (proxied?.key === mediaKey ? proxied.url : null) ?? item.imageUrl;
+  const imgFailed = failure?.key === mediaKey && failure.src === imgSrc;
+  const openImage = (target: HTMLElement) => {
+    // 图片失败/换源时触发节点也不卸载；useFocusTrap 归还同一卡片且 preventScroll。
+    target.focus({ preventScroll: true });
     selectArticle(item.id);
-    if (!lightboxSrc) return;
-    openLightbox(lightboxSrc, item.id);
-    useAppStore.getState().markEntryOpened(item.id);
+    openGalleryLightbox(item.id);
   };
   const onImgError = () => {
-    if (imgSrc) onCoverError(imgSrc);
-    setImgFailed(true);
+    if (imgSrc) {
+      // 首图来自条目 images，可能不同于封面；局部占位不污染封面失败缓存。
+      setFailure({ key: mediaKey, src: imgSrc });
+    }
   };
+  const imageCount = item.imageCount ?? (item.imageUrl ? 1 : 0);
   return (
     <div className={`gallery-card ${item.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`} data-ctx="article" data-id={item.id}>
-      {imgSrc && !imgFailed ? (
-        <img
-          src={imgSrc}
-          loading="lazy"
-          onClick={openImage}
-          onError={onImgError}
+      <div className="gallery-media">
+        <div
+          className="gallery-media-trigger"
+          onClick={(e) => openImage(e.currentTarget)}
           role="button"
           data-card-index={cardIndex}
           tabIndex={tabbable ? 0 : -1}
+          aria-label={`预览${item.title}，${imageCount} 张图片`}
+          aria-busy={pendingGallery === 'loading'}
           aria-current={selected ? 'true' : undefined}
           onKeyDown={(e) => {
             if (activePlayerOwnsSpace(e)) return;
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(e.currentTarget); return; }
             /* 行优先 lanes 的几何语义（C-P2-2）：Right/Left = 同排相邻 ±1、
                Down/Up = 同列跨排 ±列数。边界 clamp：目标越界（首尾卡）不动——
                不跳列、不回绕（moveCardFocus 的越界 no-op 即 clamp，最小惊讶）。
@@ -1644,29 +1637,25 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
             else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }
             else if (e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -lanes); }
           }}
-          alt={item.title}
-          referrerPolicy="no-referrer"
-        />
-      ) : (
-        <div
-          className={`gallery-no-image${imgFailed ? ' cover-fallback' : ''}`}
-          onClick={openImage}
-          role="button"
-          data-card-index={cardIndex}
-          tabIndex={tabbable ? 0 : -1}
-          aria-current={selected ? 'true' : undefined}
-          data-cover-state={imgFailed ? 'failed' : 'empty'}
-          onKeyDown={(e) => {
-            if (activePlayerOwnsSpace(e)) return;
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
-            /* 同上：行优先 lanes 几何语义 + 越界 clamp（见本组件 img 分支注释） */
-            if (e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
-            else if (e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
-            else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }
-            else if (e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -lanes); }
-          }}
-        >{imgFailed ? <Icons.image /> : '无图'}</div>
-      )}
+        >
+          {imgSrc && !imgFailed ? (
+            <img key={`${mediaKey}:${imgSrc}`} src={imgSrc} loading="lazy" onError={onImgError}
+              alt={item.title} referrerPolicy="no-referrer" />
+          ) : (
+            <div className={`gallery-no-image${imgFailed ? ' cover-fallback' : ''}`}
+              data-cover-state={imgFailed ? 'failed' : 'empty'}>
+              {pendingGallery === 'loading' ? '加载图片…'
+                : pendingGallery === 'error' ? '图片加载失败，点击重试'
+                : pendingGallery === 'empty' ? '暂无图片，点击重试'
+                : imgFailed ? <span>图片加载失败，点击重试</span> : '无图'}
+            </div>
+          )}
+        </div>
+        <button className="gallery-image-count" tabIndex={tabbable ? 0 : -1}
+          aria-label={`查看全部 ${imageCount} 张图片`} onClick={(e) => openImage(e.currentTarget)}>
+          <Icons.image /><span>{imageCount}</span>
+        </button>
+      </div>
       <div className="gallery-meta">
         {/* TASK-100 U5：截断的画廊标题补 title（=未截断全文） */}
         <div className="gallery-title" title={item.title}>{item.title}</div>
@@ -1710,7 +1699,7 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
   const togglePlayerPlay = useAppStore((s) => s.togglePlayerPlay);
   const activeArticleId = useAppStore((s) => s.activeArticleId);
   const selected = activeArticleId === item.id;
-  const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  const feedName = useAppStore((s) => (s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId))?.feed.name ?? '');
   const play = () => {
     const audioUrl = item.enclosureUrl ?? '';
     const cur = useAppStore.getState().player;
@@ -1783,7 +1772,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   const selected = activeArticleId === item.id;
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const summarizeEntry = useAppStore((s) => s.summarizeEntry);
-  const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  const feedName = useAppStore((s) => (s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId))?.feed.name ?? '');
   const summaryGenerating = useAppStore((s) => s.summarizingIds[item.id]);
   const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
   /* OPT-013 B3：摘要与译文五态（卡片入口与 Reader 同一单点判定）。 */
@@ -1802,6 +1791,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
   const hydrateRef = useLazyHydrate(item.id);
+  useCenterDwellAi(item.id, hydrateRef);
   /* TASK-114 X1 → TASK-122：水合三态从 selectArticleBody 派生（对齐 SocialCard）
      ——useLazyHydrate 内部已按 entryNeedsHydration 触发请求，这里消费记录状态
      把结果呈现出来：失败=内联重试（不再静默回退 snippet）、missing=文章不存在、
@@ -1817,8 +1807,8 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   const displayText = expanded && fullText ? fullText : item.snippet;
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
   /* fix-8：摘要框跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但
-     尚无摘要时按收起处理，不再渲染空壳摘要框（自动生成只在 Reader 打开文章
-     时触发，卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「摘要」仍会就地
+     尚无摘要时按收起处理，不再渲染空壳摘要框（自动生成仅在中心连续停顿
+     时触发，卡片挂载本身不发起）；手动点「摘要」仍会就地
      触发生成并展开。 */
   const summaryOpen = summaryOverride ?? autoAiBlockOpen(
     feedConfig.autoSummary,

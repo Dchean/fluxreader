@@ -23,7 +23,9 @@ componentTest('OPT-011 Reader：自动请求订阅有效配置（关不发起 / 
   clearInvokeCalls();
   resetStore();
   seedFromRows(ROWS, { layout: 'article' });
+  document.body.tabIndex = -1; document.body.focus();
 
+  setPlan({ ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false }) });
   const { createElement, act } = await import('react');
   const { Reader } = await import('../../src/components/Reader.tsx');
   const entry = await mount(createElement(Reader));
@@ -35,10 +37,10 @@ componentTest('OPT-011 Reader：自动请求订阅有效配置（关不发起 / 
   await flush(2);
   assert.equal(invokeCount('ai_summarize'), 0, '关闭态打开文章：自动摘要不得发起（关闭是唯一真值）');
   assert.equal(useAppStore.getState().feedIndex.get('10')?.feed.summaryMode, 'off',
-    '夹具旧行缺 mode：按旧 bool=false 映射为显式 off（升级不开启）');
+    '夹具源显式off');
 
   /* ---------- 分类开 + 源显式 off：有效值仍关（显式关闭压过分类开启）---------- */
-  await act(async () => { useAppStore.getState().toggleCatSummary('cat-1', true); });
+  await act(async () => { useAppStore.getState().toggleCatSummary('cat-1', 'on'); });
   await flush(3);
   assert.equal(invokeCount('ai_summarize'), 0,
     '源显式 off 时分类切开不得触发（不以 OR 合并——否则用户无法关闭）');
@@ -76,6 +78,7 @@ componentTest('OPT-011 Reader：自动请求订阅有效配置（关不发起 / 
   const heldSummary = [];
   resetPlan();
   setPlan({
+    ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false }),
     ai_summarize: (args) => new Promise((resolve) => { heldSummary.push({ args, resolve }); }),
   });
   await act(async () => { useAppStore.getState().toggleFeedSummary('cat-1', '10', 'inherit'); });
@@ -210,8 +213,9 @@ componentTest('OPT-011 R4：读取在途期间开启成功——快照不吞意�
   let released = false;
   let releaseFeedsRead = null;
   setPlan({
+    ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false }),
     list_feeds: () => {
-      const frozen = FEEDS.map((f) => ({ ...f, auto_summary: false }));
+      const frozen = FEEDS.map((f) => ({ ...f, summary_mode: 'off' }));
       if (released) return Promise.resolve(frozen);
       return new Promise((resolve) => { releaseFeedsRead = () => { released = true; resolve(frozen); }; });
     },
@@ -263,14 +267,14 @@ componentTest('OPT-011 FeedsTab：三态下拉真实点击 → store 原子更�
   await flush(2);
 
   /* 分类默认先开：源仍显式 off → 有效值关；三态控件显示「关闭」 */
-  await act(async () => { useAppStore.getState().toggleCatSummary('cat-1', true); });
+  await act(async () => { useAppStore.getState().toggleCatSummary('cat-1', 'on'); });
   await flush(2);
   const summaryLabel = entry.container.querySelector('.mgr-ai-mode-label');
   assert.ok(summaryLabel, '源行应有摘要三态控件');
   const trigger = summaryLabel.querySelector('.flux-dropdown-trigger');
   assert.ok(trigger, '三态控件应渲染 FluxDropdown 触发器');
   assert.ok(trigger.textContent.includes('继承') === false && trigger.textContent.includes('关闭'),
-    `夹具旧行 bool=false → 显示显式「关闭」（实际 ${trigger.textContent}）`);
+    `夹具源mode=off → 显示显式「关闭」（实际 ${trigger.textContent}）`);
 
   /* 真实下拉：打开 → 选「继承（开）」→ store 当帧同值 + IPC 三态落库 */
   await act(async () => { trigger.click(); });
@@ -287,7 +291,7 @@ componentTest('OPT-011 FeedsTab：三态下拉真实点击 → store 原子更�
   const feedIdx = st.feedIndex.get('10')?.feed;
   const cat = st.feedIndex.get('10')?.cat;
   assert.equal(feedIdx?.summaryMode, 'inherit', '点击后 feedIndex 当帧看到 inherit（原子索引更新）');
-  assert.equal(cat?.autoSummary, true, 'feedIndex 的分类引用与 categories 同一份（默认开）');
+  assert.equal(cat?.summaryMode, 'on', 'feedIndex 的分类引用与 categories 同一份（默认开）');
 
   const modeCalls = invokeCalls.filter((c) => c.cmd === 'set_feed_ai_modes').map((c) => c.args);
   assert.equal(modeCalls.length, 1, '真实点击应发一次 set_feed_ai_modes');

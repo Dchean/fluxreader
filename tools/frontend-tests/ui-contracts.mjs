@@ -276,6 +276,9 @@ export async function run(ctx) {
       case 'refresh_all_feeds': return Promise.resolve(refreshPlan.value);
       case 'list_folders': return Promise.resolve([]);
       case 'list_feeds': return Promise.resolve([]);
+      case 'list_article_sources': return Promise.resolve([]);
+      case 'list_article_member_ids': return Promise.resolve([]);
+      case 'get_article_updates': return Promise.resolve({ items: [], missing_ids: [] });
       case 'list_articles': return Promise.resolve([]);
       case 'article_counts': return Promise.resolve({});
       default: return Promise.resolve(null);
@@ -442,6 +445,7 @@ export async function run(ctx) {
       firstSeenAt: Date.parse('2026-09-18T00:00:00+08:00'),
       publishedAtSource: 'feed_clamped',
       isRead: false, isStarred: true, tags: [], source: 'miniflux',
+      retained: false, bodyMissing: false, imageCount: 1, mediaRevision: 3,
       snippet: 'snippet text', author: 'Fixture Author',
       cover: 'https://e.example/img.png', imageUrl: 'https://e.example/img.png',
       audioUrl: 'https://e.example/audio.mp3', enclosureUrl: 'https://e.example/audio.mp3',
@@ -458,6 +462,7 @@ export async function run(ctx) {
     };
     const expectFeed = {
       id: '7', name: 'Fixture Feed', url: 'https://f.example/rss',
+      syncId: 'source-fixture', subscriptionState: 'active', effectiveLayout: 'article',
       favicon: 'https://f.example/favicon.ico', layout: 'article',
       autoSummary: true, autoTranslate: false, fetchFailed: false,
       /* OPT-011：三态 mode 是真值（fixture 的 mode 与 bool 取值刻意不一致——
@@ -645,9 +650,11 @@ export async function run(ctx) {
     {
       const tl = readSrc('../../src/components/Timeline.tsx');
       const gal = tl.slice(tl.indexOf('const GalleryCard = memo('), tl.indexOf('/* ---------- 播客卡片'));
-      checkNew('(cov-a3) 画廊卡片仍走 proxyImageUrl(src, item.url) + proxiedSrc ?? item.imageUrl，未换成 CoverImage',
+      // gallery-media真实挂载域另覆迟到代理与换源；此处保留代理唯一入口接线。
+      checkNew('(cov-a3) 画廊卡片仍走 proxyImageUrl，结果绑定媒体快照后才回退首图，未换成 CoverImage',
         gal.length > 0 && gal.includes('void proxyImageUrl(src, item.url)')
-        && gal.includes('const imgSrc = proxiedSrc ?? item.imageUrl;') && !gal.includes('<CoverImage'));
+        && gal.includes('proxied?.key === mediaKey ? proxied.url : null')
+        && gal.includes('?? item.imageUrl;') && !gal.includes('<CoverImage'));
     }
 
     /* 直连失败（img onError）→ 占位 + 上报 + 不再请求 */
@@ -726,10 +733,11 @@ export async function run(ctx) {
         ['播客卡', cut(tl, 'className={`podcast-card', 'podcast-show-name'), 'src={item.cover}', 'articleId={item.id}'],
         ['迷你播放条', cut(pb, 'player-track-info', 'player-titles'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
         ['全屏播放器', cut(pb, 'player-full-cover-wrap', 'player-full-meta'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
-        ['灯箱', cut(ov, 'export function Lightbox()', 'export function NewCategoryModal()'), 'src={lightboxUrl}', 'articleId={lightboxEntryId}'],
+        // 单图公开契约仍用CoverImage；新增画廊正文图有独立重试，不向封面缓存上报。
+        ['单图灯箱', cut(ov, '{lightboxUrl && !gallery && (', '{lightboxUrl && gallery && ('), 'src={lightboxUrl}', 'articleId={lightboxEntryId}'],
       ];
       const badSites = fiveSites.filter(([, blk, a, b]) => !(blk.includes('<CoverImage') && blk.includes(a) && blk.includes(b) && !/<img\b/.test(blk)));
-      checkNew(`(cov-wire) 五处图片位全部改用 CoverImage（带条目 id）且不再有裸 <img>（不合规：${badSites.map((s) => s[0]).join('、') || '无'}）`,
+      checkNew(`(cov-wire) 五处原封面/单图图片位保持 CoverImage（带条目 id）且不再有裸 <img>（不合规：${badSites.map((s) => s[0]).join('、') || '无'}）`,
         badSites.length === 0);
     }
 
@@ -772,11 +780,9 @@ export async function run(ctx) {
 
    断言分层（证据强度如实说明）：
    - (r7-key)：键函数形态断言（scopePageKey / scopeQueryArgs 含布局）。
-   - (r7-switch)/(reach-args)：内存假后端下走真实 store 动作，断言**请求参数**
-     带 layout、各布局首批 offset=0、切回不重复不跳页。本段假后端刻意不做布局
-     过滤（后端过滤语义由 Rust 侧 list_articles_layout_* / article_index 对齐
-     测试锁定；真机假后端 tmp/task-094/mock_backend_094.py 逐字复刻谓词），
-     因此可见集合断言一律走 selectVisibleEntries（前端布局过滤仍生效）。
+   - (r7-switch)/(reach-args)：内存假后端下走真实 store 动作，成员查询按布局
+     过滤，属性页只按捕获ID返回；每布局600条，验证首500、尾100、往返恢复
+     与精确ID顺序。此处不再使用把跨布局1200行混入article查询的旧夹具。
    - (reach-cap)/(reach-sentinel)：refillDecision 纯函数判定 + Timeline 源码形态
      （判定真的接进 effect 与哨兵分支）；真实点击/滚动的交互证据由真机 harness
      （tmp/task-094/ui/）取证。
@@ -822,6 +828,7 @@ export async function run(ctx) {
       let out = rows94.slice();
       if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
       if (a.folder_id != null) out = out.filter((r) => (FEEDS94.find((f) => f.id === r.feed_id) || {}).folder_id === a.folder_id);
+      if (a.layout) out = out.filter((r) => (r.feed_id === 11 ? 'social' : 'article') === a.layout);
       const dir = a.newest_first === false ? 1 : -1;
       out.sort((x, y) => (dir * (Date.parse(x.published_at) - Date.parse(y.published_at))) || (dir * (x.id - y.id)));
       if (a.last_published != null && a.last_id != null) {
@@ -838,10 +845,13 @@ export async function run(ctx) {
       switch (cmd) {
         case 'list_folders': return Promise.resolve(FOLDERS94);
         case 'list_feeds': return Promise.resolve(FEEDS94);
+        case 'list_article_sources': return Promise.resolve(FEEDS94);
         case 'feed_counts': return Promise.resolve([]);
         case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
         case 'sync_status': return Promise.resolve({ connected: false });
         case 'list_articles': return Promise.resolve(queryRows94((args && args.args) || {}));
+        case 'list_article_member_ids': return Promise.resolve(queryRows94(args?.args ?? {}).map((r) => r.id));
+        case 'get_article_updates': return Promise.resolve({ items: args.ids.map((id) => rows94.find((r) => r.id === id)).filter(Boolean), missing_ids: [] });
         case 'article_index': return Promise.resolve(0);
         case 'get_articles': return Promise.resolve([]);
         case 'get_setting': return Promise.resolve(null);
@@ -853,6 +863,7 @@ export async function run(ctx) {
     const nTick94 = (ms = 20) => new Promise((r) => setTimeout(r, ms));
     const store94 = (await import('../../dist-test/store.js')).useAppStore;
     const { selectVisibleEntries } = await import('../../dist-test/store.js');
+    await ctx.resetStore();
     viewEntriesCache.clear();
     rows94 = [];
     for (let i = 0; i < 600; i += 1) {
@@ -869,37 +880,39 @@ export async function run(ctx) {
     });
     store94.getState().selectLayout('article');
     await store94.getState().reloadFromBackend();
-    const r7First = calls94.find((c) => c.cmd === 'list_articles');
-    checkNew('(reach-args) 列表首批请求带 layout=article 且 offset=0（后端查询的布局维度）',
-      r7First?.args.args.layout === 'article' && r7First?.args.args.offset === 0);
+    const r7First = calls94.find((c) => c.cmd === 'list_article_member_ids');
+    checkNew('(reach-args) 首次捕获article全部600成员，首批只回读正确的500个ID',
+      r7First?.args.args.layout === 'article' && store94.getState().readingSession?.memberIds.length === 600
+      && calls94.find((c) => c.cmd === 'get_article_updates')?.args.ids.join(',') === Array.from({length:500},(_,i)=>8000+i).join(','));
 
     calls94.length = 0;
     await store94.getState().loadMoreArticles();
     const idsBeforeLeave = selectVisibleEntries(store94.getState()).map((e) => e.id);
     /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（article 布局首页
        末行 id 9249，交错序最后一行）——判别意图不变：锚取自该布局自己的游标桶。 */
-    checkNew('(r7-switch) article 第 2 页：请求沿用该布局自己的游标（keyset 锚 last_id=9249），可见集合增长到 500 且无重复',
-      calls94.find((c) => c.cmd === 'list_articles')?.args.args.last_id === 9249
-      && calls94.find((c) => c.cmd === 'list_articles')?.args.args.offset === undefined
-      && idsBeforeLeave.length === 500 && new Set(idsBeforeLeave).size === 500
+    checkNew('(r7-switch) article 第2页回读8500至8599，全部600可达且无跨布局重复',
+      calls94.find((c) => c.cmd === 'get_article_updates')?.args.ids.join(',') === Array.from({length:100},(_,i)=>8500+i).join(',')
+      && !calls94.some((c) => c.cmd === 'list_article_member_ids')
+      && idsBeforeLeave.length === 600 && new Set(idsBeforeLeave).size === 600
       && idsBeforeLeave.every((id) => Number(id) >= 8000 && Number(id) < 9000)
-      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 600);
 
     /* 切到 social：该口径首批从 offset=0 开始（请求带 layout=social），游标分桶互不污染 */
     calls94.length = 0;
     store94.getState().selectLayout('social');
     const r7SocialSync = store94.getState();
-    checkNew('(r7-switch) 切 social 同步阶段：游标从 0 起步（不继承 article 的 1000），article 桶原样保留',
-      r7SocialSync.articlesLimit === 0 && r7SocialSync.articlesCursor['article|all']?.loaded === 1000);
+    checkNew('(r7-switch) 切social同步阶段尚无新成员，保留article的600进度供返回',
+      !r7SocialSync.readingSession?.ready && selectVisibleEntries(r7SocialSync).length === 0
+      && r7SocialSync.articlesCursor['article|all']?.loaded === 600);
     await nTick94(30);
-    const r7SocialCall = calls94.find((c) => c.cmd === 'list_articles');
+    const r7SocialCall = calls94.find((c) => c.cmd === 'list_article_member_ids');
     const r7SocialIds = selectVisibleEntries(store94.getState()).map((e) => e.id);
-    checkNew('(reach-args) social 首批请求带 layout=social 且 offset=0；可见条目只含 social 源',
-      r7SocialCall?.args.args.layout === 'social' && r7SocialCall?.args.args.offset === 0
-      && r7SocialIds.length > 0 && r7SocialIds.every((id) => Number(id) >= 9000));
+    checkNew('(reach-args) social 新捕获600成员且首500只含social源',
+      r7SocialCall?.args.args.layout === 'social' && store94.getState().readingSession?.memberIds.length === 600
+      && r7SocialIds.length === 500 && r7SocialIds.every((id) => Number(id) >= 9000));
     checkNew('(r7-switch) social 游标记在 social 桶（与 article 桶并存）：两布局各自记账',
       store94.getState().articlesCursor['social|all']?.loaded === 500
-      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 600);
 
     /* 切回 article：缓存命中同步恢复快照，游标与恢复的快照长度对齐（既有 selectFeed
        同一契约——不从 0 起步、不继承 social 桶）；后台刷新 + 续一页后，
@@ -907,9 +920,8 @@ export async function run(ctx) {
     calls94.length = 0;
     store94.getState().selectLayout('article');
     const r7BackSync = store94.getState();
-    checkNew('(r7-switch) 切回 article 同步恢复：游标与恢复的快照长度对齐（不从 0 起步），social 桶不污染 article 桶',
-      r7BackSync.articlesLimit === r7BackSync.entries.length && r7BackSync.articlesLimit > 0
-      && r7BackSync.articlesCursor['article|all']?.loaded === r7BackSync.articlesLimit
+    checkNew('(r7-switch) 切回article先重捕获会话，旧social桶仍保留而不冒充当前成员',
+      !r7BackSync.readingSession?.ready
       && r7BackSync.articlesCursor['social|all']?.loaded === 500);
     await nTick94(30);
     await store94.getState().loadMoreArticles();
@@ -917,7 +929,7 @@ export async function run(ctx) {
     checkNew('(r7-switch) 切回 article 续一页后：可见集合与离开前逐位一致（无重复、无缺失段），游标连续',
       r7BackIds.length === idsBeforeLeave.length && r7BackIds.join(',') === idsBeforeLeave.join(',')
       && new Set(r7BackIds).size === r7BackIds.length
-      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 600);
 
     /* 视图缓存按「布局 × 视图 × 范围」分桶：两布局各有快照（R7 缓存半边） */
     checkNew('(r7-cache) 视图缓存键含布局：article 与 social 各有独立快照，互不冒充',
@@ -926,11 +938,13 @@ export async function run(ctx) {
 
     /* anchorToArticle 与列表同口径：article_index 请求带 layout */
     calls94.length = 0;
-    store94.setState({ activeFeedFilter: '10', activeArticleId: null });
+    store94.getState().selectFeed('10');
+    await ctx.waitUntil(() => store94.getState().readingSession?.ready && store94.getState().backendReloadsInFlight === 0);
+    calls94.length = 0;
     await store94.getState().anchorToArticle('8003');
-    checkNew('(reach-args) anchorToArticle 的 article_index / list_articles 请求同样带 layout（锚定与列表同口径）',
-      calls94.some((c) => c.cmd === 'article_index' && c.args.args.layout === 'article')
-      && calls94.filter((c) => c.cmd === 'list_articles').every((c) => c.args.args.layout === 'article'));
+    checkNew('(reach-args) 同会话锚定直接定位已捕获成员，不重新查旧动态索引',
+      store94.getState().activeArticleId === '8003' && store94.getState().readingSession.query.layout === 'article'
+      && !calls94.some((c) => c.cmd === 'article_index' || c.cmd === 'list_articles'));
   } finally {
     globalThis.__INVOKE__ = prevInvoke94;
     viewEntriesCache.clear();
@@ -1042,11 +1056,14 @@ export async function run(ctx) {
     && zOf('player-full-overlay') < zOf('modal-overlay'));
 
   /* ---------- fix-9：画廊 img 补 onError + cover-fallback 占位 ---------- */
-  checkNew('(fix-9) 画廊 img 补 onError（记入共享封面失败态）且失败/无图均出占位（与另四处统一）',
-    tlFix.includes("import { onCoverError } from '../lib/coverImage'")
-    && tlFix.includes('onError={onImgError}')
+  // 首图已来自独立gallery images；局部占位保留，不能污染封面URL缓存/上报。
+  // gallery-media挂载域断言error→原节点键盘打开→重试、同URL封面缓存仍idle。
+  checkNew('(fix-9) 画廊首图 onError 留局部失败占位，媒体源变化不复用失败且不污染封面状态',
+    tlFix.includes('onError={onImgError}')
     && tlFix.includes("imgFailed ? ' cover-fallback' : ''")
-    && tlFix.includes('if (prevImageUrl !== item.imageUrl) {'));
+    && tlFix.includes('failure?.key === mediaKey && failure.src === imgSrc')
+    && tlFix.includes('setFailure({ key: mediaKey, src: imgSrc })')
+    && !tlFix.includes('onCoverError('));
 
   /* ---------- fix-10：空必填输入禁用主按钮 ---------- */
   const ovFix = srcOf('../../src/components/Overlays.tsx');
@@ -1131,10 +1148,12 @@ export async function run(ctx) {
         switch (cmd) {
           case 'list_folders': return Promise.resolve(FOLDERS);
           case 'list_feeds': return Promise.resolve(FEEDS);
+          case 'list_article_sources': return Promise.resolve(FEEDS);
           case 'feed_counts': return Promise.resolve([]);
         case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
           case 'sync_status': return Promise.resolve({ connected: false });
-          case 'list_articles': {
+          case 'list_article_member_ids':
+          case 'get_article_updates': {
             const a = (args && args.args) || {};
             let out = [];
             for (let i = 0; i < 600; i += 1) {
@@ -1145,25 +1164,20 @@ export async function run(ctx) {
               }));
             }
             if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
-            /* TASK-117：keyset 锚成对给出时按谓词续拉（published_at 两两互异，字符串比较即可） */
-            if (a.last_published != null && a.last_id != null) {
-              out = out.filter((r) => r.published_at < a.last_published
-                || (r.published_at === a.last_published && r.id < a.last_id));
-              out = out.slice(0, a.limit != null ? a.limit : undefined);
-            } else {
-              out = out.slice(a.offset || 0, a.limit != null ? (a.offset || 0) + a.limit : undefined);
-            }
+            const payload = cmd === 'list_article_member_ids' ? out.map((r) => r.id)
+              : { items: args.ids.map((id) => out.find((r) => r.id === id)).filter(Boolean), missing_ids: [] };
             if (delayed) {
               delayed = null;
-              return new Promise((resolve) => setTimeout(() => resolve(out), 60));
+              return new Promise((resolve) => setTimeout(() => resolve(payload), 60));
             }
-            return Promise.resolve(out);
+            return Promise.resolve(payload);
           }
           default: return Promise.resolve(null);
         }
       };
       const { isBackendReloadInFlight } = await import('../../dist-test/store/slices/bootstrap.js');
       const viewCache = (await import('../../dist-test/store/internals.js')).viewEntriesCache;
+      await ctx.resetStore();
       viewCache.clear();
       store.setState({
         dataMode: 'tauri', dataLoading: false, bootstrapError: null,
@@ -1182,14 +1196,15 @@ export async function run(ctx) {
       delayed = true;
       feedFilter = 11;
       calls.length = 0;
-      store.getState().selectFeed('feed-11');
+      store.getState().selectFeed('11');
       checkNew('(t100-p3-1) 切范围后 reload 在途：isBackendReloadInFlight() 为真',
         isBackendReloadInFlight() === true);
       const idsBeforeReload = store.getState().entries.length;
       await store.getState().loadMoreArticles();
       await nTick100(5);
-      checkNew('(t100-p3-1) 在途窗口内 loadMoreArticles 被拦截：未发出第二发 list_articles（修前会把新口径一页 append 到旧列表尾）',
-        calls.filter((c) => c.cmd === 'list_articles').length === 1
+      checkNew('(t100-p3-1) 新成员查询在途时续页被拦截：仅一发成员查询，未抢跑属性页',
+        calls.filter((c) => c.cmd === 'list_article_member_ids').length === 1
+          && !calls.some((c) => c.cmd === 'get_article_updates')
           && store.getState().entries.length === idsBeforeReload);
       // reload 落地后拦截解除，续拉恢复
       await nTick100(120);
@@ -1197,18 +1212,31 @@ export async function run(ctx) {
         isBackendReloadInFlight() === false
           && store.getState().entries.length === 500
           && store.getState().entries.every((e) => e.feedId === '11')
-          && store.getState().articlesCursor['article|feed-11']?.loaded === 500);
+          && store.getState().articlesCursor['article|11']?.loaded === 500);
       calls.length = 0;
       await store.getState().loadMoreArticles();
       /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（feed-11 首页
          末行 id 150499 的原文锚）——判别意图不变：续拉带该范围的游标。 */
-      checkNew('(t100-p3-1) 落地后续拉放行：第 2 页请求带该范围 keyset 锚 last_id=150499（假后端每源共 600 行，追加 100 行收敛到底）',
-        calls.filter((c) => c.cmd === 'list_articles').length === 1
-          && calls.find((c) => c.cmd === 'list_articles')?.args.args.last_id === 150499
-          && calls.find((c) => c.cmd === 'list_articles')?.args.args.last_published
-            === new Date(Date.UTC(2026, 8, 4, 10, 0, 0) - 499 * 1000).toISOString()
+      checkNew('(t100-p3-1) 新会话落地后回读自身最后100成员，完整600条收敛到底',
+        calls.filter((c) => c.cmd === 'get_article_updates').length === 1
+          && calls.find((c) => c.cmd === 'get_article_updates')?.args.ids.join(',') === Array.from({length:100},(_,i)=>150500+i).join(',')
+          && !calls.some((c) => c.cmd === 'list_article_member_ids')
           && store.getState().entries.length === 600
           && store.getState().articlesExhausted === true);
+      // 同会话属性刷新也必须持锁；不能因成员列表已ready而让续页并发抢写。
+      delayed = true;
+      calls.length = 0;
+      const refresh = store.getState().reloadFromBackend();
+      await nTick100(5);
+      await store.getState().loadMoreArticles();
+      checkNew('(t100-p3-1) ready会话的属性刷新在途时仍持锁，续页不额外读取',
+        isBackendReloadInFlight() && store.getState().backendReloadsInFlight === 1
+        && calls.filter((c) => c.cmd === 'get_article_updates').length === 1);
+      await refresh;
+      checkNew('(t100-p3-1) 属性刷新结束释放当前代资源，成员顺序与完整600条不变',
+        !isBackendReloadInFlight() && store.getState().backendReloadsInFlight === 0
+        && store.getState().readingSession.memberIds.join(',') === Array.from({length:600},(_,i)=>String(150000+i)).join(',')
+        && store.getState().entries.length === 600);
       feedFilter = null;
     } finally {
       globalThis.__INVOKE__ = prevInvoke;
@@ -1231,6 +1259,9 @@ export async function run(ctx) {
           case 'refresh_all_feeds': return Promise.resolve({ new_articles: 0, failed_feeds: 0 });
           case 'list_folders': return Promise.resolve([]);
           case 'list_feeds': return Promise.resolve([]);
+          case 'list_article_sources': return Promise.resolve([]);
+          case 'list_article_member_ids': return Promise.resolve([]);
+          case 'get_article_updates': return Promise.resolve({ items: [], missing_ids: [] });
           case 'list_articles': return Promise.resolve([]);
           case 'feed_counts': return Promise.resolve([]);
         case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
@@ -1238,7 +1269,7 @@ export async function run(ctx) {
           default: return Promise.resolve(null);
         }
       };
-      store.setState({ dataMode: 'tauri', dataLoading: false, bootstrapError: null, toasts: [], syncStatus: 'synced' });
+      store.setState({ dataMode: 'tauri', dataLoading: false, bootstrapError: null, toasts: [], syncStatus: 'synced', readingSession: null, entries: [] });
       // 场景 1：notConnected（既有语义）→ 静默跳过订阅层，走纯直连刷新
       syncPhaseError = { code: 'notConnected', message: '未连接同步服务' };
       store.getState().triggerManualSync();
@@ -1345,7 +1376,6 @@ export async function run(ctx) {
     const shortcuts = src100('../../src/components/settings/ShortcutsTab.tsx');
     const syncTab = src100('../../src/components/settings/SyncTab.tsx');
     const apiSrc = src100('../../src/lib/api.ts');
-    const bootstrap = src100('../../src/store/slices/bootstrap.ts');
     const internals = src100('../../src/store/internals.ts');
     const ctxMenu = src100('../../src/components/ContextMenu.tsx');
     const feedsTab = src100('../../src/components/settings/FeedsTab.tsx');
@@ -1417,18 +1447,9 @@ export async function run(ctx) {
           .test(configSyncSrc)),
     };
 
-    /* P3-1：reload 在途拦截（行为断言见上，这里锁守卫的存在性） */
-    checkNew('(t100-p3-1) 守卫接线：loadMoreArticles 入口检查 isBackendReloadInFlight；两个 reload 以计数器包裹',
-      bootstrap.includes('if (isBackendReloadInFlight()) return;')
-      && bootstrap.includes('backendReloadInFlight++')
-      && bootstrap.includes('backendReloadInFlight--')
-      && (bootstrap.match(/backendReloadInFlight--/g) || []).length === 2);
-    /* 【TASK-119 更新理由】原 reloadGeneration 已统一为查询实例代际
-       queryGeneration（模块级改名，保护语义等价保留）——断言随统一语义更新
-       措辞，并**强化**：新代际状态同样锁定为模块级（不得泄漏进 store）。 */
-    checkNew('(t100-p3-1) 计数器与查询代际（TASK-119 统一后的 queryGeneration）同为模块级状态（不得被 setState 泄漏进 store）',
-      !bootstrap.includes('reloadInFlight: ') && !bootstrap.includes('queryGeneration: ')
-      && bootstrap.includes('let backendReloadInFlight = 0;') && bootstrap.includes('let queryGeneration = 0;'));
+    /* P3-1旧全局计数器形态已被当前请求serial/Set替代。
+       上方真实成员查询和ready会话属性刷新分别验证在途拦截、释放及数据保全；
+       pagination-and-cache的A/B重叠反例另锁旧请求不阻断新会话。 */
 
     /* P3-2：fetchFailed 假 affordance */
     checkNew('(t100-p3-2) fetchFailed 警示点改为非点击承诺「最近一次抓取失败」（重试走旁边独立刷新钮）',
@@ -1535,7 +1556,7 @@ export async function run(ctx) {
         && primitives.includes('onKeyDown={onTrapKeyDown}'));
     checkNew('(t100-uip2-7/W4) Lightbox 焦点契约同源 useFocusTrap（打开移入/关闭归还/Tab 循环）',
       overlays.includes('useFocusTrap(!!lightboxUrl, overlayRef)')
-        && overlays.includes('onKeyDown={onTrapKeyDown}'));
+        && /onKeyDown=\{\(e\) => \{\s*onTrapKeyDown\(e\);/.test(overlays));
 
     /* U7：Esc 链补 closeAskVisible */
     checkNew('(t100-u7) App.tsx Esc 链首支补 closeAskVisible（只取消询问，不提交关闭动作）',
@@ -1992,9 +2013,11 @@ export async function run(ctx) {
     && social114.includes('加载正文…') && notif114.includes('加载正文…'));
 
   /* ---------- X2：Enter/Space 五卡统一 ---------- */
-  checkNew('(t114-x2a) Enter/Space 键位五卡齐备（Article=选中 / Podcast=play / Gallery 两分支=灯箱 / Social、Notif=选中·新增）',
+  // Gallery图片/失败/空态现在共用稳定trigger；两套handler合一，真实键盘覆盖见gallery-media。
+  checkNew('(t114-x2a) Enter/Space 键位五卡齐备（Article=选中 / Podcast=play / Gallery稳定入口=灯箱 / Social、Notif=选中）',
     cnt114(article114, ENTER_GUARD) === 1 && cnt114(podcast114, ENTER_GUARD) === 1
-    && cnt114(gallery114, ENTER_GUARD) === 2 && cnt114(social114, ENTER_GUARD) === 1
+    && cnt114(gallery114, ENTER_GUARD) === 1 && gallery114.includes('className="gallery-media-trigger"')
+    && gallery114.includes('openImage(e.currentTarget)') && cnt114(social114, ENTER_GUARD) === 1
     && cnt114(notif114, ENTER_GUARD) === 1);
   checkNew('(t114-x2b) Social/Notif Enter 语义=选中（onSelect(item.id)，与 ArticleCard 同动作），且仅卡片本体响应（e.target 守卫：嵌套按钮/链接的键盘激活不被卡片级选中劫持）',
     social114.includes('if (e.target === e.currentTarget)') && notif114.includes('if (e.target === e.currentTarget)')
@@ -2778,7 +2801,6 @@ export async function run(ctx) {
       const appK2 = rdW4('../../src/App.tsx');
       const timelineK2 = rdW4('../../src/components/Timeline.tsx');
       const overlaysK2 = rdW4('../../src/components/Overlays.tsx');
-      const bootstrapK2 = rdW4('../../src/store/slices/bootstrap.ts');
 
       /* (k2-1/2) component-tests/ime-escape.test.mjs 真实派发两种合成期 Escape
          并保留正常 Escape 对照；reader-body-states.test.mjs 驱动在途、失败、
@@ -2793,11 +2815,24 @@ export async function run(ctx) {
 
       /* (k2-5) bootstrap 并行装载：App 串行 .then 清零；bootstrapFromBackend
          内并行发起设置恢复 + 一次性落库门；两处静默早退兜底 dataLoading */
-      checkNew('(k2-5) bootstrap 启动并行装载（首读并行/落库有序）：设置恢复随数据装载同时发起、一次性落库门、两处静默早退兜底（空快照另落 bootstrapError）',
-        !appK2.includes('.bootstrapSettings().then(')
-        && bootstrapK2.includes('pendingStartupLandGate = settingsTask')
-        && bootstrapK2.includes('if (get().dataLoading) set({ dataLoading: false });')
-        && bootstrapK2.includes("bootstrapError: '后端返回空快照，装载中止'"));
+      await ctx.resetStore({ dataLoading: true });
+      let releaseK2;
+      const gateK2 = new Promise((resolve) => { releaseK2 = resolve; });
+      const invocationK2 = globalThis.__INVOKE__;
+      const restoreK2 = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) =>
+        cmd === 'get_setting' && args.key === 'app_settings' ? gateK2 : invocationK2(cmd, args));
+      try {
+        const startupK2 = store.getState().bootstrapFromBackend();
+        await ctx.waitUntil(() => S.invokeCalls.some((c) => c.cmd === 'list_article_sources'));
+        const parallelK2 = S.invokeCalls.some((c) => c.cmd === 'list_feeds')
+          && S.invokeCalls.some((c) => c.cmd === 'counts_snapshot')
+          && !S.invokeCalls.some((c) => c.cmd === 'list_article_member_ids') && store.getState().dataLoading;
+        releaseK2(null);
+        await startupK2;
+        checkNew('(k2-5) 启动设置未回应时元数据并行、成员等待；回应后成员落地并退出骨架',
+          parallelK2 && store.getState().readingSession?.ready && !store.getState().dataLoading
+          && store.getState().bootstrapError === null && S.invokeCalls.some((c) => c.cmd === 'list_article_member_ids'));
+      } finally { releaseK2(null); restoreK2(); }
 
       /* (k2-6) 搜索防抖单段 250ms：180ms 首段清零、搜索 effect 内第二段
          setTimeout 清零（全文件仅防抖 effect 一处 }, 250);）；命令/订阅源

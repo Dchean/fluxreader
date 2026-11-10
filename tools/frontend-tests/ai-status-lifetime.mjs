@@ -19,7 +19,7 @@ export async function run(ctx) {
   const visible = () => selectAiProductState(store.getState(), '101', 'translation');
   async function prepare(overrides = {}) {
     await ctx.useMainBackend();
-    await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: false, defaultOpenMode: 'rss' } });
+    await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, defaultOpenMode: 'rss' } });
     const row = mkRow({
       id: 101, feed_id: 10, title: 'AI lifetime', content_id: 71, content_revision: 1,
       content_html: '<p>revision 1</p>', translated_content: '<p>old translation</p>',

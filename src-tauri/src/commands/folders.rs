@@ -206,6 +206,28 @@ pub async fn list_feeds(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow
     db::list_feeds(&conn)
 }
 
+#[tauri::command]
+pub async fn list_article_sources(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow>> {
+    let conn = state.db.lock().await;
+    db::list_article_sources(&conn)
+}
+
+#[tauri::command]
+pub async fn set_folder_ai_modes(
+    state: State<'_, AppState>,
+    id: i64,
+    summary: Option<String>,
+    translate: Option<String>,
+) -> AppResult<()> {
+    let summary = summary.as_deref().map(db::FeedAiMode::parse).transpose()?;
+    let translate = translate
+        .as_deref()
+        .map(db::FeedAiMode::parse)
+        .transpose()?;
+    let conn = state.db.lock().await;
+    db::set_folder_ai_modes(&conn, id, summary, translate)
+}
+
 /// 添加订阅源：先直连抓一次验证 URL 是有效 feed，成功才入库（不依赖 Miniflux）。
 /// `folder_id = None`（UI 未选分类，如全新安装无任何分类时）→ 自动落到
 /// 「未分类」文件夹（不存在则创建）——首次使用添加源不再报错。

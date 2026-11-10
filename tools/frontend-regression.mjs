@@ -80,7 +80,7 @@ const failed = ctx.results.filter((r) => !r.pass);
 const newFailed = ctx.newResults.filter((r) => !r.pass);
 const totalAll = ctx.results.length + ctx.newResults.length;
 const totalFailed = failed.length + newFailed.length;
-console.log('\n=== 既有回归 ' + (ctx.results.length - failed.length) + '/' + ctx.results.length + ' 通过（TASK-122 真值源迁移：S-1/S-2/S-4 读取面按新架构更新，保护意图逐字保留，理由见各处改动注） ===');
+console.log('\n=== 基线断言 ' + (ctx.results.length - failed.length) + '/' + ctx.results.length + ' 通过 ===');
 console.log('=== 新增 store 行为断言 ' + (ctx.newResults.length - newFailed.length) + '/' + ctx.newResults.length + ' 通过 🆕 ===');
 console.log('=== 前端逻辑回归合计 ' + (totalAll - totalFailed) + '/' + totalAll + ' 通过 ===');
 for (const domain of DOMAINS) {

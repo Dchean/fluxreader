@@ -60,11 +60,11 @@ async fn seed_local_article(
     let a = db::NewArticle {
         guid: format!("guid-{url}"),
         url: Some(url.into()),
-        title: "Local Article".into(),
+        title: "Remote Entry".into(),
         author: None,
         summary: None,
-        content_html: Some("<p>local</p>".into()),
-        body_text: "local".into(),
+        content_html: Some("<p>Mock fetched content</p>".into()),
+        body_text: "Mock fetched content".into(),
         image_url: None,
         enclosure_url: None,
         enclosure_mime: None,
@@ -111,11 +111,11 @@ async fn seed_local_articles_in_one_feed(
         let a = db::NewArticle {
             guid: format!("guid-{url}"),
             url: Some((*url).into()),
-            title: format!("Local Article {url}"),
+            title: "Remote Entry".into(),
             author: None,
             summary: None,
-            content_html: Some("<p>local</p>".into()),
-            body_text: "local".into(),
+            content_html: Some("<p>Mock fetched content</p>".into()),
+            body_text: "Mock fetched content".into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -201,7 +201,7 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     let revived = {
         let conn = db.lock().await;
         conn.query_row(
-            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+            "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -226,7 +226,7 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     let existed = {
         let conn = db.lock().await;
         conn.query_row(
-            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+            "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -311,7 +311,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         let conn = db.lock().await;
         let revived = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
                 [],
                 |r| r.get::<_, i64>(0),
             )
@@ -336,7 +336,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         );
         let revived = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
                 [],
                 |r| r.get::<_, i64>(0),
             )
@@ -392,7 +392,9 @@ async fn fresh_empty_db_pull_creates_remote_subscriptions() {
             .unwrap();
         assert_eq!(folders, 0, "前置条件：新库应零 folder");
         let feeds: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(feeds, 0, "前置条件：新库应零订阅");
     }
@@ -403,7 +405,9 @@ async fn fresh_empty_db_pull_creates_remote_subscriptions() {
 
     let conn = db.lock().await;
     let local_feeds: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(
         local_feeds, 2,
@@ -486,7 +490,7 @@ async fn pull_feed_insert_failure_must_be_reported() {
         let conn = db.lock().await;
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [failing_url],
                 |r| r.get(0),
             )
@@ -533,7 +537,7 @@ async fn pull_entry_insert_failure_must_be_reported() {
     let entry_id = server.add_entry_ret(10, entry_url, "Will Fail", false, false);
 
     // 注入确定性失败：插该 guid 的文章时 RAISE(ABORT)
-    let guid = format!("remote-{entry_id}");
+    let guid = db::remote_identity_guid(&entry_id.to_string());
     {
         let conn = db.lock().await;
         conn.execute_batch(&format!(
@@ -593,7 +597,9 @@ async fn pull_feed_failure_is_reported_not_swallowed() {
 
     let conn = db.lock().await;
     let local_feeds: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     // 契约：要么真的建出来了；要么没建出来但必须给出原因（不得静默）
@@ -1023,11 +1029,11 @@ async fn reconcile_skipped_when_state_fetch_fails() {
         let a = db::NewArticle {
             guid: "guid-c1".into(),
             url: Some("http://127.0.0.1:8765/post/1".into()),
-            title: "Local Article".into(),
+            title: "Remote Entry".into(),
             author: None,
             summary: None,
-            content_html: Some("<p>local</p>".into()),
-            body_text: "local".into(),
+            content_html: Some("<p>Mock fetched content</p>".into()),
+            body_text: "Mock fetched content".into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -1346,7 +1352,7 @@ async fn folder_delete_does_not_revive_folder_or_feeds() {
         .ok();
     let feed: Option<i64> = conn
         .query_row(
-            "SELECT id FROM feeds WHERE feed_url = ?1",
+            "SELECT id FROM feeds WHERE active=1 AND feed_url = ?1",
             [feed_url],
             |r| r.get(0),
         )

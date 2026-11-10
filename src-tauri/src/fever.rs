@@ -356,12 +356,12 @@ impl FeverClient {
         // action/mark/as/id/with_ids/since_id 等留在 query（两类后端均走 $_REQUEST/
         // FormValue）；api_key 不再出现在 URL，顺带消除进服务器访问日志的泄露面。
         self.ensure_request_current().await?;
-        let resp = self
-            .http
-            .post(&url)
-            .form(&[("api_key", self.api_key.as_str())])
-            .send()
-            .await?;
+        let resp = crate::sync_http::send(
+            self.http
+                .post(&url)
+                .form(&[("api_key", self.api_key.as_str())]),
+        )
+        .await?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             return Ok((None, status));
@@ -706,12 +706,12 @@ impl FeverClient {
             // 一次高层调用可含多个 mark；探测返回后也必须重新检查。
             // 检查不跨 HTTP 持锁，已经发出的请求仍可能在断开后才完成。
             self.ensure_request_current().await?;
-            let resp = self
-                .http
-                .post(&url)
-                .form(&[("api_key", self.api_key.as_str())])
-                .send()
-                .await?;
+            let resp = crate::sync_http::send(
+                self.http
+                    .post(&url)
+                    .form(&[("api_key", self.api_key.as_str())]),
+            )
+            .await?;
             if !resp.status().is_success() {
                 let status = resp.status().as_u16();
                 return Err(AppError::network(format!(

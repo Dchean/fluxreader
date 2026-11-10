@@ -32,11 +32,6 @@ const TRACKING_PARAMS: &[&str] = &[
 /// 引荐来源），站外可能是业务参数，只对 [`is_x_status_url`] 成立的确切状态页生效。
 const X_STATUS_TRACKING_PARAMS: &[&str] = &["t", "s", "ref_src", "ref_url"];
 
-/// 规范化算法版本：规则语义变化必须递增。存量 url_norm 按此版本重建——
-/// settings.url_norm_backfill_version 缺失或不等即从原始 url 重算
-/// （见 db/migrations.rs ensure_url_norm_backfill）。
-pub(crate) const NORM_VERSION: &str = "2";
-
 /// X/Twitter 状态页判定（**必须用未归一的原始 URL 调用**——显式非默认端口与
 /// scheme 都是身份信号，先 set_scheme 会把 https:80 归一掉）：http(s)、无显式
 /// 非默认端口、host 恰为 twitter.com / x.com（含标准 www./m./mobile. 子域）、
@@ -76,7 +71,7 @@ fn is_x_status_url(u: &url::Url) -> bool {
 /// 尾斜杠/AMP）归一为一个键。失败（非 URL 形态）返回原串小写——匹配键退化
 /// 但可用。规则从宽到严排序：只做「无损压缩」，绝不合并可能不同的文章
 /// （通用参数是否剥除按 X 状态页例外保守区分）。
-/// Note: 算法语义变化必须递增 [`NORM_VERSION`]，存量键随版本重建 —
+/// Note: 算法语义变化必须递增 新数据格式标识，存量键随版本重建 —
 /// 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
 pub fn normalize_url(url: &str) -> String {
     let Ok(mut u) = url::Url::parse(url.trim()) else {

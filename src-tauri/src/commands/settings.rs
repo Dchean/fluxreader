@@ -1051,20 +1051,14 @@ mod extract_fulltext_commit_tests {
 
     /// 内存库（articles/contents 最小 schema，正文真值在 contents） + AppState。
     fn setup(port: u16) -> AppState {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn.execute_batch(&format!(
-            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE contents (id INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE,
-                 url_norm TEXT,
-                 content_html TEXT, body_text TEXT NOT NULL DEFAULT '',
-                 extraction_source TEXT NOT NULL DEFAULT 'rss',
-                 fulltext_extracted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1);
-             CREATE TABLE articles (id INTEGER PRIMARY KEY, url TEXT, content_id INTEGER, image_url TEXT,
-                 ai_summary TEXT, translated_content TEXT, ai_epoch INTEGER NOT NULL DEFAULT 0);
+            "INSERT INTO feeds(id,feed_url,title) VALUES(1,'https://example.invalid/rss','source');
              INSERT INTO contents (id, identity, content_html, body_text)
                  VALUES (1, 'h|extract-test', '<p>RSS 摘要</p>', 'RSS 摘要');
-             INSERT INTO articles (id, url, content_id)
-                 VALUES (1, 'http://127.0.0.1:{port}/article', 1);"
+             INSERT INTO articles (id,feed_id,guid,title,url,content_id,rss_content_id)
+                 VALUES (1,1,'guid','article','http://127.0.0.1:{port}/article',1,1);"
         ))
         .unwrap();
         AppState::new(

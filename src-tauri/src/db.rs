@@ -3,7 +3,7 @@
 //! 实现按领域拆分在 db/ 子模块（migrations / folders / feeds / articles /
 //! contents / identity / url_norm / settings / sync_queue / sync_map / outbox）；本文件
 //! 只保留共享 import、子模块声明与再导出，使 crate::db:: 的既有调用路径保持不变。
-//! 迁移为追加式：已发布的迁移不可修改，只能新增 M::up。
+//! 当前格式独立建库并拒绝旧格式；当前格式内的后续升级仍须保留已发布历史。
 
 use rusqlite::{Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
@@ -30,6 +30,7 @@ mod contents;
 mod feeds;
 mod folders;
 mod identity;
+pub use identity::remote_identity_guid;
 mod migrations;
 mod outbox;
 mod settings;
@@ -42,17 +43,19 @@ pub use ai_segments::{
     AI_PRODUCT_TRANSLATION,
 };
 pub use articles::{
-    article_ai_commit_token, article_content_commit_token, article_index, articles_without_cover,
-    cleanup_cache, clear_article_ai_product, clear_article_cover_if_matches,
-    clear_dedup_tombstones, counts_snapshot, feed_counts, get_article, get_articles, list_articles,
-    list_read_target_ids_scoped, mark_all_read, mark_all_read_with_enqueue, purge_remote_data,
-    remote_ids_with_body, replace_article_content_checked, scope_counts, search_articles,
-    set_article_ai_fields, set_article_ai_fields_checked, set_read, set_read_bulk_with_enqueue,
-    set_read_with_enqueue, set_starred, set_starred_with_enqueue, upsert_article_with_feed,
-    upsert_article_with_feed_source, upsert_article_with_feed_tracked, upsert_remote_article,
-    AiCommitToken, AiProduct, ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert,
-    ContentCommitToken, CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts,
-    ScopeCountsDetail, ScopedCounts,
+    article_ai_commit_token, article_content_commit_token, article_group_has_pending,
+    article_index, article_index_in_window, articles_without_cover, cleanup_cache,
+    clear_article_ai_product, clear_article_cover_if_matches, clear_dedup_tombstones,
+    counts_snapshot, feed_counts, get_article, get_article_updates, get_articles,
+    list_article_member_ids, list_articles, list_articles_in_window, list_read_target_ids_scoped,
+    mark_all_read, mark_all_read_with_enqueue, prune_retained_confirmed, purge_remote_data,
+    refresh_bound_remote_article, remote_ids_with_body, replace_article_content_checked,
+    scope_counts, search_articles, set_article_ai_fields, set_article_ai_fields_checked, set_read,
+    set_read_bulk_with_enqueue, set_read_with_enqueue, set_starred, set_starred_with_enqueue,
+    upsert_article_with_feed, upsert_article_with_feed_source, upsert_article_with_feed_tracked,
+    upsert_remote_article, AiCommitToken, AiProduct, ArticleListItem, ArticleQuery, ArticleRow,
+    ArticleUpdates, ArticleUpsert, ContentCommitToken, CountsSnapshot, FeedCounts, NewArticle,
+    ReadWriteReceipt, ScopeCounts, ScopeCountsDetail, ScopedCounts,
 };
 pub use backup::{
     backup_dir_for_db, create_manual_backup, database_path, user_version, BackupInfo,
@@ -69,7 +72,7 @@ pub use feeds::{
     feed_remote_info, feed_tombstones, feed_url_by_id, feed_url_tombstoned, feeds_all_candidates,
     feeds_all_ids, feeds_due_for_refresh, feeds_due_for_refresh_candidates, find_feed_by_url,
     has_remote_feed_binding, insert_feed, insert_feed_origin, insert_feed_origin_modes,
-    legacy_feed_tombstones, list_feeds, mark_binding_incomplete,
+    legacy_feed_tombstones, list_article_sources, list_feeds, mark_binding_incomplete,
     mark_zero_binding_discovery_attempt, prune_feed_tombstones, remote_feed_binding_count,
     remove_feed_tombstone, set_feed_ai_flags, set_feed_ai_modes, set_feed_custom_title,
     set_feed_fetch_state, set_feed_fetch_state_if_generation, set_feed_title_and_icon,
@@ -81,12 +84,10 @@ pub use feeds::{
 pub use folders::{
     add_folder_tombstone, create_folder, create_folder_with_sync_id, delete_folder, folder_members,
     folder_name, folder_tombstones, folder_tombstones_for, list_folders, prune_folder_tombstones,
-    rename_folder, set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_collapsed,
-    set_folder_sync_id, update_folder_layout, FolderRow, FolderTombstone,
+    rename_folder, set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_ai_modes,
+    set_folder_collapsed, set_folder_sync_id, update_folder_layout, FolderRow, FolderTombstone,
 };
-pub(crate) use identity::{
-    content_identity_guid, is_synthetic_guid, title_date_identity_guid, url_identity_guid,
-};
+pub(crate) use identity::{is_synthetic_guid, weak_observation_guid};
 pub use migrations::open;
 #[cfg(test)]
 pub(crate) use migrations::MIGRATIONS;
@@ -110,14 +111,13 @@ pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting
 pub(crate) use articles::purge_remote_data_in;
 pub(crate) use settings::set_setting_with;
 pub use sync_map::{
-    add_article_dup_entry, article_by_remote_id, article_dup_entries, article_field_versions,
-    backfill_article_content, bump_sync_generation, count_unbound_local_feeds,
-    ensure_uncategorized_folder, export_feeds_with_folders, feed_exists_by_url, feed_id_by_url,
-    feed_id_by_url_normalized, fever_history_state, find_folder_by_name, folder_exists,
-    get_article_content_html, get_article_for_summary, get_article_for_translation,
-    get_article_remote_id, get_article_url, get_first_folder_id, last_sync_entry_id, last_sync_ts,
-    list_unbound_local_feeds, list_unread_ids_scoped, match_remote_feed, read_broadcast_targets,
-    reset_fever_history_state, set_article_remote_id, set_feed_remote_id,
+    article_by_remote_id, article_field_versions, backfill_article_content, bump_sync_generation,
+    count_unbound_local_feeds, ensure_uncategorized_folder, export_feeds_with_folders,
+    feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized, fever_history_state,
+    find_folder_by_name, folder_exists, get_article_content_html, get_article_for_summary,
+    get_article_for_translation, get_article_remote_id, get_article_url, get_first_folder_id,
+    last_sync_entry_id, last_sync_ts, list_unbound_local_feeds, list_unread_ids_scoped,
+    match_remote_feed, reset_fever_history_state, set_article_remote_id, set_feed_remote_id,
     set_fever_history_complete, set_fever_history_pending, set_last_sync_entry_id,
     set_last_sync_ts, sync_generation, sync_mark_read_if_unread,
     sync_mark_read_if_unread_at_version, sync_mark_starred_if_unstarred,

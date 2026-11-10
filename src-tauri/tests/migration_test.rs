@@ -1,246 +1,194 @@
-//! 迁移升级测试：v1 库（P1 schema）→ v2（P2 sync 列 + sync_queue 表）。
-//! 模拟真实用户旧库升级：先手工建 v1 形状的数据，再 open() 触发迁移。
-
+//! Current format initialization, refusal and recoverability replace historical upgrade fixtures.
+mod common;
 use app_lib::db;
 use rusqlite::Connection;
 
-mod common;
-
 #[test]
-fn migration_v1_to_v2_preserves_data() {
-    let tmp = common::unique_db_path("migration_test");
-    let _ = std::fs::remove_file(&tmp);
-
-    // ---- 手工建 v1 库（P1 发布时的 schema）----
+fn old_database_is_rejected_without_changing_its_bytes_or_data() {
+    let path = common::unique_db_path("old_format_refusal");
+    let _guard = common::TempDbGuard::new(path.clone());
     {
-        let conn = Connection::open(&tmp).unwrap();
-        conn.execute_batch(r#"
-            CREATE TABLE folders (id INTEGER PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
-                layout TEXT NOT NULL DEFAULT 'article', auto_summary INTEGER NOT NULL DEFAULT 1,
-                auto_translate INTEGER NOT NULL DEFAULT 0, collapsed INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')));
-            CREATE TABLE feeds (id INTEGER PRIMARY KEY, feed_url TEXT NOT NULL UNIQUE, site_url TEXT,
-                title TEXT NOT NULL, favicon_url TEXT, folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
-                layout TEXT NOT NULL DEFAULT 'inherit', auto_summary INTEGER NOT NULL DEFAULT 1,
-                auto_translate INTEGER NOT NULL DEFAULT 0, etag TEXT, last_modified TEXT, last_fetched_at TEXT,
-                fetch_error TEXT, fetch_failed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-            CREATE TABLE articles (id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
-                guid TEXT NOT NULL, url TEXT, title TEXT NOT NULL, author TEXT, summary TEXT, content_html TEXT,
-                body_text TEXT NOT NULL DEFAULT '', image_url TEXT, enclosure_url TEXT, enclosure_mime TEXT,
-                duration_sec INTEGER, ai_summary TEXT, translated_content TEXT, source TEXT NOT NULL DEFAULT 'direct',
-                published_at TEXT, fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-                is_read INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0, UNIQUE(feed_id, guid));
-            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        "#).unwrap();
-        // 用户数据
-        conn.execute(
-            "INSERT INTO folders (name, layout) VALUES ('旧分类', 'article')",
-            [],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO feeds (feed_url, title, folder_id) VALUES ('https://old.example.com/rss', 'Old Feed', 1)", []).unwrap();
-        conn.execute(
-            "INSERT INTO articles (feed_id, guid, title, is_read, is_starred) VALUES (1, 'g1', 'Old Article', 1, 1)",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO settings VALUES ('miniflux_endpoint', 'https://keep.example.com')",
-            [],
-        )
-        .unwrap();
-        conn.pragma_update(None, "user_version", 1).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE legacy(value TEXT); INSERT INTO legacy VALUES('keep me'); PRAGMA user_version=34;").unwrap();
     }
-
-    // ---- open() 触发迁移到 v2 ----
-    let conn = db::open(&tmp).expect("migration must succeed");
-
-    // 数据完好
-    let (fname, fcount): (String, i64) = conn
-        .query_row("SELECT name, COUNT(*) FROM folders", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .unwrap();
-    assert_eq!(fname, "旧分类");
-    assert_eq!(fcount, 1);
-
-    let (ftitle, feedcount): (String, i64) = conn
-        .query_row("SELECT title, COUNT(*) FROM feeds", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .unwrap();
-    assert_eq!(ftitle, "Old Feed");
-    assert_eq!(feedcount, 1);
-
-    let (atitle, read, starred): (String, bool, bool) = conn
-        .query_row("SELECT title, is_read, is_starred FROM articles", [], |r| {
-            Ok((
-                r.get(0)?,
-                r.get::<_, i64>(1)? != 0,
-                r.get::<_, i64>(2)? != 0,
-            ))
-        })
-        .unwrap();
-    assert_eq!(atitle, "Old Article");
-    assert!(read && starred, "read/starred state preserved");
-
-    // 设置保留
-    let ep: String = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'miniflux_endpoint'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(ep, "https://keep.example.com");
-
-    // v2 新结构可用
-    conn.execute(
-        "INSERT INTO sync_queue (article_id, action) VALUES (1, 'read')",
-        [],
-    )
-    .unwrap();
-    let queue = db::take_sync_queue(&conn).unwrap();
-    assert_eq!(queue.len(), 1);
-    assert_eq!(queue[0].action, "read");
-
-    // 新列可写
-    db::set_article_remote_id(&conn, 1, 42).unwrap();
-    let bound: i64 = conn
-        .query_row("SELECT remote_id FROM articles WHERE id = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(bound, 42);
-
-    // 版本号
-    let v: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert!(v >= 2, "user_version must be >= 2, got {v}");
-
-    let _ = std::fs::remove_file(&tmp);
-    println!("=== MIGRATION v1→v2 PASS (version {v}) ===");
+    let before = std::fs::read(&path).unwrap();
+    let err = db::open(&path).unwrap_err();
+    assert_eq!(err.code, "unsupported_database");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let conn =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT value FROM legacy", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "keep me"
+    );
 }
 
 #[test]
-fn migration_v6_to_v7_backfills_precise_url_norm() {
-    let tmp = common::unique_db_path("migration_v7_test");
-    let _ = std::fs::remove_file(&tmp);
+fn new_format_reopen_preserves_current_entities_and_pending_intent() {
+    let path = common::unique_db_path("current_format_reopen");
+    let _guard = common::TempDbGuard::new(path.clone());
+    let conn = db::open(&path).unwrap();
+    conn.execute_batch("INSERT INTO feeds(id,feed_url,title) VALUES(1,'https://example.invalid/rss','source'); INSERT INTO articles(id,feed_id,guid,title) VALUES(1,1,'guid','article');").unwrap();
+    db::set_read_with_enqueue(&conn, 1, true).unwrap();
+    let before = db::take_sync_queue(&conn).unwrap().remove(0).id;
+    drop(conn);
+    let conn = db::open(&path).unwrap();
+    assert!(db::get_article(&conn, 1).unwrap().unwrap().is_read);
+    assert_eq!(db::take_sync_queue(&conn).unwrap()[0].id, before);
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(
+        conn.pragma_query_value(None, "application_id", |r| r.get::<_, i64>(0))
+            .unwrap()
+            > 0
+    );
+}
 
-    // 手工建 v6 形状库：v5 + deduped_urls 表
-    {
-        let conn = Connection::open(&tmp).unwrap();
-        conn.execute_batch(r#"
-            CREATE TABLE folders (id INTEGER PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
-                layout TEXT NOT NULL DEFAULT 'article', auto_summary INTEGER NOT NULL DEFAULT 1,
-                auto_translate INTEGER NOT NULL DEFAULT 0, collapsed INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')), miniflux_id INTEGER);
-            CREATE TABLE feeds (id INTEGER PRIMARY KEY, feed_url TEXT NOT NULL UNIQUE, site_url TEXT,
-                title TEXT NOT NULL, favicon_url TEXT, folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
-                layout TEXT NOT NULL DEFAULT 'inherit', auto_summary INTEGER NOT NULL DEFAULT 1,
-                auto_translate INTEGER NOT NULL DEFAULT 0, etag TEXT, last_modified TEXT, last_fetched_at TEXT,
-                fetch_error TEXT, fetch_failed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                fail_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, miniflux_id INTEGER);
-            CREATE TABLE articles (id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
-                guid TEXT NOT NULL, url TEXT, title TEXT NOT NULL, author TEXT, summary TEXT, content_html TEXT,
-                body_text TEXT NOT NULL DEFAULT '', image_url TEXT, enclosure_url TEXT, enclosure_mime TEXT,
-                duration_sec INTEGER, ai_summary TEXT, translated_content TEXT, source TEXT NOT NULL DEFAULT 'direct',
-                published_at TEXT, fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-                is_read INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0,
-                miniflux_id INTEGER, fulltext_extracted INTEGER NOT NULL DEFAULT 0, UNIQUE(feed_id, guid));
-            -- 真实 v3 就有的 FTS 表与 3 个触发器（R2：v6 夹具此前漏建；v14 的
-            -- articles_au 引用 articles_fts，v18 的 RENAME 重解析 schema 时
-            -- 缺表会让整个迁移失败。语句与现行 migrations.rs 已发布的 v3 SQL
-            -- 对齐，放在插入数据之前）
-            CREATE VIRTUAL TABLE articles_fts USING fts5(
-                title, body_text, author, ai_summary, translated_content,
-                content='articles', content_rowid='id',
-                tokenize='unicode61'
-            );
-            INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
-                SELECT id, title, body_text, COALESCE(author, ''), COALESCE(ai_summary, ''), COALESCE(translated_content, '')
-                FROM articles;
-            CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN
-                INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
-                VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''),
-                        COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
-            END;
-            CREATE TRIGGER articles_ad AFTER DELETE ON articles BEGIN
-                INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
-                VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''),
-                        COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
-            END;
-            CREATE TRIGGER articles_au AFTER UPDATE ON articles BEGIN
-                INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
-                VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''),
-                        COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
-                INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
-                VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''),
-                        COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
-            END;
-            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE deduped_urls (url TEXT PRIMARY KEY, kept_aid INTEGER NOT NULL, kept_at TEXT NOT NULL DEFAULT (datetime('now')));
-            -- 真实 v6 库在 v2 就有 sync_queue（TASK-099 v14 起对其建索引，
-            -- 夹具必须与真实 v6 形态一致；此前缺失是因为旧迁移从未触碰它）
-            CREATE TABLE sync_queue (id INTEGER PRIMARY KEY,
-                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
-                feed_url TEXT, action TEXT NOT NULL, payload TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')));
-        "#).unwrap();
-        conn.execute("INSERT INTO folders (name) VALUES ('Cat')", [])
-            .unwrap();
-        conn.execute(
-            "INSERT INTO feeds (feed_url, title, folder_id) VALUES ('https://example.com/rss', 'F', 1)",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO articles (feed_id, guid, url, title) VALUES (1, 'g1', 'https://www.example.com/story/?utm_source=rss&id=9', 'Dressed URL')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO articles (feed_id, guid, url, title) VALUES (1, 'g2', 'http://example.com/story?id=9', 'Clean URL')",
-            [],
-        ).unwrap();
-        conn.pragma_update(None, "user_version", 6).unwrap();
-    }
+#[test]
+fn manual_current_backup_can_be_opened_with_saved_body_and_archived_source() {
+    let path = common::unique_db_path("current_backup_restore");
+    let _guard = common::TempDbGuard::new(path.clone());
+    let conn = db::open(&path).unwrap();
+    conn.execute_batch("INSERT INTO feeds(id,feed_url,title) VALUES(1,'https://example.invalid/rss','source'); INSERT INTO articles(id,feed_id,guid,title,is_starred) VALUES(1,1,'guid','saved',1);").unwrap();
+    db::backfill_article_content(
+        &conn,
+        1,
+        "<p>saved body</p>",
+        "saved body",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    app_lib::commands::record_feed_deletion(&conn, 1).unwrap();
+    let info = db::create_manual_backup(&conn).unwrap();
+    let snapshot = std::path::PathBuf::from(info.path);
+    let _backup_guard = common::TempDbGuard::new(snapshot.clone());
+    let restored = db::open(&snapshot).unwrap();
+    let saved = db::get_article(&restored, 1).unwrap().unwrap();
+    assert!(saved.is_starred && saved.retained);
+    assert_eq!(saved.content_html.as_deref(), Some("<p>saved body</p>"));
+    assert!(db::list_feeds(&restored).unwrap().is_empty());
+    assert_eq!(db::list_article_sources(&restored).unwrap().len(), 1);
+}
 
-    let conn = db::open(&tmp).expect("migrate v6→v7");
-
-    // url_norm 由 Rust normalize_url 精确回填（非 lower(url) 占位）
-    let (n1, n2): (String, String) = conn
+#[test]
+fn current_schema_constraints_and_foreign_keys_hold_after_reopen() {
+    let path = common::unique_db_path("current_schema_constraints");
+    let _guard = common::TempDbGuard::new(path.clone());
+    let conn = db::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let folder = db::create_folder(&conn, "Current", "article").unwrap();
+    let feed = db::insert_feed(
+        &conn,
+        "https://current.invalid/rss",
+        None,
+        "Current",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let defaults: (String, String) = conn
         .query_row(
-            "SELECT (SELECT url_norm FROM articles WHERE guid='g1'), (SELECT url_norm FROM articles WHERE guid='g2')",
+            "SELECT summary_mode,translate_mode FROM folders WHERE id=?1",
+            [folder],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(defaults, ("inherit".into(), "inherit".into()));
+    for table in ["feeds", "folders"] {
+        assert!(conn
+            .execute(&format!("UPDATE {table} SET summary_mode='invalid'"), [])
+            .is_err());
+        assert!(conn
+            .execute(&format!("UPDATE {table} SET translate_mode='invalid'"), [])
+            .is_err());
+    }
+    assert!(conn.execute("INSERT INTO articles(feed_id,guid,title,image_source) VALUES(?1,'bad-cover','bad','unknown')", [feed]).is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO articles(feed_id,guid,title) VALUES(99999,'bad','bad')",
+            []
+        )
+        .is_err());
+    conn.execute(
+        "INSERT INTO articles(feed_id,guid,title,published_at) VALUES(?1,'date','date','')",
+        [feed],
+    )
+    .unwrap();
+    let inferred: (String, String) = conn
+        .query_row(
+            "SELECT published_at,first_seen_at FROM articles WHERE guid='date'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
+    assert!(!inferred.0.is_empty() && !inferred.1.is_empty());
+    assert!(conn.execute("INSERT INTO subscription_outbox(account_generation,account_key,action,feed_url) VALUES(0,'x','invalid','x')",[]).is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO sync_queue(action,status) VALUES('read','invalid')",
+            []
+        )
+        .is_err());
+    assert!(conn
+        .prepare("SELECT rowid FROM articles_trigram_idx WHERE articles_trigram_idx MATCH 'dat'")
+        .is_ok());
+    drop(conn);
+    let conn = db::open(&path).unwrap();
     assert_eq!(
-        n1, n2,
-        "dressed URL and clean URL must normalize to the same key"
+        conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
     );
-    assert!(
-        n1 == "http://example.com/story?id=9",
-        "normalized form: got {n1}"
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        0
     );
+}
 
-    // remote_dup_ids 列存在且默认空
-    let dups: String = conn
-        .query_row(
-            "SELECT remote_dup_ids FROM articles WHERE guid='g1'",
-            [],
-            |r| r.get(0),
+#[test]
+fn foreign_application_id_and_future_schema_are_read_only_rejected() {
+    for (tag, version, app_id) in [("foreign", 1, 17), ("future", 2, 1_179_796_018)] {
+        let path = common::unique_db_path(tag);
+        let _guard = common::TempDbGuard::new(path.clone());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE retained(value TEXT);INSERT INTO retained VALUES('keep');",
         )
         .unwrap();
-    assert_eq!(dups, "");
+        conn.pragma_update(None, "user_version", version).unwrap();
+        conn.pragma_update(None, "application_id", app_id).unwrap();
+        drop(conn);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(db::open(&path).unwrap_err().code, "unsupported_database");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
 
-    let v: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert!(
-        v >= 7,
-        "v6 schema must migrate through v7 (url_norm), got {v}"
-    );
-
-    let _ = std::fs::remove_file(&tmp);
-    println!("=== MIGRATION v6→v7 PASS ===");
+#[test]
+fn pre_provenance_current_format_is_read_only_rejected() {
+    let path = common::unique_db_path("pre_provenance_format");
+    let _guard = common::TempDbGuard::new(path.clone());
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE articles(id INTEGER PRIMARY KEY,image_url TEXT);INSERT INTO articles VALUES(1,'keep.png');PRAGMA application_id=1179796018;PRAGMA user_version=1;").unwrap();
+    drop(conn);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(db::open(&path).unwrap_err().code, "unsupported_database");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }

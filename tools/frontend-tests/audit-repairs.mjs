@@ -3,13 +3,23 @@ export const id = 'audit-repairs';
 export async function run(ctx) {
   const { S, store, mkRow, resetStore, checkNew, nTick } = ctx;
   ctx.useMainBackend();
-  for (const field of ['isRead', 'isStarred']) for (const initial of [false, true]) for (const dedup of [false, true]) {
+  // 旧smartDedup开/关已删除；保留整套结果矩阵并改测权威scope快照与缺scope回退两条实际读取路径。
+  const withScopeCounts = (enabled) => {
+    if (!enabled) return;
+    S.scopeCountsImpl = () => {
+      const own = ctx.countsFromRows().find((row) => row.feed_id === 10);
+      const counts = { total: own.total, unread: own.unread, starred: own.starred, today: own.today };
+      return { all: counts, folders: [{scope_id:1,...counts}], feeds: [{scope_id:10,...counts}] };
+    };
+  };
+  for (const field of ['isRead', 'isStarred']) for (const initial of [false, true]) for (const scopeSnapshot of [false, true]) {
     for (const count of [2, 3]) {
       for (let mask = 0; mask < (1 << count); mask++) {
-        await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: dedup } });
+        await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false } });
         const column = field === 'isRead' ? 'is_read' : 'is_starred';
         S.backendRows = [mkRow({ id: 88001, [column]: initial })];
         S.feedCountsImpl = ctx.countsFromRows;
+        withScopeCounts(scopeSnapshot);
         await store.getState().reloadFromBackend();
         const original = globalThis.__INVOKE__;
         const held = [];
@@ -28,14 +38,15 @@ export async function run(ctx) {
             if (mask & (1 << index)) {
               expected = index % 2 === 0 ? !initial : initial;
               S.backendRows[0][column] = expected;
-              request.resolve(null);
+              request.resolve(field === 'isRead' ? [{id:88001,feed_id:10}] : null);
             } else request.reject({ message: 'transaction rejected before commit' });
             await nTick(4);
           }
           await nTick(35);
-          checkNew(`AF1 ${field} initial=${initial} dedup=${dedup} ${count}意图mask=${mask}：实际串行提交、末成功意图与计数`,
+          checkNew(`AF1 ${field} initial=${initial} scopeSnapshot=${scopeSnapshot} ${count}意图mask=${mask}：实际串行提交、末成功意图与计数`,
             serial && held.length === count && store.getState().entries[0][field] === expected && S.backendRows[0][column] === expected
-            && store.getState().feedCounts.get('10')?.[field === 'isRead' ? 'unread' : 'starred'] === (field === 'isRead' ? Number(!expected) : Number(expected)));
+            && store.getState().feedCounts.get('10')?.[field === 'isRead' ? 'unread' : 'starred'] === (field === 'isRead' ? Number(!expected) : Number(expected))
+            && ctx.selectViewCounts(store.getState())[field === 'isRead' ? 'unread' : 'starred'] === (field === 'isRead' ? Number(!expected) : Number(expected)));
         } finally { globalThis.__INVOKE__ = original; }
       }
     }
@@ -67,7 +78,7 @@ export async function run(ctx) {
     } finally { globalThis.__INVOKE__ = original; }
   }
   for (const field of ['isRead', 'isStarred']) {
-    await resetStore({ settings: { ...store.getState().settings, smartDedup: false } });
+    await resetStore({ settings: { ...store.getState().settings } });
     S.backendRows = [mkRow({ id: 88003, is_read: false, is_starred: false })];
     S.feedCountsImpl = ctx.countsFromRows;
     await store.getState().reloadFromBackend();
@@ -99,12 +110,13 @@ export async function run(ctx) {
     } finally { globalThis.__INVOKE__ = original; }
   }
   // 各标读入口必须与toggle共享实际IPC顺序；成功不能被旧请求逆序提交覆盖。
-  for (const dedup of [false, true]) for (const mode of ['bulk-first', 'open-first', 'anchor-first', 'all-first', 'toggle-first-bulk', 'toggle-first-open', 'toggle-first-all']) {
+  for (const scopeSnapshot of [false, true]) for (const mode of ['bulk-first', 'open-first', 'anchor-first', 'all-first', 'toggle-first-bulk', 'toggle-first-open', 'toggle-first-all']) {
     for (const mask of [0, 1, 2, 3]) {
       const initial = mode.startsWith('toggle-first');
-      await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: true, smartDedup: dedup, defaultOpenMode: 'rss' } });
+      await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: true, defaultOpenMode: 'rss' } });
       S.backendRows = [mkRow({ id: 88004, is_read: initial })];
       S.feedCountsImpl = ctx.countsFromRows;
+      withScopeCounts(scopeSnapshot);
       S.detailImpl = () => S.backendRows[0];
       await store.getState().reloadFromBackend();
       const original = globalThis.__INVOKE__;
@@ -129,19 +141,20 @@ export async function run(ctx) {
           if (mask & (1 << index)) {
             expected = request.cmd === 'set_read' ? request.args.read : true;
             S.backendRows[0].is_read = expected;
-            request.resolve(request.cmd === 'mark_all_read' ? 1 : null);
+            request.resolve(request.cmd === 'mark_all_read' ? 1 : [{id:88004,feed_id:10}]);
           } else request.reject({ message: 'precommit rejected' });
           await nTick(5);
         }
         await nTick(35);
-        checkNew(`AF1 ${mode} dedup=${dedup} mask=${mask}：共同执行前沿、末成功意图/失败基线/计数`, serial
+        checkNew(`AF1 ${mode} scopeSnapshot=${scopeSnapshot} mask=${mask}：共同执行前沿、末成功意图/失败基线/计数`, serial
           && store.getState().entries[0].isRead === expected
-          && store.getState().feedCounts.get('10')?.unread === Number(!expected));
+          && store.getState().feedCounts.get('10')?.unread === Number(!expected)
+          && ctx.selectViewCounts(store.getState()).unread === Number(!expected));
       } finally { globalThis.__INVOKE__ = original; }
     }
   }
   {
-    await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: false } });
+    await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false } });
     S.backendRows = [mkRow({ id: 88005 })]; S.feedCountsImpl = ctx.countsFromRows;
     await store.getState().reloadFromBackend();
     const original = globalThis.__INVOKE__;
@@ -163,7 +176,7 @@ export async function run(ctx) {
     } finally { globalThis.__INVOKE__ = original; }
   }
   for (const change of ['switch-view', 'move-source', 'delete-entry']) {
-    await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: false } });
+    await resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false } });
     S.backendRows = [mkRow({ id: 88006 })]; S.feedCountsImpl = ctx.countsFromRows;
     await store.getState().reloadFromBackend();
     const original = globalThis.__INVOKE__;
@@ -181,8 +194,9 @@ export async function run(ctx) {
       held[1].reject({ message: 'old second rejected' }); await nTick(35);
       const { localFlagWritesPending } = await import('../../dist-test/store/internals.js');
       const row = store.getState().entries.find((entry) => entry.id === '88006');
-      checkNew(`AF1 ${change}在途旧写结算：不复活窗口外/已删除行并释放在途`, localFlagWritesPending() === 0
-        && (change === 'move-source' ? row?.feedId === '11' && !row.isRead : !row));
+      checkNew(`AF1 ${change}在途旧写结算：不复活窗口外实体，明确删除只保不可用占位并释放在途`, localFlagWritesPending() === 0
+        && (change === 'move-source' ? row?.feedId === '11' && !row.isRead
+          : change === 'delete-entry' ? row?.unavailable === true && row?.bodyMissing === true : !row));
       if (change === 'move-source') checkNew('AF1 来源迁移后计数跟随当前来源且无旧乐观残留',
         store.getState().feedCounts.get('11')?.unread === 1);
       // 旧链释放后同id的新操作仍能成功，不能留下锁住字段的队尾/声明。

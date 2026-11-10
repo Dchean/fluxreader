@@ -4,7 +4,7 @@
 //!
 //! OPT-010 增补：两段式 plan/apply（结构化预览、快照 hash + 配置版本 CAS、
 //! 单事务全有全无）、镜像模式删除语义（仅删列出对象、不产生远端退订 outbox、
-//! 不误删共享 contents、先移动后删目录）、schema2 稳定身份与 schema1 兼容。
+//! 不误删共享 contents、先移动后删目录）、schema3 分组三态与稳定身份。
 //! 运行：cargo test --test config_sync_e2e
 
 use app_lib::config_sync::{
@@ -219,7 +219,7 @@ fn apply_preserves_local_credentials_and_stores_pending_connection_only() {
 
     // 远端 payload 包含不同的非敏感配置和设置，但不包含凭据（模拟白名单构建）
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![],
@@ -308,7 +308,7 @@ fn apply_preserves_local_credentials_and_stores_pending_connection_only() {
 fn pending_suggestion_serial_is_monotonic_and_aba_safe() {
     fn payload_with(cc: app_lib::config_sync::ConnectionConfig) -> SyncPayload {
         SyncPayload {
-            schema: 1,
+            schema: 3,
             uploaded_at: "2026-09-01T00:00:00Z".into(),
             folders: vec![],
             feeds: vec![],
@@ -395,7 +395,7 @@ fn apply_without_connection_config_leaves_pending_untouched() {
     db::set_setting(&conn, "pending_connection_config", "{}").unwrap();
 
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![],
@@ -446,7 +446,7 @@ fn remote_missing_whitelist_setting_is_deleted_locally() {
 
     // 远端 payload 只带 themeMode —— 即「用户在服务端删掉了 fontSize」
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![],
@@ -487,7 +487,7 @@ fn malformed_remote_settings_does_not_wipe_local() {
 
     // 非对象（字符串）→ 解析成 Value 但 as_object() 为 None
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![],
@@ -512,14 +512,14 @@ fn payload_contains_all_config_domains() {
     seed_db(&conn);
 
     let p = build_payload(&conn).unwrap();
-    // OPT-010：schema 追加为 2（目录携带稳定 sync_id；源仍以 URL 为身份）。
-    assert_eq!(p.schema, 2);
+    // schema3 显式携带分组三态，目录稳定 sync_id 与源 URL 身份继续保留。
+    assert_eq!(p.schema, 3);
     assert_eq!(p.folders.len(), 2);
     assert!(
         p.folders
             .iter()
             .all(|f| f.sync_id.as_deref().is_some_and(|s| !s.is_empty())),
-        "schema2 快照的每个分类必须携带稳定 sync_id: {:?}",
+        "当前快照的每个分类必须携带稳定 sync_id: {:?}",
         p.folders
     );
     assert_eq!(p.feeds.len(), 2);
@@ -570,7 +570,7 @@ fn apply_upserts_feeds_and_overrides_settings() {
     .unwrap();
 
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![
             app_lib::config_sync::FolderSpec {
@@ -578,6 +578,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "article".into(),
                 auto_summary: true,
                 auto_translate: false,
+                summary_mode: "inherit".into(),
+                translate_mode: "inherit".into(),
                 position: 0,
                 sync_id: None,
             },
@@ -586,6 +588,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "podcast".into(),
                 auto_summary: false,
                 auto_translate: true,
+                summary_mode: "inherit".into(),
+                translate_mode: "inherit".into(),
                 position: 1,
                 sync_id: None,
             },
@@ -620,7 +624,7 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 site_url: None,
                 favicon_url: None,
             },
-            // 新源 + 新分类名 → 分类创建后导入（旧 schema1：无 mode 字段）
+            // 新源 + 新分类名 → 分类创建后导入（保留源字段的无 mode 输入语义）
             app_lib::config_sync::FeedSpec {
                 url: "https://pod.com/rss".into(),
                 title: "播客源".into(),
@@ -735,7 +739,7 @@ fn apply_upserts_feeds_and_overrides_settings() {
             legacy_feed.translate_mode.as_str()
         ),
         ("off", "off"),
-        "旧 schema1（无 mode）按 bool 映射显式 on/off——绝不引入 inherit 开启"
+        "源无 mode 的保留输入按 bool 映射显式 on/off——绝不引入 inherit 开启"
     );
 
     // 设置被覆盖
@@ -783,13 +787,15 @@ fn empty_or_url_titles_do_not_overwrite_existing_custom_title() {
         favicon_url: None,
     };
     let payload_with = |feed: FeedSpec| SyncPayload {
-        schema: 2,
+        schema: 3,
         uploaded_at: "2026-11-04T00:00:00Z".into(),
         folders: vec![FolderSpec {
             name: "技术".into(),
             layout: "article".into(),
             auto_summary: true,
             auto_translate: false,
+            summary_mode: "inherit".into(),
+            translate_mode: "inherit".into(),
             position: 0,
             sync_id: None,
         }],
@@ -847,13 +853,15 @@ fn empty_or_url_titles_do_not_overwrite_existing_custom_title() {
     );
 
     let add_payload = SyncPayload {
-        schema: 2,
+        schema: 3,
         uploaded_at: "2026-11-04T00:00:01Z".into(),
         folders: vec![FolderSpec {
             name: "技术".into(),
             layout: "article".into(),
             auto_summary: true,
             auto_translate: false,
+            summary_mode: "inherit".into(),
+            translate_mode: "inherit".into(),
             position: 0,
             sync_id: None,
         }],
@@ -925,7 +933,7 @@ fn sink_resolution_picks_oldest_folder_when_duplicates_exist() {
     db::create_folder(&conn, "导入", "podcast").unwrap();
 
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-11-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![FeedSpec {
@@ -977,13 +985,15 @@ fn apply_rejects_illegal_feed_mode_and_rolls_back() {
     let conn = db::open(&tmp).unwrap();
 
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![app_lib::config_sync::FolderSpec {
             name: "非法模式目录".into(),
             layout: "article".into(),
             auto_summary: false,
             auto_translate: false,
+            summary_mode: "inherit".into(),
+            translate_mode: "inherit".into(),
             position: 0,
             sync_id: None,
         }],
@@ -1038,13 +1048,15 @@ fn apply_rejects_invalid_remote_refresh_interval_and_rolls_back() {
         db::create_folder(&conn, "本地分类", "article").unwrap();
 
         let payload = SyncPayload {
-            schema: 1,
+            schema: 3,
             uploaded_at: "2026-09-01T00:00:00Z".into(),
             folders: vec![app_lib::config_sync::FolderSpec {
                 name: "远端分类".into(),
                 layout: "article".into(),
                 auto_summary: false,
                 auto_translate: false,
+                summary_mode: "inherit".into(),
+                translate_mode: "inherit".into(),
                 position: 0,
                 sync_id: None,
             }],
@@ -1098,7 +1110,7 @@ fn apply_accepts_integral_remote_refresh_interval_normalized() {
 
     let apply_with = |raw: &str| {
         let payload = SyncPayload {
-            schema: 1,
+            schema: 3,
             uploaded_at: "2026-09-01T00:00:00Z".into(),
             folders: vec![],
             feeds: vec![],
@@ -1287,13 +1299,15 @@ fn apply_failure_rolls_back_the_whole_payload() {
     let conn = db::open(&tmp).unwrap();
 
     let payload = SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![app_lib::config_sync::FolderSpec {
             name: "回滚目录".into(),
             layout: "article".into(),
             auto_summary: false,
             auto_translate: false,
+            summary_mode: "inherit".into(),
+            translate_mode: "inherit".into(),
             position: 0,
             sync_id: None,
         }],
@@ -1349,6 +1363,8 @@ fn opt010_folder(name: &str, sync_id: Option<&str>) -> FolderSpec {
         layout: "article".into(),
         auto_summary: false,
         auto_translate: false,
+        summary_mode: "inherit".into(),
+        translate_mode: "inherit".into(),
         position: 0,
         sync_id: sync_id.map(String::from),
     }
@@ -1372,7 +1388,7 @@ fn opt010_feed(url: &str, title: &str, folder: &str) -> FeedSpec {
 
 fn opt010_payload(folders: Vec<FolderSpec>, feeds: Vec<FeedSpec>) -> SyncPayload {
     SyncPayload {
-        schema: 2,
+        schema: 3,
         uploaded_at: "2026-10-15T00:00:00Z".into(),
         folders,
         feeds,
@@ -1414,7 +1430,7 @@ fn opt010_count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
-/// 本地分类的稳定身份（真实 schema2 快照形态：build_payload 产物必带 sync_id）。
+/// 本地分类的稳定身份（build_payload 产物必带 sync_id）。
 fn opt010_local_uid(conn: &Connection, name: &str) -> String {
     db::list_folders(conn)
         .unwrap()
@@ -2076,7 +2092,7 @@ fn mid_apply_failure_rolls_back_whole_mirror() {
         vec![opt010_feed("https://new.example/rss", "新增源", "新增")],
     );
     conn.execute_batch(
-        "CREATE TRIGGER opt010_fail BEFORE DELETE ON feeds WHEN old.feed_url = 'https://b.example/rss'
+        "CREATE TRIGGER opt010_fail BEFORE UPDATE OF active ON feeds WHEN NEW.active=0 AND old.feed_url = 'https://b.example/rss'
          BEGIN SELECT RAISE(ABORT, 'inject-delete-fail'); END;",
     )
     .unwrap();
@@ -2353,32 +2369,31 @@ fn plan_exposes_settings_delta_and_never_echoes_secrets() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// 旧 schema1 快照（无稳定 ID / 无 mode）仍可合并；创建的对象获得本地稳定身份，
+/// 当前快照缺稳定 ID 时仍按名称保守合并；创建的对象获得本地稳定身份，
 /// 重放幂等（不因缺少远端 sync_id 反复改写）。
 #[test]
-fn schema1_payload_still_merges_and_assigns_local_identity() {
-    let tmp = common::unique_db_path("cfgsync_opt010_schema1");
+fn current_payload_without_identity_merges_and_assigns_local_identity() {
+    let tmp = common::unique_db_path("cfgsync_without_identity");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 
-    let mut payload = opt010_payload(
+    let payload = opt010_payload(
         vec![opt010_folder("分类", None)],
         vec![opt010_feed("https://s1.example/rss", "老源", "分类")],
     );
-    payload.schema = 1;
     let outcome = apply_payload(&conn, &payload).unwrap();
-    assert_eq!(outcome.imported, 1, "schema1 快照可合并导入");
+    assert_eq!(outcome.imported, 1, "当前无身份快照可合并导入");
     let folders = db::list_folders(&conn).unwrap();
     assert_eq!(folders.len(), 1);
     assert!(
         folders[0].sync_id.as_deref().is_some_and(|s| !s.is_empty()),
-        "schema1 导入创建的目录也必须获得本地稳定身份（供后续快照携带）"
+        "无身份导入创建的目录也必须获得本地稳定身份（供后续快照携带）"
     );
     let outcome2 = apply_payload(&conn, &payload).unwrap();
     assert_eq!(
         (outcome2.imported, outcome2.updated, outcome2.skipped),
         (0, 0, 1),
-        "schema1 重放幂等"
+        "无身份快照重放幂等"
     );
     let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
     assert_eq!(
@@ -2387,7 +2402,7 @@ fn schema1_payload_still_merges_and_assigns_local_identity() {
             plan["updates"].as_array().unwrap().len()
         ),
         (0, 0),
-        "schema1 重放的预览也应无变化: {plan}"
+        "无身份快照重放的预览也应无变化: {plan}"
     );
     let _ = std::fs::remove_file(&tmp);
 }
@@ -2504,11 +2519,11 @@ P0-1 回归：schema2 稳定身份的导入采用与重放幂等（r1 返工）
 「同名不同身份」冲突：合并每次新增重复目录、镜像每次删建往复。
 ============================================================ */
 
-/// 空库导入带身份 schema2 快照：目录身份必须等于远端值；同一快照重放两次
+/// 空库导入当前带身份快照：目录身份必须等于远端值；同一快照重放两次
 /// plan 全零（合并与镜像）；镜像重放 apply 零删除。
 /// 判别力：修前导入目录身份 ≠ 远端值 → 本组断言必红。
 #[test]
-fn schema2_import_adopts_remote_folder_identity_and_replays_idempotently() {
+fn current_import_adopts_remote_folder_identity_and_replays_idempotently() {
     let tmp = common::unique_db_path("cfgsync_opt010_identity");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
@@ -2798,4 +2813,533 @@ fn match_adoption_never_shares_identity_with_another_local_object() {
     );
     assert_eq!(dup, 0, "全库不得存在重复的非空 sync_id");
     let _ = std::fs::remove_file(&tmp);
+}
+
+/* 当前格式的分组三态：真实导出 → JSON → 预览 → checked apply。 */
+mod folder_ai_snapshot_regressions {
+    use super::*;
+    use app_lib::db::FeedAiMode;
+    use tauri::Manager;
+
+    fn fresh() -> Connection {
+        db::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    fn wire_roundtrip(conn: &Connection) -> SyncPayload {
+        let bytes = serde_json::to_vec(&build_payload(conn).unwrap()).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn config_state(conn: &Connection) -> serde_json::Value {
+        let mut snapshot = build_payload(conn).unwrap();
+        snapshot.uploaded_at.clear();
+        serde_json::to_value(snapshot).unwrap()
+    }
+
+    fn different(mode: FeedAiMode) -> FeedAiMode {
+        if mode == FeedAiMode::On {
+            FeedAiMode::Off
+        } else {
+            FeedAiMode::On
+        }
+    }
+
+    fn inherited_feed(conn: &Connection, folder: i64) {
+        let feed = db::insert_feed(
+            conn,
+            "https://modes.example/rss",
+            None,
+            "inherited source",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        db::set_feed_ai_modes(
+            conn,
+            feed,
+            Some(FeedAiMode::Inherit),
+            Some(FeedAiMode::Inherit),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn current_group_modes_roundtrip_all_states_new_existing_merge_mirror_and_replay() {
+        for summary in [FeedAiMode::Inherit, FeedAiMode::On, FeedAiMode::Off] {
+            for translate in [FeedAiMode::Inherit, FeedAiMode::On, FeedAiMode::Off] {
+                let source = fresh();
+                let group = db::create_folder(&source, "G", "article").unwrap();
+                // 旧 bool 与新 mode 独立，尤其 true/false + off/on 不能反推授权。
+                db::set_folder_ai_flags(&source, group, true, false).unwrap();
+                db::set_folder_ai_modes(&source, group, Some(summary), Some(translate)).unwrap();
+                inherited_feed(&source, group);
+                db::set_setting(
+                    &source,
+                    "app_settings",
+                    r#"{"articleAutoSummary":true,"articleAutoTranslate":false}"#,
+                )
+                .unwrap();
+                let payload = wire_roundtrip(&source);
+                assert_eq!(payload.schema, 3);
+                assert_eq!(payload.folders[0].summary_mode, summary.as_str());
+                assert_eq!(payload.folders[0].translate_mode, translate.as_str());
+
+                for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+                    for existing in [false, true] {
+                        let destination = fresh();
+                        if existing {
+                            let id = db::create_folder_with_sync_id(
+                                &destination,
+                                "G",
+                                "article",
+                                payload.folders[0].sync_id.as_deref(),
+                            )
+                            .unwrap();
+                            db::set_folder_ai_flags(&destination, id, true, false).unwrap();
+                            db::set_folder_ai_modes(
+                                &destination,
+                                id,
+                                Some(different(summary)),
+                                Some(different(translate)),
+                            )
+                            .unwrap();
+                            inherited_feed(&destination, id);
+                        }
+                        db::create_folder(&destination, "local-only", "article").unwrap();
+                        let preview = plan_payload(&destination, &payload, mode).unwrap();
+                        if existing {
+                            let json = serde_json::to_value(&preview).unwrap();
+                            let group_update = json["updates"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .find(|item| item["kind"] == "folder")
+                                .unwrap();
+                            assert_eq!(
+                                group_update["changes"],
+                                serde_json::json!(["summaryMode", "translateMode"]),
+                                "相同旧 bool 下的纯模式差异必须在预览显示"
+                            );
+                        }
+                        let outcome = apply_payload_checked(
+                            &destination,
+                            &payload,
+                            mode,
+                            Some(&preview.snapshot_hash),
+                            Some(&preview.current_version),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            outcome.removed_folders,
+                            usize::from(mode == ApplyMode::Mirror)
+                        );
+                        let restored = db::list_folders(&destination).unwrap();
+                        let restored_group = restored.iter().find(|f| f.name == "G").unwrap();
+                        assert_eq!(restored_group.sync_id, payload.folders[0].sync_id);
+                        assert_eq!(restored_group.summary_mode, summary.as_str());
+                        assert_eq!(restored_group.translate_mode, translate.as_str());
+                        assert!(restored_group.auto_summary && !restored_group.auto_translate);
+                        assert_eq!(restored.len(), if mode == ApplyMode::Merge { 2 } else { 1 });
+                        let feeds = db::list_feeds(&destination).unwrap();
+                        assert_eq!(feeds.len(), 1);
+                        assert_eq!(feeds[0].folder_id, restored_group.id);
+                        assert_eq!(feeds[0].summary_mode, "inherit");
+                        assert_eq!(feeds[0].translate_mode, "inherit");
+                        let settings: serde_json::Value = serde_json::from_str(
+                            &db::get_setting(&destination, "app_settings")
+                                .unwrap()
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(settings["articleAutoSummary"], true);
+                        assert_eq!(settings["articleAutoTranslate"], false);
+
+                        let before_replay = config_state(&destination);
+                        let replay = plan_payload(&destination, &payload, mode).unwrap();
+                        assert!(replay.additions.is_empty());
+                        assert!(replay.updates.is_empty());
+                        assert!(replay.removals.is_empty());
+                        assert!(replay.settings_changed_keys.is_empty());
+                        assert!(replay.settings_removed_keys.is_empty());
+                        let repeated = apply_payload_checked(
+                            &destination,
+                            &payload,
+                            mode,
+                            Some(&replay.snapshot_hash),
+                            Some(&replay.current_version),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            (repeated.imported, repeated.updated, repeated.skipped),
+                            (0, 0, 1)
+                        );
+                        assert_eq!(config_state(&destination), before_replay);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mode_only_update_preserves_duplicate_and_whitespace_group_names() {
+        let source = fresh();
+        for _ in 0..2 {
+            let id = db::create_folder(&source, " G ", "article").unwrap();
+            db::set_folder_ai_modes(&source, id, Some(FeedAiMode::Off), Some(FeedAiMode::On))
+                .unwrap();
+        }
+        let payload = wire_roundtrip(&source);
+        for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+            let destination = fresh();
+            for (position, folder) in payload.folders.iter().enumerate() {
+                let id = db::create_folder_with_sync_id(
+                    &destination,
+                    &folder.name,
+                    &folder.layout,
+                    folder.sync_id.as_deref(),
+                )
+                .unwrap();
+                assert_eq!(
+                    db::list_folders(&destination).unwrap()[position].name,
+                    " G "
+                );
+                db::set_folder_ai_modes(
+                    &destination,
+                    id,
+                    Some(FeedAiMode::On),
+                    Some(FeedAiMode::Off),
+                )
+                .unwrap();
+            }
+            let before = db::list_folders(&destination).unwrap();
+            let preview = plan_payload(&destination, &payload, mode).unwrap();
+            assert_eq!(preview.updates.len(), 2);
+            opt010_planned_apply(&destination, &payload, mode).unwrap();
+            let after = db::list_folders(&destination).unwrap();
+            for (index, row) in after.iter().enumerate() {
+                assert_eq!(
+                    (row.id, row.name.as_str(), row.position),
+                    (before[index].id, " G ", before[index].position)
+                );
+                assert_eq!(row.sync_id, before[index].sync_id);
+                assert_eq!(
+                    (&row.summary_mode[..], &row.translate_mode[..]),
+                    ("off", "on")
+                );
+            }
+            assert!(plan_payload(&destination, &payload, mode)
+                .unwrap()
+                .updates
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn each_group_mode_invalidates_local_preview_and_snapshot_hash_without_writes() {
+        for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+            for summary_field in [true, false] {
+                for mutate_local in [true, false] {
+                    let conn = fresh();
+                    let id = db::create_folder(&conn, "G", "article").unwrap();
+                    db::set_folder_ai_modes(
+                        &conn,
+                        id,
+                        Some(FeedAiMode::Off),
+                        Some(FeedAiMode::Off),
+                    )
+                    .unwrap();
+                    let mut payload = wire_roundtrip(&conn);
+                    let preview = plan_payload(&conn, &payload, mode).unwrap();
+                    if mutate_local {
+                        db::set_folder_ai_modes(
+                            &conn,
+                            id,
+                            summary_field.then_some(FeedAiMode::On),
+                            (!summary_field).then_some(FeedAiMode::On),
+                        )
+                        .unwrap();
+                    } else if summary_field {
+                        payload.folders[0].summary_mode = "on".into();
+                    } else {
+                        payload.folders[0].translate_mode = "on".into();
+                    }
+                    let current = plan_payload(&conn, &payload, mode).unwrap();
+                    if mutate_local {
+                        assert_ne!(current.current_version, preview.current_version);
+                        assert_eq!(current.snapshot_hash, preview.snapshot_hash);
+                    } else {
+                        assert_ne!(current.snapshot_hash, preview.snapshot_hash);
+                        assert_eq!(current.current_version, preview.current_version);
+                    }
+                    let before = config_state(&conn);
+                    let writes = conn.total_changes();
+                    let error = apply_payload_checked(
+                        &conn,
+                        &payload,
+                        mode,
+                        Some(&preview.snapshot_hash),
+                        Some(&preview.current_version),
+                    )
+                    .unwrap_err();
+                    assert_eq!(error.code, "stalePreview");
+                    assert_eq!(conn.total_changes(), writes);
+                    assert_eq!(config_state(&conn), before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_or_missing_group_modes_and_unsupported_schemas_fail_closed() {
+        let conn = fresh();
+        let id = db::create_folder(&conn, "keep", "article").unwrap();
+        db::set_folder_ai_modes(&conn, id, Some(FeedAiMode::Off), Some(FeedAiMode::On)).unwrap();
+        let before = config_state(&conn);
+        let writes = conn.total_changes();
+        let mut value = serde_json::to_value(wire_roundtrip(&conn)).unwrap();
+        value["folders"][0]["name"] = "would rename".into();
+        for field in ["summary_mode", "translate_mode"] {
+            for malformed in [
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(1),
+            ] {
+                let mut bad = value.clone();
+                bad["folders"][0][field] = malformed;
+                assert!(serde_json::from_value::<SyncPayload>(bad).is_err());
+            }
+            let mut missing = value.clone();
+            missing["folders"][0].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<SyncPayload>(missing).is_err());
+            for raw in ["", "maybe", "ON", " off "] {
+                let mut bad = value.clone();
+                bad["folders"][0][field] = raw.into();
+                let payload: SyncPayload = serde_json::from_value(bad).unwrap();
+                for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+                    assert_eq!(
+                        plan_payload(&conn, &payload, mode).unwrap_err().code,
+                        "validate"
+                    );
+                    assert_eq!(
+                        apply_payload_checked(
+                            &conn,
+                            &payload,
+                            mode,
+                            Some("unused"),
+                            Some("unused")
+                        )
+                        .unwrap_err()
+                        .code,
+                        "validate"
+                    );
+                    assert_eq!(conn.total_changes(), writes);
+                    assert_eq!(config_state(&conn), before);
+                }
+            }
+        }
+        for schema in [0, 1, 2, 4, 99] {
+            let mut invalid_version = value.clone();
+            invalid_version["schema"] = schema.into();
+            let payload: SyncPayload = serde_json::from_value(invalid_version).unwrap();
+            for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+                let error = plan_payload(&conn, &payload, mode).unwrap_err();
+                if schema < 3 {
+                    assert_eq!(error.code, "validate");
+                    assert!(error.message.contains("只接受 v3"));
+                } else {
+                    assert!(error.message.contains("升级客户端"));
+                }
+                assert!(apply_payload_checked(
+                    &conn,
+                    &payload,
+                    mode,
+                    Some("unused"),
+                    Some("unused")
+                )
+                .is_err());
+                assert_eq!(conn.total_changes(), writes);
+                assert_eq!(config_state(&conn), before);
+            }
+        }
+        assert_eq!(conn.total_changes(), writes);
+        assert_eq!(config_state(&conn), before);
+    }
+
+    #[test]
+    fn group_modes_and_legacy_flags_roll_back_with_later_apply_failure() {
+        for existing in [false, true] {
+            for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+                let source = fresh();
+                let id = db::create_folder(&source, "G", "article").unwrap();
+                db::set_folder_ai_flags(&source, id, true, false).unwrap();
+                db::set_folder_ai_modes(&source, id, Some(FeedAiMode::Off), Some(FeedAiMode::On))
+                    .unwrap();
+                let mut payload = wire_roundtrip(&source);
+                payload.app_settings = Some(r#"{"themeMode":"dark"}"#.into());
+                let destination = fresh();
+                if existing {
+                    let id = db::create_folder_with_sync_id(
+                        &destination,
+                        "G",
+                        "article",
+                        payload.folders[0].sync_id.as_deref(),
+                    )
+                    .unwrap();
+                    db::set_folder_ai_flags(&destination, id, false, true).unwrap();
+                    db::set_folder_ai_modes(
+                        &destination,
+                        id,
+                        Some(FeedAiMode::On),
+                        Some(FeedAiMode::Off),
+                    )
+                    .unwrap();
+                }
+                db::set_setting(&destination, "greader_password", "local-test-secret").unwrap();
+                destination
+                    .execute_batch(
+                        "CREATE TEMP TRIGGER reject_settings BEFORE INSERT ON settings
+                     WHEN NEW.key = 'app_settings'
+                     BEGIN SELECT RAISE(ABORT, 'test rejects settings after folder writes'); END;",
+                    )
+                    .unwrap();
+                let before = config_state(&destination);
+                let preview = plan_payload(&destination, &payload, mode).unwrap();
+                let error = apply_payload_checked(
+                    &destination,
+                    &payload,
+                    mode,
+                    Some(&preview.snapshot_hash),
+                    Some(&preview.current_version),
+                )
+                .unwrap_err();
+                assert_eq!(error.code, "db");
+                assert!(error
+                    .message
+                    .contains("test rejects settings after folder writes"));
+                assert_eq!(config_state(&destination), before);
+                assert_eq!(
+                    db::get_setting(&destination, "greader_password")
+                        .unwrap()
+                        .as_deref(),
+                    Some("local-test-secret")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_commands_check_real_schema_before_current_fields_and_keep_rejections_read_only() {
+        use app_lib::config_sync::{config_sync_apply, config_sync_download, config_sync_plan};
+        use app_lib::state::AppState;
+
+        let (port, remote) = start_webdav_mock();
+        let conn = fresh();
+        let folder = db::create_folder(&conn, "keep", "article").unwrap();
+        db::set_folder_ai_modes(&conn, folder, Some(FeedAiMode::Off), Some(FeedAiMode::On))
+            .unwrap();
+        db::set_setting(
+            &conn,
+            "config_sync_credentials",
+            &serde_json::to_string(&app_lib::config_sync::SyncCredentials {
+                backend: "webdav".into(),
+                token: "local-test-token".into(),
+                server: format!("http://127.0.0.1:{port}"),
+                username: "local-test-user".into(),
+                gist_id: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut current = serde_json::to_value(wire_roundtrip(&conn)).unwrap();
+        current["folders"][0]["summary_mode"] = "on".into();
+        let before = config_state(&conn);
+        let writes = conn.total_changes();
+        // MockRuntime 只为真实 command 提供托管 State；不创建窗口或 WebView。
+        let app = tauri::test::mock_builder()
+            .manage(AppState::new(
+                conn,
+                reqwest::Client::new(),
+                app_lib::media::MediaHandle::inactive(),
+            ))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let state = app.state::<AppState>();
+        let legacy = r#"{"schema":1,"uploaded_at":"old","folders":[{"name":"would replace","layout":"article","auto_summary":true,"auto_translate":false,"position":0}],"feeds":[],"app_settings":null,"connection_config":null}"#;
+        let mut rejected = Vec::new();
+        for schema in [0, 1, 2, 4, 99] {
+            // 真正旧文件没有组 mode，不能先构造补齐字段的 SyncPayload 再冒充 wire。
+            rejected.push((
+                legacy.replace("\"schema\":1", &format!("\"schema\":{schema}")),
+                "validate",
+                if schema < 3 {
+                    "重新导出"
+                } else {
+                    "升级客户端"
+                },
+            ));
+        }
+        for field in ["summary_mode", "translate_mode"] {
+            let mut missing = current.clone();
+            missing["folders"][0].as_object_mut().unwrap().remove(field);
+            rejected.push((missing.to_string(), "json", "missing field"));
+            let mut wrong_type = current.clone();
+            wrong_type["folders"][0][field] = serde_json::Value::Null;
+            rejected.push((wrong_type.to_string(), "json", "invalid type"));
+        }
+        for (raw, code, detail) in rejected {
+            *remote.lock().unwrap() = Some(raw.clone());
+            let errors = [
+                config_sync_download(state.clone()).await.unwrap_err(),
+                config_sync_plan(state.clone(), raw.clone(), Some("mirror".into()))
+                    .await
+                    .unwrap_err(),
+                config_sync_apply(
+                    state.clone(),
+                    raw,
+                    "mirror".into(),
+                    "unused".into(),
+                    "unused".into(),
+                    None,
+                )
+                .await
+                .unwrap_err(),
+            ];
+            for error in errors {
+                assert_eq!(error.code, code);
+                assert!(error.message.contains(detail), "{error}");
+            }
+            let conn = state.db.lock().await;
+            assert_eq!(conn.total_changes(), writes);
+            assert_eq!(config_state(&conn), before);
+        }
+
+        // 正向控制：当前格式经三个真实入口恢复显式模式，不能靠一律拒绝满足反例。
+        let raw = current.to_string();
+        *remote.lock().unwrap() = Some(raw.clone());
+        let downloaded = config_sync_download(state.clone()).await.unwrap();
+        assert_eq!(downloaded, raw);
+        let preview = config_sync_plan(state.clone(), downloaded.clone(), Some("merge".into()))
+            .await
+            .unwrap();
+        config_sync_apply(
+            state.clone(),
+            downloaded,
+            "merge".into(),
+            preview["snapshotHash"].as_str().unwrap().into(),
+            preview["currentVersion"].as_str().unwrap().into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let conn = state.db.lock().await;
+        let group = db::list_folders(&conn).unwrap().remove(0);
+        assert_eq!(group.name, "keep");
+        assert_eq!(
+            (&group.summary_mode[..], &group.translate_mode[..]),
+            ("on", "on")
+        );
+    }
 }

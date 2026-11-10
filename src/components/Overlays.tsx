@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
@@ -6,9 +6,12 @@ import { ModalOverlay, FluxDropdown, SwitchInline, AiModeSelect } from './primit
 import { useFocusTrap } from './useFocusTrap';
 import { LAYOUT_NO_AI } from './settings/shared';
 import { normalizeFeedAiMode } from '../types';
-import type { ArticleEntry, ContentLayoutType, FeedAiMode, FeedItem } from '../types';
+import { categoryAiDefaults } from '../store/aiPolicy';
+import type { ArticleEntry, CategoryGroup, ContentLayoutType, FeedAiMode, FeedItem } from '../types';
 import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
+import { galleryMediaKey } from '../lib/galleryMedia';
+import { canProxyImages, fetchProxiedImage, needsImageProxy } from '../lib/imageProxy';
 import {
   addFeedShowsSyncSwitch,
   addFeedSyncHint,
@@ -69,6 +72,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
   const [cursor, setCursor] = useState(0);
   const [searchError, setSearchError] = useState(false);
   const feedIndex = useAppStore((s) => s.feedIndex);
+  const sourceIndex = useAppStore((s) => s.sourceIndex);
   const syncMode = useAppStore((s) => s.settings.syncMode);
   const listRef = useRef<HTMLDivElement>(null);
   /* 键盘移动标记：scrollIntoView 只在键盘导航时触发 */
@@ -195,7 +199,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
           id: `art-${a.id}`,
           group: 'article',
           label: a.title,
-          hint: feedIndex.get(a.feedId)?.feed.name ?? '',
+          hint: (sourceIndex.get(a.feedId) ?? feedIndex.get(a.feedId))?.feed.name ?? '',
           run: () => {
             /* 文章：锚定打开——计算该文章在当前筛选下的绝对位置，从目标页
                加载列表（而非从头拉 500 篇），正确定位到很老的文章。
@@ -220,7 +224,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
       }
     }
     return out;
-  }, [q, feedIndex, resultsEffective, syncMode]);
+  }, [q, feedIndex, sourceIndex, resultsEffective, syncMode]);
 
   /* 光标重置：渲染期键检测模式，避免 set-state-in-effect */
   // Note: set-state-in-effect — 此处确有「effect 内 setState」；因该状态仅由本浮层的
@@ -366,11 +370,42 @@ function hostOf(url: string): string {
 export function Lightbox() {
   const lightboxUrl = useAppStore((s) => s.lightboxUrl);
   const lightboxEntryId = useAppStore((s) => s.lightboxEntryId);
+  const gallery = useAppStore((s) => s.lightboxGallery);
+  const activeArticleId = useAppStore((s) => s.activeArticleId);
+  const currentMediaKey = useAppStore((s) => {
+    const item = s.entries.find((entry) => entry.id === s.lightboxGallery?.entryId);
+    return item && !item.unavailable ? galleryMediaKey(item) : null;
+  });
   const closeLightbox = useAppStore((s) => s.closeLightbox);
+  const refreshGalleryLightbox = useAppStore((s) => s.refreshGalleryLightbox);
+  const stepGalleryLightbox = useAppStore((s) => s.stepGalleryLightbox);
   const overlayRef = useRef<HTMLDivElement>(null);
-  /* 同 ModalOverlay：焦点移入/归还与 Tab 循环由共享 useFocusTrap 提供
-     （灯箱内无 tabbable 元素 → Tab 焦点钉在容器上，不逃逸到背景）。 */
+  const focusedNodeRef = useRef<HTMLElement | null>(null);
+  const sourceKey = gallery?.sourceKey;
+  const pendingEntryId = gallery && !gallery.opened ? gallery.entryId : null;
+  useEffect(() => {
+    if (pendingEntryId && activeArticleId !== pendingEntryId) closeLightbox();
+    else if (sourceKey && sourceKey !== currentMediaKey) refreshGalleryLightbox();
+  }, [sourceKey, currentMediaKey, pendingEntryId, activeArticleId, closeLightbox, refreshGalleryLightbox]);
+  /* 同 ModalOverlay：焦点移入/归还与 Tab 循环由共享 useFocusTrap 提供。 */
   const { onTrapKeyDown } = useFocusTrap(!!lightboxUrl, overlayRef);
+  const current = !!gallery && sourceKey === currentMediaKey;
+  const imageUrl = current && gallery.status === 'ready' ? gallery.urls[gallery.index]
+    : current && gallery.status === 'loading' ? gallery.firstImageUrl : null;
+  const canStep = current && gallery.status === 'ready' && gallery.urls.length > 1;
+  // Note: 只接回本灯箱状态转换所失去的焦点，不抢其它模态/portal 的焦点 — 见 .agents/notes/implemented/feature/2026-11-01-模态焦点陷阱与dialog语义.md
+  useLayoutEffect(() => {
+    if (!lightboxUrl) { focusedNodeRef.current = null; return; }
+    const panel = overlayRef.current;
+    const previous = focusedNodeRef.current;
+    if (!panel || !previous) return;
+    const unavailable = !panel.contains(previous);
+    const active = document.activeElement;
+    // 分支移除内部控件时保留对话框焦点；导航按钮用 aria-disabled 保持原节点。
+    if (unavailable && (active === document.body || active === previous || active === null)) {
+      (panel.querySelector<HTMLElement>('button:not([disabled])') ?? panel).focus({ preventScroll: true });
+    }
+  }, [lightboxUrl, canStep, gallery?.status, currentMediaKey]);
   return (
     <div
       ref={overlayRef}
@@ -383,12 +418,100 @@ export function Lightbox() {
          故必须靠 inert 让关闭态不可聚焦（见 REQ-047）。 */
       inert={!lightboxUrl}
       onClick={closeLightbox}
-      onKeyDown={onTrapKeyDown}
+      onFocusCapture={(e) => { focusedNodeRef.current = e.target; }}
+      onBlurCapture={(e) => {
+        if (e.relatedTarget instanceof Node && e.relatedTarget !== document.body
+          && !e.currentTarget.contains(e.relatedTarget)) {
+          focusedNodeRef.current = null;
+        }
+      }}
+      onKeyDown={(e) => {
+        onTrapKeyDown(e);
+        if (!lightboxUrl || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229
+          || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+        if (e.key === 'Escape') {
+          e.preventDefault(); e.stopPropagation(); closeLightbox();
+        } else if (gallery && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+          e.preventDefault(); e.stopPropagation();
+          if (canStep) stepGalleryLightbox(e.key === 'ArrowLeft' ? -1 : 1);
+        }
+      }}
     >
-      {/* 大图：共享 CoverImage（按 imageProxy 判定代理/直连；失败出占位，点击/Esc 关闭不变） */}
-      {lightboxUrl && (
+      {/* 原正文/社交单图路径仍使用共享 CoverImage，点击图片关闭语义不变。 */}
+      {lightboxUrl && !gallery && (
         <CoverImage src={lightboxUrl} articleId={lightboxEntryId} className="lightbox-img" alt="preview" />
       )}
+      {lightboxUrl && gallery && (
+        <>
+          <button className="lightbox-control lightbox-close" aria-label="关闭图片预览" title="关闭（Esc）"
+            onClick={(e) => { e.stopPropagation(); closeLightbox(); }}><Icons.x /></button>
+          <div className="lightbox-gallery" onClick={(e) => e.stopPropagation()}>
+            {imageUrl && <GalleryPreviewImage key={`${gallery.entryId}:${gallery.mediaRevision}:${imageUrl}:${gallery.pageUrl}`}
+              src={imageUrl} pageUrl={gallery.pageUrl} index={gallery.index} />}
+            {(!current || gallery.status === 'loading') && (
+              <div className="lightbox-status" role="status">加载图片列表…</div>
+            )}
+            {current && (gallery.status === 'error' || gallery.status === 'empty') && (
+              <div className="lightbox-status" role="status">
+                <span>{gallery.status === 'error' ? '图片列表加载失败' : '暂无图片'}</span>
+                <button className="lightbox-control" onClick={(e) => {
+                  e.currentTarget.closest<HTMLElement>('[role="dialog"]')?.focus({ preventScroll: true });
+                  refreshGalleryLightbox();
+                }}>重新加载</button>
+              </div>
+            )}
+            <div className="lightbox-navigation">
+              <button className="lightbox-control lightbox-previous" aria-label="上一张图片" aria-keyshortcuts="ArrowLeft"
+                aria-disabled={!canStep} onClick={() => { if (canStep) stepGalleryLightbox(-1); }}><Icons.chevronDown /></button>
+              <span className="lightbox-position" role="status" aria-live="polite" aria-atomic="true">
+                {current && gallery.status === 'ready' ? `${gallery.index + 1} / ${gallery.urls.length}` : '—'}
+              </span>
+              <button className="lightbox-control lightbox-next" aria-label="下一张图片" aria-keyshortcuts="ArrowRight"
+                aria-disabled={!canStep} onClick={() => { if (canStep) stepGalleryLightbox(1); }}><Icons.chevronDown /></button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** 画廊正文图可重试，不复用封面永久失败缓存，也不上报为破封面。 */
+function GalleryPreviewImage({ src, pageUrl, index }: { src: string; pageUrl?: string; index: number }) {
+  const [attempt, setAttempt] = useState(0);
+  return <GalleryImageAttempt key={attempt} src={src} pageUrl={pageUrl} index={index}
+    retry={() => setAttempt((value) => value + 1)} />;
+}
+
+function GalleryImageAttempt({ src, pageUrl, index, retry }: {
+  src: string; pageUrl?: string; index: number; retry: () => void;
+}) {
+  const needsProxy = canProxyImages() && needsImageProxy(src);
+  const [resolved, setResolved] = useState<string | null>(needsProxy ? null : src);
+  const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!needsProxy) return;
+    let alive = true;
+    void fetchProxiedImage(src, pageUrl).then((result) => {
+      if (!alive) return;
+      if (result.ok) setResolved(result.dataUrl);
+      else setFailed(true);
+    });
+    return () => { alive = false; };
+  }, [src, pageUrl, needsProxy]);
+  return (
+    <div className="lightbox-gallery-image" aria-busy={!failed && !loaded}>
+      {!failed && resolved && <img className="lightbox-img" src={resolved} referrerPolicy="no-referrer"
+        alt={`第 ${index + 1} 张图片`} onLoad={() => setLoaded(true)} onError={() => setFailed(true)} />}
+      {failed ? (
+        <div className="lightbox-status" role="status">
+          <span>图片加载失败</span><button className="lightbox-control" onClick={(e) => {
+            e.currentTarget.closest<HTMLElement>('[role="dialog"]')?.focus({ preventScroll: true });
+            retry();
+          }}>重试图片</button>
+        </div>
+      ) : !loaded && <span className="lightbox-image-loading" role="status">图片加载中…</span>}
     </div>
   );
 }
@@ -489,12 +612,13 @@ function AddFeedModalBody({
   onSubmit,
 }: {
   initialCatId: string;
-  categories: { id: string; name: string; layout?: string; autoSummary?: boolean; autoTranslate?: boolean }[];
+  categories: CategoryGroup[];
   syncConnected: boolean;
   syncProtocol: 'greader' | 'fever' | null;
   onCancel: () => void;
   onSubmit: (catId: string, url: string, title: string, layout: string, summaryMode: FeedAiMode, translateMode: FeedAiMode, syncToBackend: boolean) => void;
 }) {
+  const settings = useAppStore((s) => s.settings);
   const [url, setUrl] = useState('');
   const [title, setTitle] = useState('');
   const [catId, setCatId] = useState(initialCatId);
@@ -515,7 +639,8 @@ function AddFeedModalBody({
   /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
   const curCat = categories.find((c) => c.id === catId);
   const curCatLayout = curCat?.layout ?? 'article';
-  const noAi = LAYOUT_NO_AI.has(layout === 'inherit' ? curCatLayout : layout);
+  const effLayout = layout === 'inherit' ? curCatLayout : layout;
+  const noAi = LAYOUT_NO_AI.has(effLayout);
 
   return (
     <div className="mini-dialog">
@@ -578,10 +703,10 @@ function AddFeedModalBody({
         <div className="mini-dialog-checkbox-row">
           {!noAi && (
             <>
-              <label className="mini-dialog-checkbox">
+              <label className="mini-dialog-checkbox" style={effLayout === 'social' ? { display: 'none' } : undefined}>
                 <AiModeSelect
                   mode={summaryMode}
-                  categoryOn={curCat?.autoSummary ?? false}
+                  categoryOn={categoryAiDefaults(settings, effLayout as ContentLayoutType, curCat).autoSummary}
                   onChange={setSummaryMode}
                   title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                   ariaLabel="自动摘要"
@@ -591,7 +716,7 @@ function AddFeedModalBody({
               <label className="mini-dialog-checkbox">
                 <AiModeSelect
                   mode={translateMode}
-                  categoryOn={curCat?.autoTranslate ?? false}
+                  categoryOn={categoryAiDefaults(settings, effLayout as ContentLayoutType, curCat).autoTranslate}
                   onChange={setTranslateMode}
                   title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                   ariaLabel="自动翻译"
@@ -650,10 +775,7 @@ export function EditFeedModal() {
           key={targetId + String(open)}
           feed={binding.feed}
           curCatId={binding.cat.id}
-          curCatLayout={binding.cat.layout}
-          curCatAutoSummary={binding.cat.autoSummary}
-          curCatAutoTranslate={binding.cat.autoTranslate}
-          categories={categories.map((c) => ({ id: c.id, name: c.name, layout: c.layout }))}
+          categories={categories}
           onCancel={() => closeMiniModal('editFeed')}
           onSubmit={(next) => {
             editFeed(targetId, next);
@@ -668,28 +790,25 @@ export function EditFeedModal() {
 function EditFeedModalBody({
   feed,
   curCatId,
-  curCatLayout,
-  curCatAutoSummary,
-  curCatAutoTranslate,
   categories,
   onCancel,
   onSubmit,
 }: {
   feed: FeedItem;
   curCatId: string;
-  curCatLayout: string;
-  curCatAutoSummary: boolean;
-  curCatAutoTranslate: boolean;
-  categories: { id: string; name: string; layout: string }[];
+  categories: CategoryGroup[];
   onCancel: () => void;
   onSubmit: (next: { title: string; catId: string; layout: string; summaryMode: FeedAiMode; translateMode: FeedAiMode }) => void;
 }) {
+  const settings = useAppStore((s) => s.settings);
   const [title, setTitle] = useState(feed.name);
   const [catId, setCatId] = useState(curCatId);
   const [layout, setLayout] = useState<string>(feed.layout);
-  /* OPT-011：显示与提交都是三态真值（缺 mode 的旧行按旧 bool 映射） */
-  const [summaryMode, setSummaryMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.summaryMode, feed.autoSummary));
-  const [translateMode, setTranslateMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.translateMode, feed.autoTranslate));
+  const curCat = categories.find((c) => c.id === catId);
+  const curCatLayout = curCat?.layout ?? 'article';
+  /* OPT-011：显示与提交都取三态真值 */
+  const [summaryMode, setSummaryMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.summaryMode));
+  const [translateMode, setTranslateMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.translateMode));
 
   return (
     <div className="mini-dialog">
@@ -746,10 +865,10 @@ function EditFeedModalBody({
           if (LAYOUT_NO_AI.has(eff)) return null;
           return (
             <>
-              <label className="mini-dialog-checkbox">
+              <label className="mini-dialog-checkbox" style={eff === 'social' ? { display: 'none' } : undefined}>
                 <AiModeSelect
                   mode={summaryMode}
-                  categoryOn={curCatAutoSummary}
+                  categoryOn={categoryAiDefaults(settings, eff as ContentLayoutType, curCat).autoSummary}
                   onChange={setSummaryMode}
                   title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                   ariaLabel="自动摘要"
@@ -759,7 +878,7 @@ function EditFeedModalBody({
               <label className="mini-dialog-checkbox">
                 <AiModeSelect
                   mode={translateMode}
-                  categoryOn={curCatAutoTranslate}
+                  categoryOn={categoryAiDefaults(settings, eff as ContentLayoutType, curCat).autoTranslate}
                   onChange={setTranslateMode}
                   title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                   ariaLabel="自动翻译"

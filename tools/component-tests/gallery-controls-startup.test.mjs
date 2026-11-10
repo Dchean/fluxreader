@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { componentTest, mount, unmount, flush, waitFor, resetStore, useAppStore, actWarnings } from './harness.mjs';
-import { installBackend, seedFromRows, mkRow, setPlan, resetPlan, deferred, clearInvokeCalls, invokeCalls, invokeCount } from './fixtures.mjs';
+import { installBackend, seedFromRows, setCurrentRows, mkRow, setPlan, resetPlan, deferred, clearInvokeCalls, invokeCalls, invokeCount } from './fixtures.mjs';
 
 componentTest('U2：下拉键盘活动项与唯一option ID关联，Home/End/Enter/Esc/Tab不混淆焦点与选中', {timeout:20000}, async()=>{
   resetStore();
@@ -135,9 +135,10 @@ componentTest('NF4条件时序防御：设置未落定时后台接手也等门�
   const {resetAppSettingsWriteStateForTests}=await import('../../dist-test/store/slices/settings.js');resetAppSettingsWriteStateForTests();
   seedFromRows([],{layout:'article'});
   const rows=Array.from({length:1001},(_,i)=>mkRow({id:10001+i,feed_id:10,title:`startup-${i}`,is_read:i>=501,published_at:new Date(Date.UTC(2026,9,1)+i*1000).toISOString()}));
+  setCurrentRows(rows);
   const settings=deferred(),queries=[];
-  setPlan({get_setting:({key})=>key==='app_settings'?settings.promise:Promise.resolve(null),list_articles:({args})=>{
-    queries.push({...args});let selected=[...rows].sort((a,b)=>b.id-a.id);if(args.only_unread)selected=selected.filter(row=>!row.is_read);if(args.last_id!=null)selected=selected.filter(row=>row.id<args.last_id);return Promise.resolve(selected.slice(args.offset??0,(args.offset??0)+(args.limit??500)));
+  setPlan({get_setting:({key})=>key==='app_settings'?settings.promise:Promise.resolve(null),list_article_member_ids:({args})=>{
+    queries.push({...args});let selected=[...rows].sort((a,b)=>b.id-a.id);if(args.only_unread)selected=selected.filter(row=>!row.is_read);return Promise.resolve(selected.map(row=>row.id));
   }});
   useAppStore.setState(s=>({activeViewFilter:'all',timelineFilter:'all',settings:{...s.settings,smartDedup:false},dataLoading:true,entries:[],articlesCursor:{}}));
   const {createElement,act}=await import('react');const {default:App}=await import('../../src/App.tsx');
@@ -145,7 +146,8 @@ componentTest('NF4条件时序防御：设置未落定时后台接手也等门�
     const entry=await mount(createElement(App));await flush(3);
     let listeners;
     await act(async()=>{listeners=globalThis.__DISPATCH_TAURI_EVENT__('feeds-updated',{new_articles:0,failed_feeds:0,merged_states:1});});await flush(3);
-    assert.equal(listeners,1);assert.ok(queries.length>=2,'启动与事件接手查询均已发出');
+    assert.equal(listeners,1);assert.ok(invokeCount('list_folders')>=2,'启动与事件接手的元数据读取均已并行发出');
+    assert.equal(queries.length,0,'设置未接受时不能用默认筛选捕获完整成员');
     assert.equal(useAppStore.getState().entries.length,0,'设置在途时不能按默认all落地');
     await act(async()=>settings.resolve(JSON.stringify({startupView:'unread',hideReadOnStartup:true,smartDedup:false})));
     await waitFor(()=>entry.container.querySelectorAll('.article-card').length>0,{label:'未读启动视图自动首拉',timeout:8000});
@@ -154,5 +156,5 @@ componentTest('NF4条件时序防御：设置未落定时后台接手也等门�
     assert.equal(useAppStore.getState().dataLoading,false);
     assert.ok(useAppStore.getState().entries.some(e=>!e.isRead));
     assert.equal(invokeCalls.some(c=>c.cmd==='ai_translate'||c.cmd==='ai_summarize'),false);
-  }finally{resetPlan();}
+  }finally{await act(async()=>settings.resolve(null));await flush(2);resetPlan();}
 });

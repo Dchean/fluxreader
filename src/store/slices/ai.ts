@@ -1,9 +1,11 @@
 import type { StateCreator } from 'zustand';
-import { api, extractError, extractErrorCode } from '../../lib/api';
+import { api, articleRowToEntry, extractError, extractErrorCode } from '../../lib/api';
 import type { AiCacheCheckResult, TranslationSegmentPlan } from '../../lib/api';
-import { appendAiDelta, applyAiProduct, getBodyEntry } from '../bodyCache';
+import { appendAiDelta, applyAiProduct, applyBodyRow, discardTranslationDraft, getBodyEntry, markBodyLoading } from '../bodyCache';
+import type { ArticleEntry } from '../../types';
 import type { AiProductKind } from '../types';
 import type { AppState, AiCacheStatus, AiStatusInput } from '../types';
+import { selectArticleBody, selectFeedConfig } from '../selectors';
 
 /** AI slice：摘要与翻译的流式生成（按条目 id 隔离状态），含卡片级与 Reader 级入口。
  *
@@ -26,7 +28,43 @@ export type AiSlice = Pick<
   | 'refreshAiStatus'
   | 'ensureAiStatus'
   | 'clearAiProduct'
+  | 'startAutomaticAi'
 >;
+
+/** 不含流式产物/验签显示状态：正文和已保存服务配置才会改变生成输入身份。 */
+export function selectAiGenerationInput(s: AppState, id: string) {
+  const entry = s.entries.find((e) => e.id === id) ?? manualTargets.get(id);
+  const body = getBodyEntry(id);
+  const contentId = entry?.contentId ?? body?.contentId ?? null;
+  const contentRevision = entry?.contentRevision ?? body?.contentRev ?? 0;
+  return {
+    configRevision: s.aiStatusRevision,
+    feedId: entry?.feedId ?? '',
+    title: entry?.title ?? '',
+    url: entry?.url ?? '',
+    contentId,
+    contentRevision,
+    bodyContentId: body?.contentId ?? contentId,
+    bodyContentRevision: body?.contentRev || contentRevision,
+    // 同CID/rev普通水合不是正文换代；无DB身份才用实际HTML作见证。
+    content: contentId === null ? body?.content ?? entry?.content ?? '' : null,
+    extracted: body?.fulltextExtracted ?? entry?.fulltextExtracted ?? false,
+  };
+}
+type GenerationInput = ReturnType<typeof selectAiGenerationInput>;
+export function sameAiGenerationInput(a: GenerationInput | undefined, b: GenerationInput): boolean {
+  return !!a && (Object.keys(b) as Array<keyof GenerationInput>).every((key) => a[key] === b[key]);
+}
+
+/** 能力按对象实际布局，关闭自动不会挡手动。未知来源不猜配置。 */
+function canGenerate(s: AppState, id: string, kind: AiProductKind, automatic = false): boolean {
+  const entry = s.entries.find((e) => e.id === id) ?? (automatic ? undefined : manualTargets.get(id));
+  if (!entry || entry.unavailable) return false;
+  const policy = selectFeedConfig(s, entry.feedId);
+  return kind === 'summary'
+    ? policy.canSummarize && (!automatic || policy.autoSummary)
+    : policy.canTranslate && (!automatic || policy.autoTranslate);
+}
 
 /* ============================================================
    OPT-013 B3：五态单点真值（真实消费者的状态模型）
@@ -160,6 +198,10 @@ export function selectAiProductState(
    ============================================================ */
 const aiRequestGen = new Map<string, number>();
 const aiInFlight = new Map<string, Promise<unknown>>();
+/** 每种输入自动最多尝试一次；失败只由明确手动动作恢复，不后台花费重试。 */
+const automaticAttempts = new Map<string, GenerationInput>();
+/** 手动离屏重试先按id回读真实行；不把目标插回当前阅读会话。 */
+const manualTargets = new Map<string, ArticleEntry>();
 /** OPT-013 B3：校验状态的在途去重（同一篇文章至多一笔在途 ai_cache_check）。 */
 const aiStatusInFlight = new Map<string, { input: AiStatusInput; promise: Promise<void> }>();
 /** 显式产物写入推进：旧校验不得在清除/新生成之后恢复旧显示状态。 */
@@ -197,6 +239,8 @@ function trackAiRequest(key: string, p: Promise<unknown>): void {
 export function resetAiRequestStateForTests(): void {
   aiRequestGen.clear();
   aiInFlight.clear();
+  automaticAttempts.clear();
+  manualTargets.clear();
   aiStatusInFlight.clear();
   aiStatusMutation.clear();
   aiStatusLatestRead.clear();
@@ -216,7 +260,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
   const effectiveAi = (id: string, field: 'aiSummary' | 'translatedContent'): string =>
     getBodyEntry(id)?.[field] ?? get().entries.find((a) => a.id === id)?.[field] ?? '';
 
-  const streamAiDelta = (id: string, field: 'aiSummary' | 'translatedContent', delta: string): void => {
+  const streamAiDelta = (id: string, field: 'aiSummary' | 'translatedContent', delta: string, draftOwner?: symbol): void => {
     /* 清除×流式互斥的自愈侧：流式在途期间标记被任何路径丢掉（如 clearAiProduct
        的 await 返回后删除），下一个 delta 必须先补回标记再追加——
        「凡 translatedContent 可能含未消毒 delta，rawTranslatedIds[id] 必为 true」
@@ -226,12 +270,14 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         ? st
         : { rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true } }));
     }
-    if (appendAiDelta(id, field, delta)) return;
+    if (appendAiDelta(id, field, delta, draftOwner)) return;
     set((st) => {
       const cur = st.entries.find((a) => a.id === id);
       if (!cur) return st;
       const next = (cur[field] || '') + delta;
-      return { entries: st.entries.map((a) => (a.id === id ? { ...a, [field]: next } : a)) };
+      return { entries: st.entries.map((a) => (a.id === id ? { ...a, [field]: next,
+        ...(field === 'translatedContent' ? { translationDraftOwner: draftOwner } : {}),
+      } : a)) };
     });
   };
 
@@ -240,13 +286,17 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     field: 'aiSummary' | 'translatedContent',
     value: string,
     signature?: string | null,
+    draftOwner?: symbol,
   ): void => {
     aiStatusMutation.set(id, (aiStatusMutation.get(id) ?? 0) + 1);
-    if (applyAiProduct(id, field, value, signature)) return;
+    // 有缓存时仅写缓存；曾持草稿的行转交由body-cache通知统一投影。
+    if (applyAiProduct(id, field, value, signature, draftOwner)) return;
     const sigPatch = signature === undefined
       ? {}
       : (field === 'aiSummary' ? { aiSummarySig: signature } : { translatedSig: signature });
-    set((st) => ({ entries: st.entries.map((a) => (a.id === id ? { ...a, [field]: value, ...sigPatch } : a)) }));
+    set((st) => ({ entries: st.entries.map((a) => (a.id === id ? { ...a, [field]: value, ...sigPatch,
+      ...(field === 'translatedContent' ? { translationDraftOwner: draftOwner } : {}),
+    } : a)) }));
   };
 
   /* 流式请求 promise-rejection（三处 .catch）的文案：后端 AppError 携带稳定码
@@ -258,7 +308,51 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
 
   /** 生成入口的统一形态：`plan` 由验签链透传（undefined = 未取到，入口自查）；
       null = 已确认不可用（不重复取）。 */
-  type RunAiRequest = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null) => void;
+  type RunAiRequest = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null, eligible?: () => boolean) => void;
+
+  const releaseRequest = (id: string, kind: AiProductKind, key: string, gen: number, owner: symbol) => {
+    if (!isCurrentAiRequest(key, gen)) return;
+    // 先丢弃本请求仍拥有的未消毒草稿，再解除raw；新水合/安全产物不属于此owner。
+    if (kind === 'translation') discardTranslationDraft(id, owner);
+    set((s) => {
+      if (!isCurrentAiRequest(key, gen)) return s;
+      const ids = { ...(kind === 'summary' ? s.summarizingIds : s.translatingIds) };
+      delete ids[id];
+      if (kind === 'summary') return { summarizingIds: ids };
+      const raw = { ...s.rawTranslatedIds };
+      delete raw[id];
+      return { translatingIds: ids, translating: false, rawTranslatedIds: raw,
+        entries: s.entries.map((e) => e.id === id && e.translationDraftOwner === owner
+          ? { ...e, translatedContent: '', translatedSig: null, translationDraftOwner: undefined } : e),
+      };
+    });
+  };
+
+  const generationGuard = (id: string, kind: AiProductKind, key: string, gen: number) => {
+    const entry = get().entries.find((e) => e.id === id);
+    if (entry) manualTargets.set(id, entry);
+    const input = selectAiGenerationInput(get(), id);
+    const owner = Symbol(key);
+    let started = false;
+    const current = () => {
+      if (!isCurrentAiRequest(key, gen)) return false;
+      if (sameAiGenerationInput(input, selectAiGenerationInput(get(), id))) return true;
+      releaseRequest(id, kind, key, gen, owner);
+      return false;
+    };
+    return {
+      input,
+      owner,
+      current,
+      started: () => { started = true; automaticAttempts.set(key, input); },
+      finish: () => {
+        // 历史attempts仅防自动重烧，不能证明这笔曾invoke。
+        // 同输入真实失败保留partial/raw；取消未发或输入已失效才释放自己的草稿。
+        if (!started) releaseRequest(id, kind, key, gen, owner);
+        else current();
+      },
+    };
+  };
 
   /** OPT-013 B3：一次成功校验结果的唯一写入点（checkCache / hintSegmentPlan /
    *  refreshAiStatus 共用）——五态判定的验证数据源（见 AiCacheStatus 注释）。 */
@@ -324,12 +418,14 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     kind: AiProductKind,
   ): Promise<{ hit: boolean; plan: TranslationSegmentPlan | null }> => {
     const input = selectAiStatusInput(get(), id);
+    const generationInput = selectAiGenerationInput(get(), id);
     const serial = beginAiStatusRead(id);
     try {
       const res = await api.aiCacheCheck(Number(id));
       if (!res) return { hit: true, plan: null };
       // 等待期间输入已变：此次动作放弃生成，避免按旧 miss 追加付费请求。
-      if (!sameAiStatusInput(input, selectAiStatusInput(get(), id))) return { hit: true, plan: null };
+      // 另一产物同时生成只改变显示mutation，不改变本产物的正文/配置决策输入。
+      if (!sameAiGenerationInput(generationInput, selectAiGenerationInput(get(), id))) return { hit: true, plan: null };
       // 同输入的新显示读取可接管显示落地，但不取消这次用户已发出的生成决策。
       storeAiStatus(id, res, input, serial);
       return {
@@ -358,14 +454,24 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     kind: AiProductKind,
     silent: boolean,
     run: RunAiRequest,
+    eligible: () => boolean = () => canGenerate(get(), id, kind),
+    automatic = false,
   ): void => {
     const key = aiKeyOf(id, kind);
     let chain: Promise<void> = Promise.resolve();
     chain = (async () => {
       const check = await checkCache(id, kind);
-      if (check.hit) return; // 命中：复用展示，链结束
+      if (!eligible()) return;
+      if (automatic && check.plan && check.plan.completed > 0) {
+        automaticAttempts.set(key, selectAiGenerationInput(get(), id));
+        return; // 已有分段只能由用户明确继续，打开/停顿不后台重烧。
+      }
+      if (check.hit) {
+        automaticAttempts.set(key, selectAiGenerationInput(get(), id));
+        return; // 命中或不可验证：同输入不在后台反复校验/重烧。
+      }
       if (aiInFlight.get(key) !== chain) return; // 防御：已被更新的在途接管
-      run(id, silent, kind === 'translation' ? check.plan : null);
+      run(id, silent, kind === 'translation' ? check.plan : null, eligible);
     })();
     trackAiRequest(key, chain);
   };
@@ -423,26 +529,63 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
 
   /* ---------- 生成流程（三个入口共用：请求代次 + 落地守卫） ---------- */
 
+  const retryFor = (id: string, kind: AiProductKind, run: RunAiRequest) => {
+    if (get().dataMode !== 'tauri') return;
+    const key = aiKeyOf(id, kind);
+    if (aiInFlight.has(key)) return;
+    if (get().entries.some((e) => e.id === id)) {
+      if (canGenerate(get(), id, kind)) run(id, false);
+      else get().showToast('此条目当前布局不支持该 AI 操作');
+      return;
+    }
+    // 错误中心持久重试仍是明确手动意图。离屏目标先读当前身份/正文，不依据旧来源猜能力。
+    const before = selectAiGenerationInput(get(), id);
+    const chain = api.getArticle(Number(id)).then((row) => {
+      if (!sameAiGenerationInput(before, selectAiGenerationInput(get(), id))) {
+        get().showToast('内容已变化，请重新打开该条目后重试'); return;
+      }
+      if (!row) { get().showToast('此条目已不在本地，无法重试'); return; }
+      const entry = articleRowToEntry(row);
+      const policy = selectFeedConfig(get(), entry.feedId);
+      if (kind === 'summary' ? !policy.canSummarize : !policy.canTranslate) {
+        get().showToast('此条目的来源不可用或当前布局不支持该 AI 操作');
+        return;
+      }
+      manualTargets.set(id, entry);
+      const stamp = markBodyLoading(id);
+      applyBodyRow(id, row, stamp, { aiSummary: '', translatedContent: '' });
+      run(id, false);
+    }).catch(() => get().showToast('条目读取失败，请稍后重试'));
+    trackAiRequest(key, chain);
+  };
+
   /** 摘要失败入口只认捕获 id：不检查当前 entries，直接重走生成链。 */
   function retrySummaryFor(id: string): void {
-    if (get().dataMode !== 'tauri') return;
-    const key = aiKeyOf(id, 'summary');
-    if (aiInFlight.has(key)) return;
-    runSummaryRequest(id, false);
+    retryFor(id, 'summary', runSummaryRequest);
   }
 
   /** 摘要生成/重试：清错误与半截 → 流式 → Done 后安全回读（含签名）。 */
-  const runSummaryRequest = (id: string, silent: boolean): void => {
+  const runSummaryRequest: RunAiRequest = (id, silent, _plan, eligible) => {
+    if (!canGenerate(get(), id, 'summary')) return;
     const key = aiKeyOf(id, 'summary');
     const gen = beginAiRequest(key);
-    const current = (): boolean => isCurrentAiRequest(key, gen);
-    /* 重试语义：清掉上次的错误与半截摘要（产物清空则签名一并失效——签名不得
-       脱离产物独立存活），重新走完整流 */
-    writeAiProduct(id, 'aiSummary', '', null);
-    set((st) => ({
-      summarizingIds: { ...st.summarizingIds, [id]: true },
-      summaryErrors: { ...st.summaryErrors, [id]: '' },
-    }));
+    const { current, started, finish } = generationGuard(id, 'summary', key, gen);
+    const prepare = () => {
+      /* 重试语义：清掉上次的错误与半截摘要（产物清空则签名一并失效——签名不得
+         脱离产物独立存活），重新走完整流 */
+      writeAiProduct(id, 'aiSummary', '', null);
+      set((st) => ({
+        summarizingIds: { ...st.summarizingIds, [id]: true },
+        summaryErrors: { ...st.summaryErrors, [id]: '' },
+      }));
+    };
+    const canStart = () => {
+      if (!current() || !canGenerate(get(), id, 'summary') || (eligible && !eligible())) return false;
+      if (eligible) prepare();
+      started();
+      return true;
+    };
+    if (!eligible) prepare();
     const p = api
       .aiSummarize(
         Number(id),
@@ -462,11 +605,10 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
              刚生成的摘要（摘要无 XSS 消毒时序，缺行不构成渲染风险）。
              OPT-013 B3：回读落地后刷新校验状态（成功提交 = 后端已有产物+签名；
              刷新以当前配置快照复核签名——生成期间改配置的窗口也如实呈现）。 */
-          const readGen = gen;
           void api
             .getArticle(Number(id))
             .then((row) => {
-              if (!isCurrentAiRequest(key, readGen)) return; // 逆序回读守卫
+              if (!current()) return; // 逆序回读守卫
               const dbSummary = row?.ai_summary ?? null;
               if (dbSummary !== null && dbSummary.trim() !== '') {
                 writeAiProduct(id, 'aiSummary', dbSummary, row?.ai_summary_sig ?? null);
@@ -488,6 +630,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
           }
         },
+        canStart,
       )
       .catch((e) => {
         if (!current()) return;
@@ -504,44 +647,52 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         if (!silent) {
           get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
         }
-      });
+      })
+      .finally(finish);
     trackAiRequest(key, p);
   };
 
   /** 翻译失败入口只认捕获 id：直接走卡片级 per-id 生成，不检查当前 entries。 */
   function retryTranslationFor(id: string): void {
     const s = get();
-    if (s.dataMode !== 'tauri') return;
-    const key = aiKeyOf(id, 'translation');
-    if (aiInFlight.has(key)) return;
-    if (s.activeArticleId === id) runReaderTranslation(id, false);
-    else runCardTranslation(id, false);
+    retryFor(id, 'translation', s.activeArticleId === id && s.activeContentLayout === 'article'
+      ? runReaderTranslation : runCardTranslation);
   }
 
   /** 卡片级翻译生成/重试（状态按条目隔离，不复用全局 translating 单布尔）。
       `plan` 为 undefined 时自查分段计划并提示（提示不阻塞生成；B2 最小 UI）。 */
-  const runCardTranslation = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null): void => {
+  const runCardTranslation: RunAiRequest = (id, silent, plan, eligible) => {
+    if (!canGenerate(get(), id, 'translation')) return;
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
-    const current = (): boolean => isCurrentAiRequest(key, gen);
-    /* 重试语义（与 toggleReaderTranslation 对齐）：清上次的错误**和半截译文**
-       （产物清空则签名一并失效）。此前只清错误不清译文——重试成功后新 delta
-       会追加在旧半截译文后面（打字机里出现「半截+完整」的重复内容）。 */
-    writeAiProduct(id, 'translatedContent', '', null);
-    set((st) => ({
-      translatingIds: { ...st.translatingIds, [id]: true },
-      /* TASK-065 N11：流式 delta 是模型原始输出（未消毒），标记期间渲染走纯文本 */
-      rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
-      translateErrors: { ...st.translateErrors, [id]: '' },
-    }));
-    if (plan === undefined) hintSegmentPlan(id, silent);
-    else notifySegmentPlan(plan, silent);
+    const { owner, current, started, finish } = generationGuard(id, 'translation', key, gen);
+    const prepare = () => {
+      /* 重试语义（与 toggleReaderTranslation 对齐）：清上次的错误**和半截译文**
+         （产物清空则签名一并失效）。此前只清错误不清译文——重试成功后新 delta
+         会追加在旧半截译文后面（打字机里出现「半截+完整」的重复内容）。 */
+      writeAiProduct(id, 'translatedContent', '', null, owner);
+      set((st) => ({
+        translatingIds: { ...st.translatingIds, [id]: true },
+        /* TASK-065 N11：流式 delta 是模型原始输出（未消毒），标记期间渲染走纯文本 */
+        rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
+        translateErrors: { ...st.translateErrors, [id]: '' },
+      }));
+      if (plan === undefined) hintSegmentPlan(id, silent);
+      else notifySegmentPlan(plan, silent);
+    };
+    const canStart = () => {
+      if (!current() || !canGenerate(get(), id, 'translation') || (eligible && !eligible())) return false;
+      if (eligible) prepare();
+      started();
+      return true;
+    };
+    if (!eligible) prepare();
     const p = api
       .aiTranslate(
         Number(id),
         (delta) => {
           if (!current()) return;
-          streamAiDelta(id, 'translatedContent', delta);
+          streamAiDelta(id, 'translatedContent', delta, owner);
         },
         () => {
           /* TASK-065 N11：流式结束回读 DB 的消毒版译文。translatingIds 维持既有
@@ -555,23 +706,23 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             delete nextIds[id];
             return { translatingIds: nextIds };
           });
-          const readGen = gen;
           void api
             .getArticle(Number(id))
             .then((row) => {
-              if (!isCurrentAiRequest(key, readGen)) return; // 逆序回读守卫：旧回包不得覆盖新结果
+              if (!current()) return; // 逆序回读守卫：旧回包不得覆盖新结果
               const safe = row?.translated_content ?? '';
+              /* 先写安全版再解除raw；无记录的视图行回退也不能露出未消毒的一帧。 */
+              writeAiProduct(id, 'translatedContent', safe, row?.translated_sig ?? null);
               set((st) => {
                 const nextRaw = { ...st.rawTranslatedIds };
                 delete nextRaw[id];
                 return { rawTranslatedIds: nextRaw };
               });
-              /* 回读不到消毒版（含 row 为空）：丢弃未消毒半截，不留 XSS 窗口 */
-              writeAiProduct(id, 'translatedContent', safe, row?.translated_sig ?? null);
               refreshAiStatus(id, true); // B3：提交后重新校验，不 join 提交前读取。
             })
             .catch(() => {
-              if (!isCurrentAiRequest(key, readGen)) return;
+              if (!current()) return;
+              writeAiProduct(id, 'translatedContent', '');
               set((st) => {
                 const nextRaw = { ...st.rawTranslatedIds };
                 delete nextRaw[id];
@@ -581,7 +732,6 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
                 };
               });
               /* 失败态放行重试（D1 语义），不残留渲染风险 */
-              writeAiProduct(id, 'translatedContent', '');
               refreshAiStatus(id, true);
               if (!silent) get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
             });
@@ -609,6 +759,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
           }
         },
+        canStart,
       )
       .catch((e) => {
         if (!current()) return;
@@ -629,38 +780,49 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         if (!silent) {
           get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
         }
-      });
+      })
+      .finally(finish);
     trackAiRequest(key, p);
   };
 
   /** Reader 级翻译生成/重试（复用全局 translating 单布尔 + 展示态切换）。
       `plan` 语义同 runCardTranslation。 */
-  const runReaderTranslation = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null): void => {
+  const runReaderTranslation: RunAiRequest = (id, silent, plan, eligible) => {
+    if (!canGenerate(get(), id, 'translation')) return;
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
-    const current = (): boolean => isCurrentAiRequest(key, gen);
-    const ownsReaderView = (): boolean => get().activeArticleId === id;
-    /* 重试语义：清上次的错误与半截译文（签名随产物清空），重新走完整流 */
-    writeAiProduct(id, 'translatedContent', '', null);
-    const showReaderTranslation = ownsReaderView();
-    set((st) => ({
-      ...(showReaderTranslation ? { translating: true, isShowingTranslatedProse: true } : {}),
-      /* OPT-013 B3：Reader 级生成同样登记 per-id 在途标记——五态判定（generating）
-         与快照合并/reconcile 的「生成中不覆盖流式产物」守卫都消费它。 */
-      translatingIds: { ...st.translatingIds, [id]: true },
-      /* TASK-065 N11：流式 delta 未消毒，标记期间 Reader 按纯文本渲染 */
-      rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
-      translateErrors: { ...st.translateErrors, [id]: '' },
-    }));
-    if (plan === undefined) hintSegmentPlan(id, silent);
-    else notifySegmentPlan(plan, silent);
+    const { owner, current, started, finish } = generationGuard(id, 'translation', key, gen);
+    const ownsReaderView = (): boolean => get().activeArticleId === id && get().activeContentLayout === 'article';
+    const prepare = () => {
+      /* 重试语义：清上次的错误与半截译文（签名随产物清空），重新走完整流 */
+      writeAiProduct(id, 'translatedContent', '', null, owner);
+      const showReaderTranslation = ownsReaderView();
+      set((st) => ({
+        ...(showReaderTranslation ? { translating: true, isShowingTranslatedProse: true } : {}),
+        /* OPT-013 B3：Reader 级生成同样登记 per-id 在途标记——五态判定（generating）
+           与快照合并/reconcile 的「生成中不覆盖流式产物」守卫都消费它。 */
+        translatingIds: { ...st.translatingIds, [id]: true },
+        /* TASK-065 N11：流式 delta 未消毒，标记期间 Reader 按纯文本渲染 */
+        rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
+        translateErrors: { ...st.translateErrors, [id]: '' },
+      }));
+      if (plan === undefined) hintSegmentPlan(id, silent);
+      else notifySegmentPlan(plan, silent);
+    };
+    const canStart = () => {
+      if (!current() || !canGenerate(get(), id, 'translation') || (eligible && !eligible())) return false;
+      if (eligible) prepare();
+      started();
+      return true;
+    };
+    if (!eligible) prepare();
     const p = api
       .aiTranslate(
         Number(id),
         (delta) => {
           if (!current()) return;
           /* 增量追加：Reader 直接渲染译文（打字机） */
-          streamAiDelta(id, 'translatedContent', delta);
+          streamAiDelta(id, 'translatedContent', delta, owner);
         },
         () => {
           /* TASK-065 N11：流式结束回读 DB 的消毒版译文（后端 ai_translate 落库前
@@ -683,23 +845,23 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               translatingIds: nextIds,
             };
           });
-          const readGen = gen;
           void api
             .getArticle(Number(id))
             .then((row) => {
-              if (!isCurrentAiRequest(key, readGen)) return;
+              if (!current()) return;
               const safe = row?.translated_content ?? '';
+              /* 先写安全版再解除raw；无记录的视图行回退也不能露出未消毒的一帧。 */
+              writeAiProduct(id, 'translatedContent', safe, row?.translated_sig ?? null);
               set((st) => {
                 const nextRaw = { ...st.rawTranslatedIds };
                 delete nextRaw[id];
                 return { rawTranslatedIds: nextRaw };
               });
-              /* 回读不到消毒版（含 row 为空）：丢弃未消毒半截，不留 XSS 窗口 */
-              writeAiProduct(id, 'translatedContent', safe, row?.translated_sig ?? null);
               refreshAiStatus(id, true); // B3：提交后重新校验，不 join 提交前读取。
             })
             .catch(() => {
-              if (!isCurrentAiRequest(key, readGen)) return;
+              if (!current()) return;
+              writeAiProduct(id, 'translatedContent', '');
               set((st) => {
                 const nextRaw = { ...st.rawTranslatedIds };
                 delete nextRaw[id];
@@ -708,7 +870,6 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
                   translateErrors: { ...st.translateErrors, [id]: '译文回读失败' },
                 };
               });
-              writeAiProduct(id, 'translatedContent', '');
               refreshAiStatus(id, true);
               if (!silent) {
                 get().showToast('译文回读失败', {
@@ -749,6 +910,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             });
           }
         },
+        canStart,
       )
       .catch((e) => {
         /* F3：同上——清标记与「是否有未消毒半截」绑定（与 translateEntry 同口径） */
@@ -775,7 +937,8 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             run: () => retryTranslationFor(id),
           });
         }
-      });
+      })
+      .finally(finish);
     trackAiRequest(key, p);
   };
 
@@ -791,6 +954,23 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
 
     refreshAiStatus,
     ensureAiStatus,
+
+    startAutomaticAi: (id, kind, isCurrent) => {
+      const s = get();
+      if (s.dataMode !== 'tauri' || !isCurrent() || !canGenerate(s, id, kind, true)) return;
+      const body = selectArticleBody(s, id);
+      if ((body.state !== 'ready' && body.state !== 'cleared') || !body.content.trim()) return;
+      if (kind === 'summary' ? !!body.aiSummary || !!s.summaryErrors[id]
+        : !!body.translatedContent || !!s.translateErrors[id]) return;
+      const key = aiKeyOf(id, kind);
+      const input = selectAiGenerationInput(s, id);
+      if (aiInFlight.has(key) || sameAiGenerationInput(automaticAttempts.get(key), input)) return;
+      const eligible = () => isCurrent() && canGenerate(get(), id, kind, true)
+        && sameAiGenerationInput(input, selectAiGenerationInput(get(), id));
+      const run: RunAiRequest = kind === 'summary' ? runSummaryRequest
+        : selectFeedConfig(s, input.feedId).layout === 'article' ? runReaderTranslation : runCardTranslation;
+      ensureAiProduct(id, kind, true, run, eligible, true);
+    },
 
     /** OPT-013 B3「清除」入口（真实接线）：先调后端清除命令（删除该条目该产物
      *  全签名片段 + 整篇产物/签名 + 推进清除代次），成功后才清前端状态——
@@ -875,7 +1055,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         if (!silent) get().showToast('演示模式不支持 AI 服务');
         return;
       }
-      if (!get().entries.some((a) => a.id === id)) return;
+      if (!canGenerate(get(), id, 'translation')) return;
       const key = aiKeyOf(id, 'translation');
       /* OPT-013 B1：同一 (条目, 产物) 已有在途请求或验签链在途（自动触发/另一
          入口发起）→ 复用，不重复计费（R1 P2-1：整链登记，验签窗口也算在途）。 */
@@ -905,7 +1085,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         return;
       }
       const art = s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) : null;
-      if (!art) return;
+      if (!art || s.activeContentLayout !== 'article' || !canGenerate(s, art.id, 'translation')) return;
       const articleId = art.id;
       const key = aiKeyOf(articleId, 'translation');
       /* OPT-013 B1：同键在途（含验签链在途）→ 复用（自动触发已发起或另一入口
@@ -942,7 +1122,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     summarizeEntry: (id, opts) => {
       const silent = opts?.silent ?? false;
       const s = get();
-      if (!s.entries.some((a) => a.id === id)) return;
+      if (!canGenerate(s, id, 'summary')) return;
       const key = aiKeyOf(id, 'summary');
       /* OPT-013 B1：同键在途（含验签链在途）→ 复用（自动触发/手动入口并发只发
          一次请求；R1 P2-1：验签窗口也算在途）。 */
@@ -964,7 +1144,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
 
     triggerReaderSummary: (opts) => {
       const id = get().activeArticleId;
-      if (!id) return;
+      if (!id || get().activeContentLayout !== 'article') return;
       get().summarizeEntry(id, opts);
     },
   });

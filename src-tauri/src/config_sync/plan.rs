@@ -23,15 +23,16 @@
 //! schema 版本：快照 schema=2 起，分类携带稳定 `sync_id`（本地创建即分配、
 //! v26 迁移回填）；匹配优先级 = 身份 → 名称保守兜底（仅当双方其一没有身份时，
 //! 并采用远端身份填空）。同名但双方身份不同 = 不同对象：预览显式列冲突
-//! （绝不猜「同名即同一对象」）。schema1 快照（无 sync_id/无 mode）按既有
-//! URL（源）/名称（分类）保守匹配，继续可合并。
+//! （绝不猜「同名即同一对象」）。当前只接受 schema3：分类必须携带两个 AI
+//! mode；缺失模式不能由旧 bool 推断。身份缺失时的名称保守匹配仍保留。
 //!
 //! Note: 镜像语义与删除保护（tombstone/contents/outbox 保留策略）—
 //! 见 .agents/notes/implemented/architecture/2026-10-15-配置快照镜像应用.md
 
 use super::{
-    is_local_only_setting, list_folder_id_by_name, merge_app_settings, resolve_spec_modes,
-    store_pending_connection, ApplyOutcome, ConnectionConfig, SyncPayload, SCHEMA_VERSION,
+    is_local_only_setting, list_folder_id_by_name, merge_app_settings, resolve_folder_spec_modes,
+    resolve_spec_modes, store_pending_connection, validate_schema, ApplyOutcome, ConnectionConfig,
+    SyncPayload,
 };
 use crate::db::{self, FeedAiMode, FeedRow};
 use crate::error::{AppError, AppResult};
@@ -163,6 +164,8 @@ struct FolderTarget {
     layout: String,
     summary: bool,
     translate: bool,
+    summary_mode: FeedAiMode,
+    translate_mode: FeedAiMode,
     position: i64,
 }
 
@@ -274,12 +277,7 @@ pub fn apply_payload_checked(
 ============================================================ */
 
 fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResult<PreparedPlan> {
-    if p.schema > SCHEMA_VERSION {
-        return Err(AppError::internal(format!(
-            "远端配置版本 v{} 高于本客户端支持的 v{}，请升级客户端",
-            p.schema, SCHEMA_VERSION
-        )));
-    }
+    validate_schema(p.schema)?;
     // ---- 结构校验（先于一切写入与匹配；未知结构/枚举/URL/范围整体拒绝）----
     let mut folder_uids = HashSet::new();
     for f in &p.folders {
@@ -287,6 +285,7 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
             return Err(AppError::new("validate", "快照包含空名称的分类，拒绝导入"));
         }
         super::validate_layout(&f.layout, false)?;
+        resolve_folder_spec_modes(f)?;
         if let Some(uid) = uid_of(f.sync_id.as_deref()) {
             if !folder_uids.insert(uid.to_string()) {
                 return Err(AppError::new(
@@ -377,11 +376,14 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
                 }
             }
         }
+        let (summary_mode, translate_mode) = resolve_folder_spec_modes(rf)?;
         let target = FolderTarget {
             name: rf.name.clone(),
             layout: rf.layout.clone(),
             summary: rf.auto_summary,
             translate: rf.auto_translate,
+            summary_mode,
+            translate_mode,
             position: rf.position,
         };
         match matched {
@@ -400,6 +402,12 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
                 }
                 if lf.auto_translate != target.translate {
                     changes.push("translate".into());
+                }
+                if lf.summary_mode != target.summary_mode.as_str() {
+                    changes.push("summaryMode".into());
+                }
+                if lf.translate_mode != target.translate_mode.as_str() {
+                    changes.push("translateMode".into());
                 }
                 if lf.position != target.position {
                     changes.push("position".into());
@@ -438,7 +446,7 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
             None => {
                 // P0-1：导入新建分类**采用**远端身份（execution 以 create_folder_with_sync_id
                 // 直落，不再先随机分配再走「只填空」——那条路径对刚建行恒为 no-op）。
-                // 远端无身份（schema1）→ None = 本地随机身份（创建即分配）。
+                // 远端无身份 → None = 本地随机身份（创建即分配）。
                 // 远端身份已被本地其它对象占用（快照与本地对象图冲突）→ 降级随机身份
                 // 并显式预警：绝不改写既有身份、也不复用同一身份给两个对象。
                 let new_sync_id = match remote_uid.as_deref() {
@@ -765,9 +773,18 @@ fn execute_plan(tx: &Connection, plan: &PreparedPlan) -> AppResult<ApplyOutcome>
                 adopt_uid,
             } => {
                 if !changes.is_empty() {
-                    db::rename_folder(tx, *id, &target.name)?;
+                    // 模式或其它字段更新不能触发名称规范化/重名验证。
+                    if changes.iter().any(|change| change == "name") {
+                        db::rename_folder(tx, *id, &target.name)?;
+                    }
                     db::update_folder_layout(tx, *id, &target.layout)?;
                     db::set_folder_ai_flags(tx, *id, target.summary, target.translate)?;
+                    db::set_folder_ai_modes(
+                        tx,
+                        *id,
+                        Some(target.summary_mode),
+                        Some(target.translate_mode),
+                    )?;
                     tx.execute(
                         "UPDATE folders SET position = ?1 WHERE id = ?2",
                         rusqlite::params![target.position, id],
@@ -789,6 +806,12 @@ fn execute_plan(tx: &Connection, plan: &PreparedPlan) -> AppResult<ApplyOutcome>
                     sync_id.as_deref(),
                 )?;
                 db::set_folder_ai_flags(tx, id, target.summary, target.translate)?;
+                db::set_folder_ai_modes(
+                    tx,
+                    id,
+                    Some(target.summary_mode),
+                    Some(target.translate_mode),
+                )?;
                 tx.execute(
                     "UPDATE folders SET position = ?1 WHERE id = ?2",
                     rusqlite::params![target.position, id],
@@ -911,26 +934,29 @@ fn uid_of(raw: Option<&str>) -> Option<&str> {
 }
 
 /// 本地配置版本签名：覆盖「会改变删除后果」的状态——
-/// 分类（含身份/名称/布局/标志/位置）、源（含归属/布局/AI 模式/站点字段）、
+/// 分类（含身份/名称/布局/三态/独立旧标志/位置）、源（含归属/布局/AI 模式/站点字段）、
 /// 白名单 app_settings 投影、被删源的文章数/读藏聚合、被删源相关的 pending
 /// 写回行。任一变化 → 旧预览失效（stalePreview）。
 fn config_state_version(conn: &Connection, removal_feed_ids: &[i64]) -> AppResult<String> {
     let mut buf = String::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(sync_id, ''), name, layout, auto_summary, auto_translate, position
+            "SELECT id, COALESCE(sync_id, ''), name, layout, auto_summary, auto_translate, position,
+                    summary_mode, translate_mode
              FROM folders ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(format!(
-                "F\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1e}",
+                "F\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1e}",
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?
+                r.get::<_, i64>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?
             ))
         })?;
         for row in rows {
@@ -1171,11 +1197,11 @@ mod tests {
     }
 
     fn payload(folders: serde_json::Value, feeds: serde_json::Value) -> SyncPayload {
-        serde_json::from_value(serde_json::json!({"schema":2,"uploaded_at":"test","folders":folders,"feeds":feeds,"app_settings":null,"connection_config":null})).unwrap()
+        serde_json::from_value(serde_json::json!({"schema":3,"uploaded_at":"test","folders":folders,"feeds":feeds,"app_settings":null,"connection_config":null})).unwrap()
     }
 
     fn folder(name: &str, uid: &str) -> serde_json::Value {
-        serde_json::json!({"name":name,"layout":"article","auto_summary":false,"auto_translate":false,"position":0,"sync_id":uid})
+        serde_json::json!({"name":name,"layout":"article","auto_summary":false,"auto_translate":false,"summary_mode":"inherit","translate_mode":"inherit","position":0,"sync_id":uid})
     }
 
     fn feed(url: &str, name: &str) -> serde_json::Value {
@@ -1398,16 +1424,16 @@ mod tests {
     #[test]
     fn snapshot_hash_is_structural_and_content_sensitive() {
         let p1: SyncPayload = serde_json::from_str(
-            r#"{"schema":2,"uploaded_at":"t","folders":[],"feeds":[],"app_settings":null,"connection_config":null}"#,
+            r#"{"schema":3,"uploaded_at":"t","folders":[],"feeds":[],"app_settings":null,"connection_config":null}"#,
         )
         .unwrap();
         let p2: SyncPayload = serde_json::from_str(
-            r#"{ "schema" : 2 , "uploaded_at" : "t" , "folders" : [] , "feeds" : [] ,
+            r#"{ "schema" : 3 , "uploaded_at" : "t" , "folders" : [] , "feeds" : [] ,
                 "app_settings" : null , "connection_config" : null }"#,
         )
         .unwrap();
         let p3: SyncPayload = serde_json::from_str(
-            r#"{"schema":2,"uploaded_at":"t2","folders":[],"feeds":[],"app_settings":null,"connection_config":null}"#,
+            r#"{"schema":3,"uploaded_at":"t2","folders":[],"feeds":[],"app_settings":null,"connection_config":null}"#,
         )
         .unwrap();
         assert_eq!(

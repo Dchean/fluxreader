@@ -14,11 +14,13 @@ pub struct FolderRow {
     pub position: i64,
     /// OPT-010：配置快照的稳定身份（跨设备匹配键；v26 起每行必有）。
     pub sync_id: Option<String>,
+    pub summary_mode: String,
+    pub translate_mode: String,
 }
 
 pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position, sync_id
+        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position, sync_id, summary_mode, translate_mode
          FROM folders ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -31,6 +33,8 @@ pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
             collapsed: r.get::<_, i64>(5)? != 0,
             position: r.get(6)?,
             sync_id: r.get(7)?,
+            summary_mode: r.get(8)?,
+            translate_mode: r.get(9)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -78,6 +82,19 @@ pub fn set_folder_sync_id(conn: &Connection, id: i64, sync_id: &str) -> AppResul
 }
 
 pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> AppResult<()> {
+    let name = name.trim();
+    if name.is_empty()
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM folders WHERE id != ?1 AND name = ?2)",
+            params![id, name],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(AppError::new(
+            "validate",
+            "分类名称不能为空或与其他分类重名",
+        ));
+    }
     conn.execute(
         "UPDATE folders SET name = ?1 WHERE id = ?2",
         params![name, id],
@@ -86,7 +103,43 @@ pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> AppResult<()> {
 }
 
 pub fn delete_folder(conn: &Connection, id: i64) -> AppResult<()> {
+    let mut statement = conn.prepare("SELECT id FROM feeds WHERE folder_id = ?1")?;
+    let feeds = statement
+        .query_map([id], |r| r.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for feed in feeds {
+        super::feeds::delete_feed(conn, feed)?;
+    }
+    // Retained sources no longer depend on the deleted category for their layout.
+    conn.execute(
+        "UPDATE feeds SET folder_id = NULL WHERE folder_id = ?1 AND active = 0",
+        [id],
+    )?;
     conn.execute("DELETE FROM folders WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn set_folder_ai_modes(
+    conn: &Connection,
+    id: i64,
+    summary: Option<FeedAiMode>,
+    translate: Option<FeedAiMode>,
+) -> AppResult<()> {
+    if summary.is_none() && translate.is_none() {
+        return Err(AppError::new(
+            "validate",
+            "至少给出一个要更新的分类 AI 字段",
+        ));
+    }
+    conn.execute(
+        "UPDATE folders SET summary_mode = COALESCE(?1, summary_mode),
+            translate_mode = COALESCE(?2, translate_mode) WHERE id = ?3",
+        params![
+            summary.map(FeedAiMode::as_str),
+            translate.map(FeedAiMode::as_str),
+            id
+        ],
+    )?;
     Ok(())
 }
 

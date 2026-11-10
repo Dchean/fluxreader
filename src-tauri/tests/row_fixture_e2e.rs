@@ -31,6 +31,9 @@ fn row_serialization_matches_fixture() {
         fetch_failed: false,
         fetch_error: None,
         last_fetched_at: None,
+        sync_id: "source-fixture".into(),
+        subscription_state: "active".into(),
+        effective_layout: "article".into(),
     };
     let article = db::ArticleListItem {
         id: 42,
@@ -61,6 +64,11 @@ fn row_serialization_matches_fixture() {
         // v33：发布时间来源与永久首次见到时间（前端后续标注「推断时间」用）
         first_seen_at: Some("2026-09-18T00:00:00+08:00".into()),
         published_at_source: "feed_clamped".into(),
+        image_count: 1,
+        media_revision: 3,
+        gallery_first_image_url: Some("https://e.example/img.png".into()),
+        retained: false,
+        body_missing: false,
     };
 
     let feed_json = serde_json::to_value(&feed).expect("FeedRow 序列化");

@@ -107,7 +107,7 @@ export async function run(ctx) {
   /* ============================================================
      (w5) 图片布局 store 状态迁移：打开灯箱（即标读 + 未读筛选原地保留）/ 关闭清空
      ============================================================ */
-  await resetStore();
+  await resetStore({ activeContentLayout: 'social' });
   const imgRows = Array.from({ length: 8 }, (_, i) => mkRow({
     id: 9100 + i, feed_id: 11, title: `画廊窗口 ${i}`, image_url: `https://img.example/${i}.png`,
     published_at: iso(NOW - i * 60000),
@@ -116,6 +116,9 @@ export async function run(ctx) {
   await store.getState().bootstrapFromBackend();
   await store.getState().updateFeedLayout('cat-1', '11', 'image'); // feedIndex: 源B → image（真实 action）
   store.setState({ activeContentLayout: 'image', timelineFilter: 'unread', activeViewFilter: 'all' });
+  await nTick();
+  store.setState({ readingSession: null });
+  await store.getState().reloadFromBackend();
   const visibleImage = selectVisibleEntries(store.getState());
   checkNew('(w5) image 布局可见集合 = 绑定 image 的源条目（布局是派生结果：同一个源改绑定后条目即时迁移）',
     visibleImage.length === 8 && visibleImage.every((e) => e.feedId === '11'));
@@ -154,10 +157,10 @@ export async function run(ctx) {
   S.invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
   const w6More = store.getState();
-  const w6Call = S.invokeCalls.find((c) => c.cmd === 'list_articles');
-  checkNew('(w6) 触底续拉：keyset 锚（最后一行 9699，无 offset）追加 3 行 → 503；追加批次在集合内可索引（窗口边界不错位的输入侧）',
-    w6Call?.args.args.last_id === 9699 && w6Call?.args.args.offset === undefined
-    && w6Call?.args.args.layout === 'image'
+  const w6Call = S.invokeCalls.find((c) => c.cmd === 'get_article_updates');
+  checkNew('(w6) 触底续拉按完整画廊成员ID尾页[9700,9701,9702]追加，属性回包不改变窗口顺序',
+    w6Call?.args.ids.join(',') === '9700,9701,9702'
+    && w6More.readingSession.query.layout === 'image'
     && w6More.entries.length === 503 && w6More.entries[500].id === '9700' && w6More.entries[502].id === '9702'
     && new Set(w6More.entries.map((e) => e.id)).size === 503);
   checkNew('(w6) 不足一页 → 已到底；哨兵形态迁移 loading → end（「没有更多了」的判定单点）',

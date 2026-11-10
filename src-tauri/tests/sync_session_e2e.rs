@@ -654,7 +654,7 @@ async fn config_import_pending_never_sends_old_password_to_new_server() {
     seed_account(&conn, &server_a, "user-a", "pw-a");
 
     let payload = app_lib::config_sync::SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![],
@@ -820,7 +820,7 @@ fn import_pending(
         greader_username: Some(user.into()),
     };
     let payload = app_lib::config_sync::SyncPayload {
-        schema: 1,
+        schema: 3,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![],
         feeds: vec![],

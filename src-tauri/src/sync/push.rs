@@ -18,7 +18,7 @@ pub(super) static PUSH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 
 /// 待推送动作的锁内快照：HTTP 执行所需的全部信息。
 pub(super) struct PushPlan {
-    /// (队列 id, action, entry ids)——read 广播副本展开后
+    /// 每条持久队项只包含一个真实远端目标。
     pub(super) status: Vec<PushStatus>,
     /// (队列 id, entry id)——收藏切换（star/unstar 语义，Google Reader 无 toggle）
     pub(super) stars: Vec<(i64, i64, bool)>,
@@ -43,7 +43,7 @@ impl PushPlan {
 pub(super) struct PushStatus {
     queue_id: i64,
     action: String,
-    entry_ids: Vec<i64>,
+    entry_id: i64,
 }
 
 /// exec_push 的结果按可落库语义分组：
@@ -55,7 +55,6 @@ pub(super) struct PushStatus {
 pub(super) struct PushOutcome {
     pub(super) done: Vec<i64>,
     pub(super) failures: Vec<PushFailure>,
-    pub(super) warnings: Vec<String>,
     pub(super) attempted: HashSet<i64>,
 }
 
@@ -173,37 +172,17 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
             plan.reclassified += 1;
         }
         match item.action.as_str() {
-            // 已读广播：绑定的 entry + 全部同文副本 entry 一并标读
-            // （双端场景：Read You 不去重，手机上另一源的副本也要已读，
-            // 否则手机读完这篇、那个源里又冒出来一篇未读的"同一篇"）
-            // TASK-112 政策：本分支是「同文副本读状态传播 = read 广播保持现状」
-            // 的消费点（政策定义与 DEC-refactor-roadmap-20261005 第 6 条原文见
-            // conflict_policy.rs 头注；unread/star/unstar 不广播）。
-            // OPT-008B：目标集由 db::read_broadcast_targets 单点给出（同文兄弟
-            // 条目的 remote_id + 旧 CSV 记账的有限兼容），不再只靠 remote_dup_ids
-            // ——跨源同 URL 现在是各自独立的持久条目，广播按统一选择规则展开。
-            // OPT-008B R1（初审 P3-4 / 主控 P2）：广播目标查询失败必须**透传**
-            // ——`unwrap_or_default` 会把「同文兄弟 + 旧 CSV 记账」静默当空，
-            // 读传播无声缺失且原 read 队项会被 prune（本卡明确禁止「失败当空」）。
-            // 错误经 plan_push 上抛：push_states_now/ states 推送段据此中止本轮，
-            // 队列保留、下轮重试。
-            "read" => {
-                let mut ids = vec![remote_id];
-                for dup in db::read_broadcast_targets(conn, article_id)? {
-                    if dup != remote_id {
-                        ids.push(dup);
-                    }
-                }
-                plan.status.push(PushStatus {
-                    queue_id: item.id,
-                    action: "read".into(),
-                    entry_ids: ids,
-                });
-            }
+            // Every source-local group member already owns its own durable queue item.
+            // ACK confirms only that exact remote identity; no URL-derived extra targets.
+            "read" => plan.status.push(PushStatus {
+                queue_id: item.id,
+                action: "read".into(),
+                entry_id: remote_id,
+            }),
             "unread" => plan.status.push(PushStatus {
                 queue_id: item.id,
                 action: "unread".into(),
-                entry_ids: vec![remote_id],
+                entry_id: remote_id,
             }),
             "star" => plan.stars.push((item.id, remote_id, true)),
             "unstar" => plan.stars.push((item.id, remote_id, false)),
@@ -226,7 +205,6 @@ enum TargetCheck {
 #[derive(Debug)]
 enum QueueCheck {
     Confirmed,
-    Partial(String),
     Inconclusive(String),
 }
 
@@ -263,40 +241,15 @@ fn check_target(
     }
 }
 
-/// 主目标决定队列是否结算；广播副本只作为 partial/warning。副本缺失/未确认
-/// 不得让整行永久失败，也不能触发每轮重发全部副本。
-// Note: 广播聚合以 entry_ids[0] 为主目标，副本只记 partial — 见
-// .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
+/// 每个持久队项单独确认自己的远端目标；组内其他目标保留各自重试状态。
 fn verify_queue_status(
     status: &PushStatus,
     states: &ReadbackStates,
     field: VerifyField,
     desired: bool,
 ) -> QueueCheck {
-    let Some(primary) = status.entry_ids.first() else {
-        return QueueCheck::Inconclusive("状态推送计划没有主目标".into());
-    };
-    match check_target(states, *primary, field, desired) {
-        TargetCheck::Confirmed => {
-            let secondary: Vec<String> = status
-                .entry_ids
-                .iter()
-                .skip(1)
-                .filter_map(
-                    |entry_id| match check_target(states, *entry_id, field, desired) {
-                        TargetCheck::Confirmed => None,
-                        TargetCheck::Inconclusive(message) => Some(format!(
-                            "广播副本 entry {entry_id} 未确认（不影响主目标结算）: {message}"
-                        )),
-                    },
-                )
-                .collect();
-            if secondary.is_empty() {
-                QueueCheck::Confirmed
-            } else {
-                QueueCheck::Partial(secondary.join("; "))
-            }
-        }
+    match check_target(states, status.entry_id, field, desired) {
+        TargetCheck::Confirmed => QueueCheck::Confirmed,
         TargetCheck::Inconclusive(message) => QueueCheck::Inconclusive(message),
     }
 }
@@ -339,11 +292,6 @@ fn record_failure(
     });
 }
 
-fn record_warning(outcome: &mut PushOutcome, report: &mut SyncReport, summary: String) {
-    report.errors.push(summary.clone());
-    outcome.warnings.push(summary);
-}
-
 fn apply_readback(
     outcome: &mut PushOutcome,
     report: &mut SyncReport,
@@ -356,13 +304,8 @@ fn apply_readback(
     for status in statuses {
         match verify_queue_status(status, states, field, desired) {
             QueueCheck::Confirmed => {
-                *verified_targets += status.entry_ids.len();
-                outcome.done.push(status.queue_id);
-            }
-            QueueCheck::Partial(message) => {
                 *verified_targets += 1;
                 outcome.done.push(status.queue_id);
-                record_warning(outcome, report, format!("状态写回验证 partial：{message}"));
             }
             QueueCheck::Inconclusive(message) => record_failure(
                 outcome,
@@ -404,7 +347,7 @@ pub(super) async fn exec_push(
         let mut seen = std::collections::HashSet::new();
         let ids: Vec<i64> = statuses
             .iter()
-            .flat_map(|s| s.entry_ids.iter().copied())
+            .map(|s| s.entry_id)
             .filter(|id| seen.insert(*id))
             .collect();
         for status in &statuses {
@@ -560,7 +503,7 @@ pub(super) async fn exec_push(
     outcome
 }
 
-/// 即时状态推送：只推 sync_queue（read/unread/star/unstar + 副本广播），
+/// 即时状态推送：只推 sync_queue（read/unread/star/unstar 的精确远端目标），
 /// 不做任何 pull。set_read/set_starred 变更后 ~1s 内到达服务端。
 /// 失败静默（队列保留，下轮同步重推）——后台同步不打扰用户。
 /// 队列保留期（A-8）：超过该天数仍无远端绑定的状态项视为无法自动收敛，
@@ -861,9 +804,7 @@ async fn push_states_with_session(
             emit_sync_error(&failure.summary);
         }
     }
-    for warning in &outcome.warnings {
-        emit_sync_error(warning);
-    }
+
     for message in &infra_errors {
         emit_sync_error(message);
     }
@@ -1025,7 +966,7 @@ mod queue_plan_tests {
         .unwrap();
         let plan = plan_push(&c).unwrap();
         assert_eq!(plan.status.len(), 1, "绑定项必须进入推送计划");
-        assert_eq!(plan.status[0].entry_ids, vec![101]);
+        assert_eq!(plan.status[0].entry_id, 101);
         assert_eq!(plan.reclassified, 0);
         let status: String = c
             .query_row("SELECT status FROM sync_queue", [], |r| r.get(0))

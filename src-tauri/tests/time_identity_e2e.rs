@@ -463,10 +463,9 @@ fn legacy_unknown_upgrades_only_when_real_source_date_appears() {
     assert_eq!(upgraded.first_seen_at, before.first_seen_at);
 }
 
-/// 无 URL 但有源日期：身份是 title+date。正文变化复用同一行并覆盖正文；
-/// 同标题同日期在同 feed 内属于已声明的碰撞边界，跨 feed 仍独立。
+/// title+date 仅是弱候选；正文不同时保留两条，重放同一输入仍幂等。
 #[test]
-fn title_date_identity_reuses_row_and_overwrites_changed_body() {
+fn title_date_identity_keeps_distinct_bodies_and_replays_idempotently() {
     let t = test_db("time_identity_title_date");
     let feed = seed_feed(&t.conn, "https://titledate.example/rss");
     let feed2 = seed_feed(&t.conn, "https://titledate2.example/rss");
@@ -483,8 +482,13 @@ fn title_date_identity_reuses_row_and_overwrites_changed_body() {
 
     assert_eq!(upsert_feed(&t.conn, feed, &first), 1);
     let before = article_state(&t.conn, only_id(&t.conn));
-    assert!(before.guid.contains("title-date:"));
+    assert!(
+        before.guid.contains("payload:"),
+        "持久弱键不再携带可补全的日期候选形式"
+    );
+    assert_eq!(upsert_feed(&t.conn, feed, &changed), 1);
     assert_eq!(upsert_feed(&t.conn, feed, &changed), 0);
+    assert_eq!(upsert_feed(&t.conn, feed, &first), 0);
     let after = article_state(&t.conn, before.id);
     assert_eq!(after, before, "title+date 身份不随正文变化");
     let body: String = t
@@ -496,19 +500,19 @@ fn title_date_identity_reuses_row_and_overwrites_changed_body() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(body, "body two", "正文变化覆盖同一 title+date 行");
+    assert_eq!(body, "body one", "弱身份不能覆盖不同正文");
     let total: i64 = t
         .conn
         .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(total, 1);
+    assert_eq!(total, 2);
 
     assert_eq!(upsert_feed(&t.conn, feed2, &changed), 1);
     let total: i64 = t
         .conn
         .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(total, 2, "title+date 必须 feed-scoped");
+    assert_eq!(total, 3, "title+date 必须 feed-scoped");
 }
 
 /// 远程协议没有日期：首次见到兜底，重复拉取稳定，后续真实日期升级为 feed。

@@ -161,11 +161,11 @@ fn insert_direct_article(
     let article = db::NewArticle {
         guid: guid.into(),
         url: Some(url.into()),
-        title: "local direct article".into(),
+        title: "remote snapshot".into(),
         author: None,
         summary: None,
-        content_html: Some("<p>local</p>".into()),
-        body_text: "local".into(),
+        content_html: Some("<p>Mock fetched content</p>".into()),
+        body_text: "Mock fetched content".into(),
         image_url: None,
         enclosure_url: None,
         enclosure_mime: None,
@@ -498,7 +498,7 @@ async fn local_change_after_new_insert_survives_rest_of_round() {
 }
 
 /// 负例④a：GR 匹配映射构建失败**不得空映射假成功**。
-/// 注入真实 DB 列类型错误（url_norm 写 BLOB → sync_match_maps 读取失败）：
+/// 注入真实 DB 列类型错误（read_version 写 BLOB → sync_match_maps 读取失败）：
 /// - 错误必须可见（report.errors 带「同步匹配映射构建失败」）；
 /// - 游标不得推进（修前空映射会「合法跳过」全部合并且照常推进 —— 窗口被
 ///   静默跳过）；
@@ -515,12 +515,12 @@ async fn gr_maps_build_failure_keeps_cursor_and_repull_merges() {
     {
         let conn = db.lock().await;
         db::set_last_sync_ts(&conn, t0).unwrap();
-        // 真实列类型错误：url_norm 写 BLOB（sync_match_maps 以 String 读取）
+        // 真实列类型错误：read_version 写 BLOB（sync_match_maps 以 String 读取）
         let feed_id: i64 = conn
             .query_row("SELECT id FROM feeds LIMIT 1", [], |r| r.get(0))
             .unwrap();
         conn.execute(
-            "INSERT INTO articles (feed_id, guid, title, url, url_norm)
+            "INSERT INTO articles (feed_id, guid, title, url, read_version)
              VALUES (?1, 'blob-row', 't', 'https://example.com/blob', X'00FF')",
             [feed_id],
         )
@@ -554,7 +554,7 @@ async fn gr_maps_build_failure_keeps_cursor_and_repull_merges() {
     {
         let conn = db.lock().await;
         conn.execute(
-            "UPDATE articles SET url_norm = 'https://example.com/blob' WHERE guid = 'blob-row'",
+            "UPDATE articles SET read_version = 0 WHERE guid = 'blob-row'",
             [],
         )
         .unwrap();
@@ -601,7 +601,7 @@ async fn gr_chunk_merge_failure_rebuilds_maps_repull_merges_failed_entry() {
         // 第二条目（guid 形如 remote-<eid>）的新入库触发失败——块内中止点
         conn.execute_batch(&format!(
             "CREATE TRIGGER inject_fail_second BEFORE INSERT ON articles
-             WHEN NEW.guid = 'remote-{eid2}'
+             WHEN NEW.guid = char(1)||'fluxreader:remote'||char(1)||'{eid2}'
              BEGIN SELECT RAISE(ABORT, 'injected merge failure'); END"
         ))
         .unwrap();
@@ -862,7 +862,7 @@ R3（主控 2026-10-10 二轮 P2：F11 实际变化标记，见文件头 ⑧⑨�
 /// 判别力：不接标记（恢复计数驱动）→ 最终两个断言红；数据断言（title/绑定/
 /// 状态）保证不是「只查 flag 常量」。
 #[tokio::test]
-async fn concurrent_direct_row_content_change_still_reports_data_change() {
+async fn concurrent_direct_row_binding_change_still_reports_data_change() {
     let (db, http, server, _guard) = setup("r3_concurrent_content").await;
     sync::feeds_phase(&db, &http)
         .await
@@ -896,8 +896,8 @@ async fn concurrent_direct_row_content_change_still_reports_data_change() {
     );
     assert_eq!(
         title_of(&db, aid).await,
-        "local direct article",
-        "前置：本地标题"
+        "remote snapshot",
+        "前置：标题与正文都匹配远端，允许直接绑定"
     );
     assert_eq!(remote_id_of(&db, aid).await, None, "前置：直连行未绑定");
 
@@ -921,7 +921,7 @@ async fn concurrent_direct_row_content_change_still_reports_data_change() {
     assert_eq!(
         title_of(&db, aid).await,
         "remote snapshot",
-        "upsert 确实改写了可见内容（标题）"
+        "直接绑定保持等价 RSS 标题"
     );
     assert_eq!(
         remote_id_of(&db, aid).await,
@@ -1292,7 +1292,7 @@ async fn gr_binding_change_marks_before_later_read_failure() {
         assert!(inserted, "前置：直连行新插入且未绑定");
         aid
     };
-    let eid = server.add_entry_ret(10, url, "R5", false, false);
+    let eid = server.add_entry_ret(10, url, "remote snapshot", false, false);
 
     // 注入：绑定 UPDATE 提交后把 read_version 写坏 → 后续版本读取必然 Err。
     {

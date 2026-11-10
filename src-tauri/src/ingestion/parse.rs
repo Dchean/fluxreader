@@ -137,24 +137,17 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
     let is_future = source_date
         .as_ref()
         .is_some_and(|d| *d > Utc::now() + chrono::Duration::hours(24));
-    // 未来日期仍按既有策略钳制为当前时间；但身份不能使用钳制后的 now（否则每
-    // 次刷新身份漂移），因此未来日期场景退回内容指纹身份。
-    let identity_date = source_date
-        .as_ref()
-        .filter(|_| !is_future)
-        .map(|d| d.to_rfc3339());
+    // 观察保留源的原始 UTC 日期。显示仍按旧规则 clamp，但 clamp/fetch 时刻
+    // 不能替代原始日期进入空候选；DB 非空内容键不消费该观察 token。
+    let observed_date = source_date.as_ref().map(|d| d.to_rfc3339());
     let published_at = source_date.map(|d| clamp_publish_date(d).to_rfc3339());
 
-    // 持久身份顺序：真实 feed id/guid → 同 feed 规范化 URL → 有源日期时
-    // title+date → 无 URL/date 时的 title+HTML+正文指纹。禁止抓取时间参与。
+    // Note: 弱观察须同时保留URL和原始源日期，空字节不提供内容证明 — 见
+    // .agents/notes/proposed/architecture/2026-11-09-源内等价组与持久条目状态.md
     let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {
         e.id.clone()
-    } else if let Some(url) = url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-        crate::db::url_identity_guid(url)
-    } else if let Some(date) = identity_date.as_deref() {
-        crate::db::title_date_identity_guid(&title_text, date)
     } else {
-        crate::db::content_identity_guid(&title_text, content_html.as_deref(), &body_text)
+        crate::db::weak_observation_guid(url.as_deref(), &title_text, observed_date.as_deref())
     };
 
     let summary = e
@@ -312,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_date_is_none_and_fingerprint_identity_is_repeatable() {
+    fn missing_date_is_none_and_observation_is_repeatable() {
         let xml = feed(r#"<item><title>Same</title><description>same body</description></item>"#);
         let first = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
         let second = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
@@ -322,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn future_date_is_clamped_but_never_enters_identity() {
+    fn future_date_observation_keeps_original_date_instead_of_clamp_time() {
         let xml = feed(
             r#"<item>
                  <title>Future</title>
@@ -365,5 +358,59 @@ mod tests {
         assert_eq!(parsed.articles[0].guid, "real-id");
         assert!(parsed.articles[1].guid.starts_with('\u{1}'));
         assert_ne!(parsed.articles[0].guid, parsed.articles[1].guid);
+    }
+
+    #[test]
+    fn empty_observations_keep_raw_dates_with_and_without_urls() {
+        for link in ["", "<link>https://e.example/shared</link>"] {
+            let parse = |date: &str| {
+                let xml = feed(&format!("<item><title>empty</title>{link}{date}</item>"));
+                parse_feed(xml.as_bytes(), "https://feed.example/rss")
+                    .unwrap()
+                    .articles
+                    .remove(0)
+            };
+            let absent = parse("");
+            assert!(absent.published_at.is_none());
+            assert_eq!(absent.guid, parse("").guid);
+            let first = parse("<pubDate>Sat, 01 Jan 2000 00:00:00 GMT</pubDate>");
+            let same_utc = parse("<pubDate>Sat, 01 Jan 2000 08:00:00 +0800</pubDate>");
+            let second = parse("<pubDate>Sun, 02 Jan 2000 00:00:00 GMT</pubDate>");
+            assert_eq!(first.guid, same_utc.guid);
+            assert_ne!(first.guid, second.guid);
+            assert_ne!(first.guid, absent.guid);
+            assert!(
+                first.content_html.as_deref().unwrap_or("").is_empty()
+                    && first.body_text.is_empty()
+            );
+            let future = parse("<pubDate>Wed, 24 Aug 2033 11:00:00 GMT</pubDate>");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let replay = parse("<pubDate>Wed, 24 Aug 2033 11:00:00 GMT</pubDate>");
+            assert!(future.published_at_clamped && replay.published_at_clamped);
+            assert_ne!(future.published_at, replay.published_at);
+            assert_eq!(future.guid, replay.guid);
+            assert_ne!(
+                future.guid,
+                parse("<pubDate>Thu, 25 Aug 2033 11:00:00 GMT</pubDate>").guid
+            );
+            assert_ne!(future.guid, absent.guid);
+        }
+    }
+
+    #[test]
+    fn atom_updated_fallback_is_observed_before_clamping() {
+        let parse = |updated: &str| {
+            let xml = format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>F</title><id>feed</id><updated>2000-01-01T00:00:00Z</updated><entry><title>empty</title><link href="https://e.example/shared"/><updated>{updated}</updated></entry></feed>"#
+            );
+            parse_feed(xml.as_bytes(), "https://feed.example/rss")
+                .unwrap()
+                .articles
+                .remove(0)
+        };
+        let first = parse("2033-08-24T11:00:00Z");
+        assert!(first.published_at_clamped);
+        assert_eq!(first.guid, parse("2033-08-24T19:00:00+08:00").guid);
+        assert_ne!(first.guid, parse("2033-08-25T11:00:00Z").guid);
     }
 }

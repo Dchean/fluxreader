@@ -7,7 +7,7 @@
 import { useAppStore } from './harness.mjs';
 
 const { articleRowToEntry, folderRowsToCategories } = await import('../../dist-test/lib/api.js');
-const { buildFeedIndex } = await import('../../dist-test/store/internals.js');
+const { buildFeedIndex, buildSourceIndex } = await import('../../dist-test/store/internals.js');
 
 /* ------------------------------------------------------------------
    规范夹具：与 tools/frontend-regression.mjs 同形的后端行（snake_case）。
@@ -15,14 +15,14 @@ const { buildFeedIndex } = await import('../../dist-test/store/internals.js');
    各自有真实数据源——列表快照按布局维度下发（与生产后端同一口径）。
    ------------------------------------------------------------------ */
 export const FOLDERS = [
-  { id: 1, name: '技术', layout: 'article', auto_summary: false, auto_translate: false, collapsed: false },
+  { id: 1, name: '技术', layout: 'article', summary_mode: 'off', translate_mode: 'off', collapsed: false },
 ];
 export const FEEDS = [
-  { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'social', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 12, folder_id: 1, feed_url: 'https://c.example/rss', site_url: null, title: '源C', favicon_url: null, layout: 'image', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 13, folder_id: 1, feed_url: 'https://d.example/rss', site_url: null, title: '源D', favicon_url: null, layout: 'podcast', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 14, folder_id: 1, feed_url: 'https://e.example/rss', site_url: null, title: '源E', favicon_url: null, layout: 'notification', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'social', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 12, folder_id: 1, feed_url: 'https://c.example/rss', site_url: null, title: '源C', favicon_url: null, layout: 'image', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 13, folder_id: 1, feed_url: 'https://d.example/rss', site_url: null, title: '源D', favicon_url: null, layout: 'podcast', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 14, folder_id: 1, feed_url: 'https://e.example/rss', site_url: null, title: '源E', favicon_url: null, layout: 'notification', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
 ];
 export const COUNTS = [
   { feed_id: 10, total: 2, unread: 2, starred: 0, today: 0 },
@@ -43,6 +43,8 @@ export function mkRow(overrides = {}) {
   return {
     id: 0, feed_id: 10, title: '标题', author: '作者', snippet: '摘要片段',
     image_url: null, enclosure_url: null, enclosure_mime: null, duration_sec: null,
+    gallery_first_image_url: overrides.image_url ?? null, image_count: overrides.image_url ? 1 : 0,
+    media_revision: 1, retained: false, body_missing: false, images: [],
     ai_summary: null, source: 'direct', published_at: '2026-10-01T10:00:00Z',
     is_read: false, is_starred: false, url: 'https://example.com/a',
     content_html: null, translated_content: null, fulltext_extracted: false,
@@ -98,6 +100,25 @@ function defaultHandler(cmd, args) {
   switch (cmd) {
     case 'list_folders': return Promise.resolve(FOLDERS);
     case 'list_feeds': return Promise.resolve(FEEDS);
+    case 'list_article_sources': return Promise.resolve(FEEDS);
+    case 'list_article_member_ids': {
+      const a = args.args;
+      const matching = currentRows.filter((row) => (!a.layout || layoutOfFeed(row.feed_id) === a.layout)
+        && (!a.feed_id || row.feed_id === a.feed_id)
+        && (!a.folder_id || FEEDS.find((feed) => feed.id === row.feed_id)?.folder_id === a.folder_id)
+        && (!a.only_unread || !row.is_read) && (!a.only_starred || row.is_starred)
+        && (a.since_ms == null || Date.parse(row.published_at) >= a.since_ms)
+        && (a.until_ms == null || Date.parse(row.published_at) < a.until_ms));
+      matching.sort((aRow, bRow) => (a.newest_first === false ? 1 : -1)
+        * (Date.parse(aRow.published_at) - Date.parse(bRow.published_at) || aRow.id - bRow.id));
+      return Promise.resolve(matching.map((row) => row.id));
+    }
+    case 'get_article_updates': {
+      const ids = new Set(args.ids);
+      const items = currentRows.filter((row) => ids.has(row.id)).sort((a, b) => a.id - b.id);
+      const found = new Set(items.map((row) => row.id));
+      return Promise.resolve({ items, missing_ids: args.ids.filter((id) => !found.has(id)) });
+    }
     case 'feed_counts': return Promise.resolve(COUNTS);
     /* OPT-008B R2（N2/P3-4）：reload / 写后对账的唯一计数 IPC——同一次调用内
        返回源计数（布局无关）+ scope 计数（当前布局）。组件夹具不提供 scope
@@ -196,6 +217,7 @@ export function seedFromRows(rows, { layout = 'article', dataMode = 'tauri' } = 
   useAppStore.setState({
     categories,
     feedIndex: buildFeedIndex(categories),
+    sourceIndex: buildSourceIndex(categories),
     feedCounts: new Map(COUNTS.map((c) => [String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today }])),
     /* 快照只装当前布局的条目（与后端下发口径一致；切布局由真实 selectLayout
        重拉替换）。 */

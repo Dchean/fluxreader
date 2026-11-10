@@ -232,10 +232,15 @@ fn cache_cleanup_articles_respects_star_and_age() {
     let old_unread = mk("old-unread", 40, false, false);
 
     let (deleted, _) = db::cleanup_cache(&mut conn, 30, "articles").unwrap();
-    assert_eq!(deleted, 1, "only old read non-starred deleted");
+    assert_eq!(deleted, 1, "only old read non-starred body released");
+    assert!(db::get_article(&conn, old).unwrap().unwrap().body_missing);
+    assert!(db::get_article(&conn, old).unwrap().unwrap().is_read);
+    for kept in [old_starred, recent, old_unread] {
+        assert!(!db::get_article(&conn, kept).unwrap().unwrap().body_missing);
+    }
 
     for (aid, should_exist, why) in [
-        (old, false, "old read article purged"),
+        (old, true, "old read identity preserved"),
         (old_starred, true, "starred preserved"),
         (recent, true, "recent preserved"),
         (

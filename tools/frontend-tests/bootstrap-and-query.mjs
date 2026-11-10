@@ -1,488 +1,174 @@
-// tools/frontend-tests/bootstrap-and-query.mjs
-// 领域模块：启动装载、范围/视图/布局选择与查询口径
-// OPT-016C 拆分自 tools/frontend-regression.mjs（旧行区间 635-705、707-756、758-836、838-887、1148-1206、1208-1268、1270-1298、2101-2107、2109-2129）；
-// 断言名称/条件文本原样迁移，仅做路径深度适配（import.meta.url 与动态 import 深一层）与
-// 共享可变状态的 S. 归属重写。数据所有权：共享假后端/夹具/记录归 harness（见 harness.mjs 头注），
-// 本模块不 import 第二份 store；域内自带夹具（大行集等）仍在本模块内独立构造与复位。
+// 启动、查询、导航与搜索：生产store/API，IPC仅控制数据与完成时机。
+// 迁移映射：(a)启动与代次→members/updates；(b/c/d)查询受分区且显式导航才重筛；
+// (h/h2)位置来自固定members，搜索注入与分页独立。原toast/句柄/auth检查保留。
 export const id = 'bootstrap-and-query';
-
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, resetStore, bootFixture, NOW, iso, mkRow, BASE_ROWS, localDayKey, selectVisibleEntries, selectScopeEntries, selectRawEntries, selectTreeCounts, selectViewCounts, bodyOf, getBodyEntry, entryNeedsHydrationT122, appStoreUnbound, internalsBeforeBind, overrideGlobal } = ctx;
+  const { S, store, checkNew, nTick, resetStore, bootFixture, waitUntil, NOW, mkRow,
+    selectVisibleEntries, selectScopeEntries, selectTreeCounts, selectViewCounts,
+    bodyOf, getBodyEntry, entryNeedsHydrationT122, appStoreUnbound, internalsBeforeBind, overrideGlobal } = ctx;
   await ctx.useMainBackend();
-
-  /* ============================================================
-     (a) bootstrapFromBackend / dataMode 与错误路径
-     ============================================================ */
-  // R1：window 覆盖必须 finally 复原（跨 await/reject 也必须保全原 window）
-  const restoreWindow = overrideGlobal(globalThis, 'window', {});   // 抹掉 __TAURI_INTERNALS__ → 浏览器预览分支
+  const ids = () => selectVisibleEntries(store.getState()).map(row => row.id).join(',');
+  const calls = cmd => S.invokeCalls.filter(call => call.cmd === cmd);
+  const landed = () => waitUntil(() => store.getState().readingSession?.ready && store.getState().backendReloadsInFlight === 0, '会话落地');
+  const nav = async action => { action(); await landed(); };
+  const restoreWindow = overrideGlobal(globalThis, 'window', {});
   let aBrowser;
-  try {
-    await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
-    await store.getState().bootstrapFromBackend();
-    aBrowser = store.getState();
-  } finally {
-    restoreWindow();
-  }
-  checkNew('(a) 无 Tauri IPC 时 bootstrap 回退 mock 并装载演示数据（骨架不永挂）',
-    aBrowser.dataMode === 'mock' && aBrowser.dataLoading === false
-    && aBrowser.categories.length > 0 && aBrowser.entries.length > 0 && aBrowser.feedIndex.size > 0);
-
+  try { await resetStore({ dataLoading: true }); await store.getState().bootstrapFromBackend(); aBrowser = store.getState(); }
+  finally { restoreWindow(); }
+  checkNew('(a) 浏览器启动加载真实演示模块并结束骨架', aBrowser.dataMode === 'mock' && !aBrowser.dataLoading && aBrowser.entries.length > 0 && aBrowser.feedIndex.size > 0);
   await bootFixture();
   const aOk = store.getState();
-  checkNew('(a) tauri bootstrap 建立 categories/feedIndex/feedCounts 并进入 tauri 模式',
-    aOk.dataMode === 'tauri' && aOk.dataLoading === false && aOk.bootstrapError === null
-    && aOk.categories.map((c) => c.id).join(',') === 'cat-1,cat-2'
-    && aOk.feedIndex.size === 4 && aOk.feedCounts.get('10')?.unread === 3);
-  /* 【TASK-052 改动理由】(a) 组这一条把「游标 = PAGE_SIZE，与实际拉回的行数无关」
-     写成了期望——那正是缺陷 P1-14「口径」半边本身：游标是**全局查询的 offset**，
-     于是首批无论真实返回多少行，游标都停在 500（后续 loadMore 从全局第 500 条
-     继续），与「当前范围已加载 8 条」脱节。per-scope 游标下首批游标 = 实际行数，
-     并且按范围键（此处 'article|all'，TASK-094 起含布局）记进 articlesCursor。 */
-  checkNew('(a) 首批分页游标 = 实际行数（per-scope：不再硬编码 PAGE_SIZE）、8 行 < 500 视为已到底、加载态收起',
-    aOk.entries.length === 8 && aOk.articlesLimit === 8 && aOk.articlesCursor['article|all']?.loaded === 8
-    && aOk.articlesExhausted === true && aOk.articlesLoading === false);
-
-  /* 【TASK-103 → TASK-122 改动理由】旧断言（两代）分别锁「清空」与「按 id 继承+
-     裁剪 hydratedIds/hydrationErrors 平行 Map」。TASK-122 起水合终态收敛为
-     bodyById 记录的 state（按文章实体记账，不随快照行传播），滞留标记在结构上
-     不存在（记录键 = 文章实体 id，重现即命中自己的正文与终态）。保护意图
-     （刷新不丢已水合正文、无「无请求死区」）改由 bodyById 断言承载：
-     快照替换前后记录保持、正文照常可读、无需补拉。 */
-  S.getArticlesPlan = { rows: [mkRow({ id: 101, feed_id: 10, content_html: '<p>101 水合正文</p>' })] };
-  store.getState().hydrateArticleContent(['101']);
-  await nTick(20);
-  S.getArticlesPlan = null;
-  const t122aCallsBefore = S.invokeCalls.filter((c) => c.cmd === 'get_articles').length;
+  checkNew('(a) tauri启动建立活动导航与来源索引、计数', aOk.dataMode === 'tauri' && !aOk.dataLoading && aOk.bootstrapError === null && aOk.feedIndex.size === 4 && aOk.sourceIndex.size === 4 && aOk.feedCounts.get('10')?.unread === 3);
+  checkNew('(a) 首屏只含文章分区5成员，进度与真实成员数相同且已到底', aOk.entries.length === 5 && aOk.articlesLimit === 5 && aOk.articlesCursor['article|all']?.loaded === 5 && aOk.articlesExhausted && !aOk.articlesLoading);
+  checkNew('(a) 完整成员命令传分区且轻属性按固定ID读取', calls('list_article_member_ids').at(-1)?.args.args.layout === 'article' && calls('get_article_updates').at(-1)?.args.ids.length === 5 && calls('list_articles').length === 0);
+  S.getArticlesPlan = { rows: [mkRow({ id:101, content_html:'<p>水合正文</p>' })] };
+  store.getState().hydrateArticleContent(['101']); await nTick(); S.getArticlesPlan = null;
+  const hydratedCalls = calls('get_articles').length;
   await store.getState().reloadFromBackend();
-  checkNew('(a) 快照替换后 bodyById 记录保持（水合终态随实体不随快照行，TASK-122），已水合卡片正文照常可读且无需补拉',
-    bodyOf(store.getState(), '101').content === '<p>101 水合正文</p>'
-    && getBodyEntry('101')?.state === 'ready'
-    && entryNeedsHydrationT122(store.getState(), '101') === false
-    && S.invokeCalls.filter((c) => c.cmd === 'get_articles').length === t122aCallsBefore);
+  checkNew('(a) 属性刷新不丢已水合正文、终态或额外发正文请求', bodyOf(store.getState(),'101').content === '<p>水合正文</p>' && getBodyEntry('101')?.state === 'ready' && !entryNeedsHydrationT122(store.getState(),'101') && calls('get_articles').length === hydratedCalls);
+  await resetStore(); S.failReload = { message:'数据库损坏' }; await store.getState().bootstrapFromBackend();
+  checkNew('(a) 启动失败显示错误、关闭骨架，绝不回退假mock', store.getState().bootstrapError === '数据库损坏' && !store.getState().dataLoading && store.getState().dataMode === 'tauri' && store.getState().entries.length === 0);
+  S.failReload = null; await store.getState().retryBootstrap();
+  checkNew('(a) 启动重试恢复正确分区并清错误', store.getState().bootstrapError === null && ids() === '102,101,105,104,103');
 
-  await resetStore();
-  S.failReload = { code: 'db_corrupt', message: '数据库损坏' };
-  await store.getState().bootstrapFromBackend();
-  const aFail = store.getState();
-  checkNew('(a) tauri bootstrap 失败：错误态可见、骨架收起、绝不回退 mock 假数据',
-    aFail.bootstrapError === '数据库损坏' && aFail.dataLoading === false
-    && aFail.dataMode === 'tauri' && aFail.entries.length === 0 && aFail.categories.length === 0);
-  S.failReload = null;
-  await store.getState().retryBootstrap();
-  checkNew('(a) retryBootstrap 清错误态并重新装载成功',
-    store.getState().bootstrapError === null && store.getState().entries.length === 8);
+  await resetStore(); S.memberPlan = { mode:'defer' };
+  const oldReload = store.getState().reloadFromBackend();
+  await waitUntil(() => S.pendingMembers.length === 1);
+  const newReload = store.getState().reloadFromBackend();
+  await waitUntil(() => S.pendingMembers.length === 2);
+  checkNew('(a) 同范围两次完整成员请求确实同时在途', S.pendingMembers.length === 2);
+  S.pendingMembers[1].resolve([105]); await newReload;
+  S.pendingMembers[0].resolve([101]); await oldReload;
+  checkNew('(a) 迟到旧首屏不能覆盖同参数新实例', ids() === '105'); S.memberPlan = null;
 
-  /* 代际守卫：并发 reload 只接受最新一次结果 */
-  await resetStore();
-  S.listPlan = { mode: 'defer' };
-  const pReloadOld = store.getState().reloadFromBackend();
-  const pReloadNew = store.getState().reloadFromBackend();
-  await nTick(0);
-  checkNew('(a) 并发 reload 时两次 list_articles 同时在途（代际守卫场景成立）', S.pendingList.length === 2);
-  S.pendingList[1].resolve([mkRow({ id: 301, feed_id: 20, title: '新代际' })]);
-  S.pendingList[0].resolve([mkRow({ id: 101, feed_id: 10, title: '旧代际' })]);
-  await Promise.all([pReloadOld, pReloadNew]);
-  S.listPlan = null;
-  checkNew('(a) 旧代际 reload 结果被丢弃：entries 保持最新代际快照（布局不回退）',
-    store.getState().entries.length === 1 && store.getState().entries[0].id === '301');
+  await resetStore({ dataLoading:true }); S.memberPlan = { mode:'defer' };
+  const staleBoot = store.getState().bootstrapFromBackend(); await waitUntil(() => S.pendingMembers.length === 1);
+  const freshBoot = store.getState().reloadFromBackend(); await waitUntil(() => S.pendingMembers.length === 2);
+  S.pendingMembers[0].resolve([101]); await staleBoot;
+  checkNew('(a) 旧启动被接手后不能提前结束最新请求的骨架', store.getState().dataLoading && store.getState().bootstrapError === null);
+  S.pendingMembers[1].resolve([104]); await freshBoot;
+  checkNew('(a) 接手请求关闭骨架并落新成员，不永挂splash', !store.getState().dataLoading && ids() === '104' && store.getState().bootstrapError === null); S.memberPlan = null;
 
-  /* 审计卡2-5：静默早退兜底——reloadFromBackend 的两处静默 return 此前是
-     dataLoading 的漏关闭点，bootstrap 路径会理论永挂 splash。
-     场景 1：启动首屏被更新查询抢占（splash 期间 feeds-updated 到达）→ 旧
-     代际拒落，dataLoading 必须已兜底关闭（修前此处仍为 true）；
-     场景 2：后端空快照拒落（契约异常）→ dataLoading 关闭 + bootstrapError
-     亮错误态（重试入口），重试后恢复。 */
-  await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
-  S.listPlan = { mode: 'defer' };
-  const pStaleBoot = store.getState().bootstrapFromBackend();
-  await nTick(0);
-  const pFresh = store.getState().reloadFromBackend();
-  await nTick(0);
-  checkNew('(a) 启动首屏在途 + 更新查询发起：两次 list_articles 同时在途（抢占场景成立）', S.pendingList.length === 2);
-  S.pendingList[0].resolve([mkRow({ id: 101, feed_id: 10, title: '被抢占的旧代际' })]);
-  await nTick(0);
-  checkNew('(a) 旧代际静默早退后 dataLoading 已兜底关闭（splash 不永挂）',
-    store.getState().dataLoading === false);
-  S.pendingList[1].resolve([mkRow({ id: 301, feed_id: 20, title: '新代际' })]);
-  await Promise.all([pStaleBoot, pFresh]);
-  S.listPlan = null;
-  checkNew('(a) 抢占方正常落地：entries 为新代际、bootstrapError 未被误标',
-    store.getState().entries.length === 1 && store.getState().entries[0].id === '301'
-    && store.getState().bootstrapError === null);
+  await resetStore({ dataLoading:true }); S.memberPlan = { mode:'defer' };
+  const nullBoot = store.getState().bootstrapFromBackend(); await waitUntil(() => S.pendingMembers.length === 1);
+  checkNew('(a) 空成员响应反例确有请求在途', S.pendingMembers.length === 1);
+  S.pendingMembers[0].resolve(null); await nullBoot;
+  checkNew('(a) null成员快照不是空库成功，呈现可重试启动错误', !store.getState().dataLoading && !!store.getState().bootstrapError);
+  S.memberPlan = null; await store.getState().retryBootstrap();
+  checkNew('(a) null快照失败后可重试恢复，成员齐全', store.getState().bootstrapError === null && ids() === '102,101,105,104,103');
 
-  await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
-  S.listPlan = { mode: 'defer' };
-  const pNullBoot = store.getState().bootstrapFromBackend();
-  await nTick(0);
-  checkNew('(a) 空快照场景：单次 list_articles 在途', S.pendingList.length === 1);
-  S.pendingList[0].resolve(null); // 后端契约异常：articles = null（正常流程不可达）
-  await pNullBoot;
-  S.listPlan = null;
-  checkNew('(a) 空快照静默早退：dataLoading 关闭 + bootstrapError 亮错误态（重试入口可达）',
-    store.getState().dataLoading === false
-    && typeof store.getState().bootstrapError === 'string' && store.getState().bootstrapError.length > 0);
-  await store.getState().retryBootstrap();
-  checkNew('(a) 空快照错误态经重试恢复（错误清零、数据装载）',
-    store.getState().bootstrapError === null && store.getState().entries.length === 8);
+  await resetStore({ dataLoading:true });
+  const original = globalThis.__INVOKE__; let releaseSettings;
+  const restore = overrideGlobal(globalThis,'__INVOKE__',(cmd,args) => cmd === 'get_setting' && args.key === 'app_settings'
+    ? new Promise(resolve => { releaseSettings = resolve; }) : original(cmd,args));
+  let boot;
+  try {
+    boot = store.getState().bootstrapFromBackend(); await waitUntil(() => releaseSettings != null);
+    checkNew('(a) 设置在途时来源/计数元数据已并行发出', calls('list_folders').length === 1 && calls('list_feeds').length === 1 && calls('counts_snapshot').length === 1);
+    checkNew('(a) 设置未接受不能捕获默认成员，骨架保持', calls('list_article_member_ids').length === 0 && store.getState().dataLoading);
+    releaseSettings(JSON.stringify({startupView:'starred'})); await boot;
+    checkNew('(a) 设置接受后只查询真实starred成员，不用all过渡窗口', calls('list_article_member_ids').length === 1 && calls('list_article_member_ids')[0].args.args.only_starred === true);
+    checkNew('(a) 启动starred只含当前分区两篇，完成有序落地', store.getState().activeViewFilter === 'starred' && ids() === '102,103' && !store.getState().dataLoading);
+  } finally { releaseSettings?.(null); if (boot) await boot; restore(); }
 
-  /* 审计返工 P2-3：落库门「设置接受先于数据落地」的直接取证——get_setting
-     挂起到晚于 list_articles 返回：落地必须被门挡到设置接受之后；接受后恢复的
-     startupView=starred 在落地完成时被读到 → 触发筛选视图补拉（list_articles
-     第二次、带 only_starred）。修前（无落库门）落地先于设置接受，完成时读到
-     'all' → 不补拉，list_articles 仅 1 次。 */
-  {
-    await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
-    S.listPlan = { mode: 'defer' };
-    const installedInvoke = globalThis.__INVOKE__;
-    let releaseSetting = () => {};
-    const gateInvoke = (cmd, args) => {
-      if (cmd === 'get_setting') {
-        return new Promise((resolve) => { releaseSetting = () => resolve(S.settingsRaw); });
-      }
-      return installedInvoke(cmd, args);
-    };
-    const restoreInvoke = overrideGlobal(globalThis, '__INVOKE__', gateInvoke);
-    try {
-      S.settingsRaw = JSON.stringify({ startupView: 'starred' });
-      const pBoot = store.getState().bootstrapFromBackend();
-      await nTick(0);
-      checkNew('(a) 落库门场景成立：settings 读取与 list_articles 同时在途',
-        typeof releaseSetting === 'function' && S.pendingList.length === 1);
-      S.pendingList[0].resolve([mkRow({ id: 101, feed_id: 10, title: '首屏行' })]);
-      await nTick(0);
-      checkNew('(a) list_articles 已返回但设置未接受：落地被门挡住（dataLoading 仍开、无补拉）',
-        store.getState().dataLoading === true
-        && S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1);
-      releaseSetting();
-      await nTick(0); await nTick(0); await nTick(0);
-      const listCalls = S.invokeCalls.filter((c) => c.cmd === 'list_articles');
-      checkNew('(a) 设置接受后落地：恢复的 startupView=starred 触发筛选视图补拉（list_articles 第二次带 only_starred）',
-        listCalls.length === 2 && listCalls[1].args.args.only_starred === true);
-      S.pendingList[S.pendingList.length - 1].resolve([mkRow({ id: 201, feed_id: 20, title: '收藏行', is_starred: true })]);
-      await pBoot;
-      await nTick(0); await nTick(0);
-      S.listPlan = null;
-      checkNew('(a) 落库门放行后按序收尾：dataLoading 关闭、视图为恢复的 starred、补拉快照落地',
-        store.getState().dataLoading === false
-        && store.getState().activeViewFilter === 'starred'
-        && store.getState().entries.some((e) => e.id === '201'));
-    } finally {
-      restoreInvoke();
-      S.listPlan = null;
-      S.settingsRaw = null;
-    }
+  await bootFixture();
+  store.setState({ openedReadIds:{999:true} });
+  await nav(() => store.getState().selectFeed('11'));
+  checkNew('(b) 选源清已打开标记但保分区边界，文章分区不混社交源', store.getState().activeFeedFilter === '11' && Object.keys(store.getState().openedReadIds).length === 0 && ids() === '');
+  await nav(() => store.getState().selectLayout('social'));
+  await nav(() => store.getState().selectFeed('11'));
+  checkNew('(b) 社交分区源B得到两篇', ids() === '201,202');
+  await nav(() => store.getState().selectFeed('cat-1'));
+  checkNew('(b) 组范围和分区共同筛选，不含另一组社交源', ids() === '201,202');
+  await nav(() => store.getState().selectLayout('article'));
+  await nav(() => store.getState().selectFeed('cat-1'));
+  checkNew('(b) 相同组在文章分区只包含源A和D五篇', ids() === '102,101,105,104,103');
+  store.setState({timelineFilter:'unread'});
+  let tree = selectTreeCounts(store.getState());
+  checkNew('(b) 未读树计数按分区/组聚合精确源计数', tree.get('10') === 3 && tree.get('12') === 2 && tree.get('cat-1') === 5 && tree.get('11') === undefined);
+  store.setState({timelineFilter:'all'}); tree=selectTreeCounts(store.getState());
+  checkNew('(b) all树计数独立于分页数', tree.get('10') === 5 && tree.get('cat-1') === 7 && tree.get('all') === 7);
+  store.setState({activeViewFilter:'starred'}); tree=selectTreeCounts(store.getState());
+  checkNew('(b) 收藏树计数保留零值源', tree.get('10') === 1 && tree.get('12') === 0 && tree.get('all') === 1);
+  store.setState({activeContentLayout:'social',activeFeedFilter:'cat-1'});
+  checkNew('(b) 组计数只算当前社交源B', selectViewCounts(store.getState()).all === 4);
+  store.setState({activeFeedFilter:'20',timelineFilter:'unread'});
+  checkNew('(b) 单源计数按源C未读值', selectViewCounts(store.getState()).all === 1);
+  store.setState({activeContentLayout:'article'});
+  checkNew('(b) 分区不匹配源时范围和计数为空', selectScopeEntries(store.getState()).length === 0 && selectViewCounts(store.getState()).all === 0);
+
+  await bootFixture(); await nav(() => store.getState().selectView('starred'));
+  checkNew('(c) 收藏成员谓词与分区同时传递且已读收藏可见', ids() === '102,103' && calls('list_article_member_ids').at(-1).args.args.only_starred === true);
+  const starGen=store.getState().readingSession.generation;
+  await nav(() => store.getState().selectView('starred'));
+  checkNew('(c) 重选相同视图也按最新状态建立新代次', store.getState().readingSession.generation > starGen && ids() === '102,103');
+  store.getState().toggleEntryFlag('102','isStarred'); await nTick();
+  checkNew('(c) 取消收藏保持当前成员位置、只改属性', ids() === '102,103' && !store.getState().entries.find(row=>row.id==='102').isStarred);
+  await nav(() => store.getState().selectView('starred'));
+  checkNew('(c) 显式重筛收藏后才移除已取消成员', ids() === '103');
+  await nav(() => store.getState().selectView('unread'));
+  checkNew('(c) 未读首屏只读当前分区四篇，进度/exhausted一致', ids() === '101,105,104,103' && store.getState().articlesLimit === 4 && store.getState().articlesExhausted);
+  store.getState().selectArticle('101'); await nTick();
+  checkNew('(c) 文章打开标读仍留在未读会话原位', ids() === '101,105,104,103' && store.getState().entries.find(row=>row.id==='101').isRead);
+  await nav(() => store.getState().selectView('today'));
+  const dayArgs=calls('list_article_member_ids').at(-1).args.args;
+  checkNew('(c) 今天传明确半开日界且只显示分区当天两篇', ids() === '102,101' && dayArgs.since_ms < NOW && dayArgs.until_ms > NOW);
+  await nav(() => store.getState().selectView('all'));
+  checkNew('(c) all时间/同秒ID排序完整', ids() === '102,101,105,104,103');
+  await nav(() => store.getState().toggleTimelineFilter());
+  checkNew('(c) all未读切换真实重筛，已读不在新成员', ids() === '105,104,103');
+  await nav(() => store.getState().toggleTimelineFilter());
+  checkNew('(c) all筛选可逆，恢复已读成员', ids() === '102,101,105,104,103');
+  await nav(() => store.getState().toggleTimelineSort());
+  checkNew('(c) oldest重建后以时间和ID同向升序', ids() === '103,104,105,101,102');
+
+  await bootFixture(); store.setState({activeArticleId:'101',isShowingTranslatedProse:true,isRawRenderMode:true,showFulltext:true});
+  await nav(() => store.getState().selectLayout('social'));
+  checkNew('(d) 分区切换重置范围/阅读器状态并真实拉对应成员', ids() === '201,301,202' && store.getState().activeFeedFilter === 'all' && store.getState().activeArticleId === null && !store.getState().isShowingTranslatedProse && !store.getState().isRawRenderMode && !store.getState().showFulltext);
+  await nav(() => store.getState().selectLayout('image'));
+  checkNew('(d) 无画廊源时真实查询为空，不串社交卡', ids() === '' && calls('list_article_member_ids').at(-1).args.args.layout === 'image');
+  await nav(() => store.getState().selectLayout('podcast'));
+  checkNew('(d) 无播客源时成员为空', ids() === '');
+  await store.getState().updateFeedLayout('cat-1','11','podcast'); await nTick();
+  await nav(() => store.getState().selectLayout('podcast'));
+  checkNew('(d) 修改源绑定后下次显式导航按最新绑定筛选', ids() === '201,202' && calls('update_feed_layout').at(-1)?.args.layout === 'podcast');
+  await store.getState().updateCatLayout('cat-2','podcast'); await nTick();
+  await nav(() => store.getState().selectLayout('podcast'));
+  checkNew('(d) inherit源跟随组绑定，显式源保自己的分区', ids() === '201,301,202');
+  await store.getState().updateFeedLayout('cat-1','11','social'); await store.getState().updateCatLayout('cat-2','social'); await nTick();
+
+  await bootFixture(); const before=store.getState().entries;
+  store.getState().openSearch(); store.getState().closeSearch();
+  checkNew('(h) 搜索开关只改面板状态，不动已加载实体', !store.getState().searchOpen && store.getState().entries === before);
+  await store.getState().anchorToArticle('103'); await nTick();
+  checkNew('(h) 已加载成员锚定只选中打开、不重建窗口', store.getState().activeArticleId === '103' && ids() === '102,101,105,104,103');
+  await resetStore(); S.memberPlan={mode:'defer'};
+  const oldAnchor=store.getState().anchorToArticle('101'); await waitUntil(()=>S.pendingMembers.length===1);
+  const newAnchor=store.getState().anchorToArticle('105'); await waitUntil(()=>S.pendingMembers.length===2);
+  checkNew('(h) 两次锚定完整成员读取在途，代次场景成立',S.pendingMembers.length===2);
+  S.pendingMembers[0].resolve([101]); await oldAnchor;
+  checkNew('(h) 旧锚定不发属性读取、不抢选中',calls('get_article_updates').length===0 && store.getState().activeArticleId===null);
+  S.pendingMembers[1].resolve([105]); await newAnchor; await nTick(); S.memberPlan=null;
+  checkNew('(h) 最新锚定才打开目标',store.getState().activeArticleId==='105' && ids()==='105');
+  await bootFixture(); await store.getState().anchorToArticle('201'); await nTick();
+  checkNew('(h) 会话外搜索结果按ID取属性并打开但不伪造文章分区成员',store.getState().activeArticleId==='201' && store.getState().entries.some(row=>row.id==='201') && ids()==='102,101,105,104,103');
+  store.setState({dataMode:'mock',activeArticleId:null}); S.invokeCalls.length=0; await store.getState().anchorToArticle('101');
+  checkNew('(h) mock锚定no-op，没有IPC或选中',S.invokeCalls.length===0 && store.getState().activeArticleId===null);
+
+  const {anchorScopeNav}=await import('../../src/components/anchorScopeNav.ts');
+  checkNew('(h2) 导航归一顺序仍为范围、视图、all筛选',anchorScopeNav({activeFeedFilter:'10',activeViewFilter:'starred',timelineFilter:'unread'}).map(step=>step.action).join(',')==='selectFeed,selectView,toggleTimelineFilter');
+  checkNew('(h2) 已归一范围不产生多余动作',anchorScopeNav({activeFeedFilter:'all',activeViewFilter:'all',timelineFilter:'all'}).length===0);
+  await resetStore({activeFeedFilter:'10',activeViewFilter:'starred',timelineFilter:'unread'}); await store.getState().reloadFromBackend(); S.invokeCalls.length=0;
+  for(const step of anchorScopeNav(store.getState())) {
+    if(step.action==='selectFeed') store.getState().selectFeed(step.arg??'all');
+    else if(step.action==='selectView') store.getState().selectView('all');
+    else store.getState().toggleTimelineFilter();
   }
-
-  /* ============================================================
-     (b) 订阅源/分类选择与派生树计数
-     ============================================================ */
-  await bootFixture();
-  store.setState({ activeFeedFilter: 'all', openedReadIds: { '999': true } });
-  store.getState().selectFeed('11');
-  checkNew('(b) selectFeed 写入 activeFeedFilter 并清空「已读保留」快照',
-    store.getState().activeFeedFilter === '11' && Object.keys(store.getState().openedReadIds).length === 0);
-  checkNew('(b) 范围过滤叠加布局解析：源B 是 social，article 布局下 scope 为空',
-    selectScopeEntries(store.getState()).length === 0);
-  store.setState({ activeContentLayout: 'social' });
-  checkNew('(b) 切到 social 布局后 scope 出现源B 两条（范围 × 布局双重过滤）',
-    selectScopeEntries(store.getState()).map((e) => e.id).join(',') === '201,202');
-  store.getState().selectFeed('cat-1');
-  checkNew('(b) selectFeed(分类) 覆盖该分类下当前布局的源，不含其他分类',
-    selectScopeEntries(store.getState()).map((e) => e.id).join(',') === '201,202');
-  store.setState({ activeContentLayout: 'article' });
-  store.getState().selectFeed('cat-1');
-
-  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
-     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
-     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
-  checkNew('(b) 同一分类在 article 布局下覆盖源A+源D（5 条）',
-    selectScopeEntries(store.getState()).map((e) => e.id).join(',') === '102,101,105,104,103');
-
-  store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'all' });
-  const treeUnread = selectTreeCounts(store.getState());
-  checkNew('(b) 树角标 = 布局 × 视图 × 显示筛选后的后端计数（「显示: 未读」→ 未读数）',
-    treeUnread.get('10') === 3 && treeUnread.get('12') === 2 && treeUnread.get('cat-1') === 5
-    && treeUnread.get('all') === 5 && treeUnread.get('11') === undefined);
-  store.setState({ timelineFilter: 'all' });
-  const treeAll = selectTreeCounts(store.getState());
-  checkNew('(b) 显示切回「全部」后树角标变总数（分类聚合 = 各源之和）',
-    treeAll.get('10') === 5 && treeAll.get('cat-1') === 7 && treeAll.get('all') === 7);
-  store.setState({ activeViewFilter: 'starred' });
-  const treeStar = selectTreeCounts(store.getState());
-  checkNew('(b) 视图为收藏时树角标按收藏数（0 也建档，行与源一一对应）',
-    treeStar.get('10') === 1 && treeStar.get('12') === 0 && treeStar.get('cat-1') === 1 && treeStar.get('all') === 1);
-  store.setState({ activeContentLayout: 'social', activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'cat-1' });
-  const vCounts = selectViewCounts(store.getState());
-  checkNew('(b) selectFeed 后视图计数随订阅范围收敛（cat-1 只算源B）',
-    vCounts.all === 2 && vCounts.unread === 2 && vCounts.starred === 2 && vCounts.today === 1);
-  store.setState({ activeFeedFilter: '20' });
-  const vCounts2 = selectViewCounts(store.getState());
-  checkNew('(b) 单源范围视图计数 = 该源计数（源C：显示未读 → 1）',
-    vCounts2.all === 1 && vCounts2.unread === 1 && vCounts2.starred === 0 && vCounts2.today === 0);
-  store.setState({ activeContentLayout: 'article' });
-  checkNew('(b) 选中的源不属于当前布局时：scope 空、计数全 0（布局不串台）',
-    selectScopeEntries(store.getState()).length === 0
-    && selectViewCounts(store.getState()).all === 0 && selectViewCounts(store.getState()).unread === 0);
-
-  /* ============================================================
-     (c) 视图筛选 / 时间线筛选对可见条目集合的影响
-     ============================================================ */
-  await bootFixture();
-  store.setState({ activeViewFilter: 'starred' });
-  await store.getState().reloadFilteredEntries('starred');
-
-  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
-     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
-     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
-  checkNew('(c) 收藏视图拉取走 only_starred：entries 只剩 3 条收藏（跨布局，布局在派生层过滤）',
-    store.getState().entries.map((e) => e.id).join(',') === '201,102,103');
-  store.setState({ activeViewFilter: 'all', entries: [], articlesLimit: 0, articlesExhausted: false });
-  store.getState().selectView('starred');
-  const cCache = store.getState();
-  checkNew('(c) selectView 命中视图缓存：同步恢复快照（零延迟、游标=快照长度、标记已到底）',
-    cCache.activeViewFilter === 'starred' && cCache.entries.map((e) => e.id).join(',') === '201,102,103'
-    && cCache.articlesLimit === 3 && cCache.articlesExhausted === true);
-  await nTick(20);
-  checkNew('(c) 缓存命中后的后台静默刷新不改变收藏视图结论',
-    store.getState().entries.map((e) => e.id).join(',') === '201,102,103');
-
-  store.setState({ activeViewFilter: 'all', entries: [], articlesLimit: 0, openedReadIds: { '102': true } });
-  store.getState().selectView('unread');
-  checkNew('(c) selectView(unread) 立即切视图并清空已读保留快照',
-    store.getState().activeViewFilter === 'unread' && Object.keys(store.getState().openedReadIds).length === 0);
-  await nTick(20);
-  const cUnread = store.getState();
-  /* 【TASK-110 改动理由】原断言名「拉全量/不再分页」编码的正是本卡废除的近似全集
-     手法（limit:100000 一次拉完）。分页化后这里是**首屏**：6 行 < 页大小(500) ⇒
-     exhausted 真实判定为 true。判定条件本身（6 条/游标=行数/已到底）与修前一致，
-     只改措辞对齐新语义，不弱化保护。 */
-  checkNew('(c) 未读视图走 only_unread 拉取首屏：只剩 6 条未读、游标=行数、不足一页即真实判定已到底',
-    cUnread.entries.map((e) => e.id).join(',') === '201,101,301,105,104,103'
-    && cUnread.articlesLimit === 6 && cUnread.articlesExhausted === true && cUnread.articlesLoading === false);
-  store.getState().selectView('today');
-  await nTick(20);
-  const cToday = selectVisibleEntries(store.getState());
-  checkNew('(c) 今天视图只含本地当天条目（与列表「今天」判定同口径）',
-    cToday.length > 0 && cToday.every((e) => localDayKey(e.publishedAt) === localDayKey(Date.now())));
-
-  await bootFixture();
-
-  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
-     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
-     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
-  checkNew('(c) 全部视图 + 显示全部：article 布局可见 5 条，按发布时间降序（同秒由 id 决胜）',
-    selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '102,101,105,104,103');
-  store.getState().toggleTimelineFilter();
-  checkNew('(c) toggleTimelineFilter → 未读：已读条目从可见集合移除，未读保留',
-    store.getState().timelineFilter === 'unread'
-    && selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '101,105,104,103');
-  store.getState().toggleTimelineFilter();
-  checkNew('(c) 再次 toggle 回「全部」：已读条目重新可见（可逆）',
-    store.getState().timelineFilter === 'all' && selectVisibleEntries(store.getState()).length === 5);
-  store.getState().toggleTimelineSort();
-  checkNew('(c) toggleTimelineSort 反向排序：oldest 为时间升序',
-    store.getState().timelineSort === 'oldest'
-    && selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '103,104,105,101,102');
-  store.getState().toggleTimelineSort();
-  store.setState({ activeViewFilter: 'starred', timelineFilter: 'unread', openedReadIds: {} });
-  checkNew('(c) 收藏视图不受「显示: 未读」影响：已读但收藏的 102 仍在可见集合',
-    selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '102,103');
-  store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', openedReadIds: { '102': true } });
-  checkNew('(c) 本次会话打开过的已读条目在未读筛选下原地保留（openedReadIds 生效）',
-    selectVisibleEntries(store.getState()).map((e) => e.id).includes('102'));
-
-  await bootFixture();
-  S.listPlan = { mode: 'defer' };
-  store.setState({ activeViewFilter: 'unread', entries: [], articlesLimit: 0 });
-  const pFiltered = store.getState().reloadFilteredEntries('unread');
-  await nTick(0);
-  store.setState({ activeViewFilter: 'starred' });   // 拉取期间用户又切了视图
-  S.pendingList[0].resolve(BASE_ROWS.filter((r) => !r.is_read));
-  await pFiltered;
-  S.listPlan = null;
-  checkNew('(c) 拉取期间切走视图：过期筛选结果被丢弃（entries/游标不被旧视图覆盖）',
-    store.getState().entries.length === 0 && store.getState().articlesLimit === 0
-    && store.getState().activeViewFilter === 'starred');
-
-  /* ============================================================
-     (d) 内容布局切换（article/social/image/podcast）与派生状态
-     ============================================================ */
-  await bootFixture();
-  const dEntriesRef = store.getState().entries;
-  store.setState({
-    activeFeedFilter: '11', activeArticleId: '101', openedReadIds: { '102': true },
-    isShowingTranslatedProse: true, showFulltext: true, isRawRenderMode: true,
-  });
-  store.getState().selectLayout('social');
-  const dAfter = store.getState();
-  checkNew('(d) selectLayout 切布局并复位范围/选中/阅读器态（视图筛选保留）',
-    dAfter.activeContentLayout === 'social' && dAfter.activeFeedFilter === 'all' && dAfter.activeArticleId === null
-    && dAfter.isShowingTranslatedProse === false && dAfter.showFulltext === false && dAfter.isRawRenderMode === false
-    && Object.keys(dAfter.openedReadIds).length === 0 && dAfter.activeViewFilter === 'all');
-  checkNew('(d) 布局切换是纯本地过滤：entries 引用不变（不触发 reload、不闪空）',
-    store.getState().entries === dEntriesRef && store.getState().articlesLoading === false);
-
-  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
-     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
-     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
-  checkNew('(d) 派生集合按布局解析：article = 源A+源D，social = 源B+源C',
-    selectRawEntries({ ...store.getState(), activeContentLayout: 'article' }).map((e) => e.id).join(',') === '102,101,105,104,103'
-    && selectRawEntries(store.getState()).map((e) => e.id).join(',') === '201,301,202');
-  store.setState({ activeContentLayout: 'image' });
-  checkNew('(d) image 布局无绑定源 → 派生集合为空（不串其他布局条目）',
-    selectRawEntries(store.getState()).length === 0 && selectVisibleEntries(store.getState()).length === 0);
-  store.setState({ activeContentLayout: 'podcast' });
-  checkNew('(d) podcast 布局初始为空（布局是绑定派生的解析结果，不是条目属性）',
-    selectRawEntries(store.getState()).length === 0);
-  store.setState({ activeContentLayout: 'social' });
-  S.invokeCalls.length = 0;
-  store.getState().updateFeedLayout('cat-1', '11', 'podcast');
-  await nTick(0);   // api.updateFeedLayout 内部 await getInvoke()，落库是异步 fire-and-forget
-  const dCall = S.invokeCalls.find((c) => c.cmd === 'update_feed_layout');
-  checkNew('(d) updateFeedLayout 落库：纯数字 id 提取 + 布局原样写入（不被强转 inherit）',
-    !!dCall && dCall.args.id === 11 && dCall.args.layout === 'podcast'
-    && store.getState().feedIndex.get('11')?.feed.layout === 'podcast');
-  checkNew('(d) 改绑定后条目即时迁移到新布局视图（不搬动数据：entries 仍 8 条）',
-    selectRawEntries({ ...store.getState(), activeContentLayout: 'podcast' }).map((e) => e.id).join(',') === '201,202'
-    && selectRawEntries(store.getState()).map((e) => e.id).join(',') === '301'
-    && store.getState().entries.length === 8);
-  S.invokeCalls.length = 0;
-  store.getState().updateCatLayout('cat-2', 'podcast');
-  await nTick(0);
-  checkNew('(d) updateCatLayout 后 inherit 源的条目跟随分类布局迁移（源C 进 podcast）',
-    store.getState().feedIndex.get('20')?.cat.layout === 'podcast'
-    && selectRawEntries({ ...store.getState(), activeContentLayout: 'podcast' }).map((e) => e.id).join(',') === '201,301,202'
-    && selectRawEntries(store.getState()).length === 0
-    && S.invokeCalls.some((c) => c.cmd === 'update_folder_layout' && c.args.id === 2 && c.args.layout === 'podcast'));
-
-  /* ============================================================
-     (h) 搜索开关与结果竞态守卫
-     ============================================================ */
-  await bootFixture();
-  store.setState({ searchOpen: false, settingsOpen: true });
-  store.getState().openSearch();
-  const hOpened = store.getState().searchOpen;
-  store.getState().closeSearch();
-  checkNew('(h) openSearch/closeSearch 只切换搜索面板态，不动其他弹层与列表',
-    hOpened === true && store.getState().searchOpen === false && store.getState().settingsOpen === true);
-  store.setState({ settingsOpen: false });
-
-  S.invokeCalls.length = 0;
-  await store.getState().anchorToArticle('301');
-  const hAnchor = store.getState();
-  /* 【TASK-117 改动理由】期望页内容随 id 决胜序更新：BASE_ROWS 的 TODAY/OLD 并列组
-     此前按插入序稳定排序（101,102 / 103..301），id 决胜后并列组内 id 降序
-     （102,101 / 301,202,201,105,104,103）——301 的绝对位置从 7 变 2，锚定页
-     从 [301] 变为其所在窗口的 6 行；断言意图（锚定到目标所在页）不变。 */
-  checkNew('(h) 搜索结果锚定：按绝对位置拉取该页并选中（不再从头拉 500 篇）',
-    S.invokeCalls.some((c) => c.cmd === 'article_index')
-    && hAnchor.activeArticleId === '301'
-    && hAnchor.entries.map((e) => e.id).join(',') === '301,202,105,104,103'
-    && hAnchor.articlesLimit === 8 && hAnchor.articlesExhausted === true
-    && hAnchor.openedReadIds['301'] === true);
-
-  await bootFixture();
-  S.indexPlan = { mode: 'defer' };
-  S.invokeCalls.length = 0;
-  const pAnchorOld = store.getState().anchorToArticle('101');
-  await nTick(0);
-  const pAnchorNew = store.getState().anchorToArticle('301');
-  await nTick(0);
-  checkNew('(h) 两次导航同时在途（article_index 各一次，竞态场景成立）', S.pendingIndex.length === 2);
-  S.pendingIndex[0].resolve(S.pendingIndex[0].value);   // 旧导航先返回 → 代际已过期
-  await nTick(0);
-  checkNew('(h) 过期的搜索定位结果被代际守卫丢弃：不再发 list_articles、不抢选中态',
-    S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
-    && store.getState().activeArticleId === null);
-  S.pendingIndex[1].resolve(S.pendingIndex[1].value);
-  await Promise.all([pAnchorOld, pAnchorNew]);
-  S.indexPlan = null;
-  checkNew('(h) 只有最新一次导航生效（activeArticleId=301、列表为其所在页）',
-    store.getState().activeArticleId === '301'
-    && store.getState().entries.map((e) => e.id).join(',') === '301,202,105,104,103');
-
-  await bootFixture();
-  store.setState({ activeFeedFilter: '12' });
-  S.invokeCalls.length = 0;
-  await store.getState().anchorToArticle('301');   // 301 不在源12 的筛选范围内
-  /* OPT-008B R1（行为变化，迁移自「静默不打开」）：article_index=null 不再
-     什么都不做——搜索结果行必须可真实打开。回退路径按 id 取详情并注入视图行
-     （不整体替换列表窗口、不假造锚定位置）。 */
-  checkNew('(h) 目标不在当前筛选内（article_index=null）：回退按 id 直接打开（搜索结果可真实打开）',
-    store.getState().activeArticleId === '301'
-    && S.invokeCalls.some((c) => c.cmd === 'get_article')
-    && store.getState().entries.some((e) => e.id === '301'));
-
-  const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
-  await awaitLocalFlagWriteFrontier(); // 先完成前一真实锚定的标读，不能归到下面mock动作。
-  store.setState({ dataMode: 'mock', activeArticleId: null, entries: [], articlesLimit: 0 });
-  S.invokeCalls.length = 0;
-  await store.getState().anchorToArticle('101');
-  checkNew('(h) mock 模式下锚定打开为 no-op（无 IPC，不伪造定位结果）',
-    S.invokeCalls.length === 0 && store.getState().activeArticleId === null);
-
-  /* ============================================================
-     (h2) TASK-052 锚定顺序契约：命令面板必须「先导航、后锚定」
-
-     这是一处**行为变化**：改造前顺序是先 anchorToArticle、再前置导航。两种顺序在
-     改造前等价（分页/锚定查询都不带订阅范围）；per-scope 落地后 anchorToArticle
-     按**调用时**的范围构造 article_index / list_articles，旧顺序会让锚定按**旧范围**
-     取位置 —— 位置与该位置的列表不同口径，锚定错位甚至直接失败。
-     A/B 证据见 tmp/task052/anchor-order-*.json 与 anchor-order-diff.txt（5 项翻转）。
-     ============================================================ */
-  {
-    const { anchorScopeNav } = await import('../../src/components/anchorScopeNav.ts');
-
-    /* 源码顺序契约：直接读取 Overlays.tsx 里「文章」命令项 run() 的实际调用顺序。
-       上面的端到端复刻只证明「这套顺序是对的」，证明不了**组件里确实这么写**——
-       把顺序改回去它照样通过。这条读源码，因此能真正钉住组件实现（修前失败）。 */
-    {
-      const { readFileSync } = await import('node:fs');
-      const ov = readFileSync(new URL('../../src/components/Overlays.tsx', import.meta.url), 'utf8');
-      const artAt = ov.indexOf('id: `art-${a.id}`');
-      const navAt = ov.indexOf('anchorScopeNav(st)', artAt);
-      const anchorAt = ov.indexOf('void st.anchorToArticle(a.id);', artAt);
-      checkNew('(h2) 源码顺序：命令面板「文章」项先归一导航、后调用 anchorToArticle（修前：先 anchor、后导航）',
-        artAt >= 0 && navAt > artAt && anchorAt > navAt);
-    }
-
-    checkNew('(h2) 归一动作顺序：范围 → 视图 → 时间流筛选（数组序即执行序）',
-      anchorScopeNav({ activeFeedFilter: '10', activeViewFilter: 'starred', timelineFilter: 'unread' })
-        .map((s) => s.action).join(',') === 'selectFeed,selectView,toggleTimelineFilter');
-    checkNew('(h2) 已在「全部范围 × 全部视图 × 非未读」时无需任何前置导航（幂等，不产生多余切换）',
-      anchorScopeNav({ activeFeedFilter: 'all', activeViewFilter: 'all', timelineFilter: 'all' }).length === 0);
-
-    /* 端到端：复刻命令面板点击，按修后顺序执行，断言锚定用的是**新范围** */
-    await resetStore();
-    S.backendRows = [
-      mkRow({ id: 101, feed_id: 10, published_at: iso(NOW) }),
-      mkRow({ id: 201, feed_id: 11, published_at: iso(NOW - 1000) }),
-    ];
-    store.setState({ activeFeedFilter: '10', activeViewFilter: 'starred', timelineFilter: 'unread' });
-    await store.getState().reloadFromBackend();
-    S.invokeCalls.length = 0;
-    /* 修后顺序：先导航（用 anchorScopeNav 的产物），后锚定 */
-    const st0 = store.getState();
-    for (const step of anchorScopeNav(st0)) {
-      if (step.action === 'selectFeed') store.getState().selectFeed(step.arg ?? 'all');
-      else if (step.action === 'selectView') store.getState().selectView('all');
-      else store.getState().toggleTimelineFilter();
-    }
-    await store.getState().anchorToArticle('201');
-    const h2Idx = S.invokeCalls.find((c) => c.cmd === 'article_index');
-    const h2List = S.invokeCalls.find((c) => c.cmd === 'list_articles');
-    checkNew('(h2) 锚定的 article_index 按**新范围**取（feed_id=null；修前：feed_id=10 旧范围）',
-      (h2Idx?.args?.args?.feed_id ?? null) === null && (h2Idx?.args?.args?.folder_id ?? null) === null);
-    checkNew('(h2) article_index 与随后的 list_articles 同口径（位置与列表对齐，不会错位）',
-      (h2Idx?.args?.args?.feed_id ?? null) === (h2List?.args?.args?.feed_id ?? null)
-      && (h2Idx?.args?.args?.folder_id ?? null) === (h2List?.args?.args?.folder_id ?? null));
-    checkNew('(h2) 目标文章确实被锚定打开（修前旧顺序下 article_index 落在源10 内查不到 201 ⇒ pos=null ⇒ 静默不打开）',
-      store.getState().activeArticleId === '201' && store.getState().entries.some((e) => e.id === '201'));
-    checkNew('(h2) 锚定完成后范围/视图/筛选均已归一（命令面板点击的最终态）',
-      store.getState().activeFeedFilter === 'all' && store.getState().activeViewFilter === 'all'
-      && store.getState().timelineFilter === 'all');
-  }
-
+  await store.getState().anchorToArticle('201'); await nTick();
+  const searchQuery=calls('list_article_member_ids').at(-1)?.args.args;
+  checkNew('(h2) 真实成员查询在导航后使用新范围与视图，不以缺命令冒充null参数',!!searchQuery && searchQuery.feed_id===null && searchQuery.folder_id===null && !searchQuery.only_starred && !searchQuery.only_unread);
+  checkNew('(h2) 属性请求与捕获成员同一ID集合，非成员目标独立注入',calls('get_article_updates').some(call=>call.args.ids.length===5) && calls('get_article_updates').some(call=>call.args.ids.join(',')==='201'));
+  checkNew('(h2) 导航归一后目标可打开，列表仍限当前分区',store.getState().activeArticleId==='201' && ids()==='102,101,105,104,103' && store.getState().timelineFilter==='all');
   /* ============================================================
      (i) toast 的生成与消失
      ============================================================ */

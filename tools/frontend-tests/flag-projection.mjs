@@ -12,7 +12,7 @@ export async function run(ctx) {
   let nextId = 95000;
   for (const field of ['isRead', 'isStarred']) for (const mask of [0, 1, 2, 3]) for (const evict of [false, true]) {
     ctx.useMainBackend();
-    await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: false } });
+    await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false } });
     const id = String(++nextId);
     const column = field === 'isRead' ? 'is_read' : 'is_starred';
     S.backendRows = [mkRow({ id: Number(id), feed_id: 10 }), mkRow({ id: Number(id) + 1000, feed_id: 12 })];
@@ -24,7 +24,7 @@ export async function run(ctx) {
     checkNew(`AF1 R2 ${field} mask${mask} evict${evict} 前置：真实all/feed两份缓存`, copies().length === 2);
     const original = globalThis.__INVOKE__;
     const held = [];
-    globalThis.__INVOKE__ = (cmd, args) => (field === 'isRead' ? ['mark_all_read', 'set_read'].includes(cmd) : cmd === 'set_starred')
+    globalThis.__INVOKE__ = (cmd, args) => (field === 'isRead' ? ['set_read_bulk', 'set_read'].includes(cmd) : cmd === 'set_starred')
       ? new Promise((resolve, reject) => held.push({ cmd, args, resolve, reject })) : original(cmd, args);
     try {
       if (field === 'isRead') store.getState().markCurrentViewAllRead();
@@ -42,7 +42,7 @@ export async function run(ctx) {
         await until(() => held.length === index + 1, 'next same-field IPC');
         if (mask & (1 << index)) {
           S.backendRows[0][column] = index === 0;
-          held[index].resolve(held[index].cmd === 'mark_all_read' ? 1 : null);
+          held[index].resolve(field === 'isRead' ? [{id:Number(id),feed_id:10}] : null);
         } else held[index].reject({ message: 'precommit failure' });
         await turn();
       }
@@ -58,14 +58,14 @@ export async function run(ctx) {
       if (evict) checkNew(`AF1 R2 ${field} mask${mask} 淘汰缓存不重建`, viewEntriesCache.size === countKeysAfterEviction);
       else {
         store.getState().selectFeed('10');
-        checkNew(`AF1 R2 ${field} mask${mask} 回A同步第一态正确（不等reload）`, store.getState().entries[0]?.[field] === expected);
         await until(() => store.getState().backendReloadsInFlight === 0, 'return A reload complete');
+        checkNew(`AF1 R2 ${field} mask${mask} 回A新成员查询落地保持字段终态`, store.getState().entries[0]?.[field] === expected);
       }
     } finally { globalThis.__INVOKE__ = original; }
   }
   for (const mode of ['same-field-takeover', 'other-field-write', 'source-moved-offscreen', 'conflicting-cache-sources', 'deleted-and-evicted']) {
     ctx.useMainBackend();
-    await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: false } });
+    await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false } });
     const id = String(++nextId);
     S.backendRows = [mkRow({ id: Number(id), feed_id: 10 }), mkRow({ id: Number(id) + 1000, feed_id: 12 })];
     S.feedCountsImpl = ctx.countsFromRows;
@@ -76,7 +76,7 @@ export async function run(ctx) {
     const held = [];
     const heldCounts = [];
     let holdCounts = false;
-    globalThis.__INVOKE__ = (cmd, args) => ['mark_all_read', 'set_read'].includes(cmd)
+    globalThis.__INVOKE__ = (cmd, args) => ['set_read_bulk', 'set_read'].includes(cmd)
       ? new Promise((resolve, reject) => held.push({ cmd, args, resolve, reject }))
       : cmd === 'counts_snapshot' && holdCounts ? new Promise((resolve) => heldCounts.push(resolve)) : original(cmd, args);
     try {
@@ -94,7 +94,7 @@ export async function run(ctx) {
       if (mode === 'deleted-and-evicted') { S.backendRows.shift(); viewEntriesCache.clear(); }
       await until(() => held.length === 1, 'first IPC');
       if (mode !== 'deleted-and-evicted') S.backendRows[0].is_read = true;
-      held[0].resolve(1);
+      held[0].resolve(mode === 'deleted-and-evicted' ? [] : [{id:Number(id),feed_id:S.backendRows[0].feed_id}]);
       await until(() => held.length === 2, 'second IPC');
       await turn(); await turn();
       holdCounts = mode === 'conflicting-cache-sources';
@@ -122,7 +122,7 @@ export async function run(ctx) {
   }
   // 非线性聚合只接受后端scopeCounts，不由字段副本数推算。
   ctx.useMainBackend();
-  await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false, smartDedup: true } });
+  await ctx.resetStore({ settings: { ...store.getState().settings, markReadOnOpen: false } });
   S.backendRows = [mkRow({ id: 96001, feed_id: 10 }), mkRow({ id: 96002, feed_id: 10 })];
   S.feedCountsImpl = ctx.countsFromRows;
   S.scopeCountsImpl = () => ({ all: { total: 1, unread: Number(S.backendRows.some((row) => !row.is_read)), starred: 0, today: 0 }, folders: [] });

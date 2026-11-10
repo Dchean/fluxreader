@@ -1,9 +1,4 @@
-//! URL 规范化（去重精确化）+ 双端读意图双向流的回归测试。
-//!
-//! 双端场景（Read You 安卓 + FluxReader 桌面共用一个 Miniflux）：
-//! - 手机上读的是某源副本 entry → 桌面必须跟随已读（读到哪算读）
-//! - 跨源副本的「未读」态不得复活桌面已读文章
-//! - 桌面标读 → 广播到全部同文副本 entry（手机另一源的副本也已读）
+//! URL候选规范化、不同来源独立状态与未确认本地意图保护。
 
 use app_lib::db;
 
@@ -85,7 +80,7 @@ fn normalize_url_collapses_known_variants() {
 }
 
 #[test]
-fn dedup_uses_normalized_url() {
+fn normalized_url_is_a_candidate_not_an_entity_identity() {
     let (conn, tmp) = {
         let tmp = temp_db("norm");
         let conn = db::open(&tmp).expect("open db");
@@ -130,7 +125,7 @@ fn dedup_uses_normalized_url() {
     .unwrap();
     assert!(n1, "first variant ingested");
 
-    // 同源（feed A）以不同饰词重放 → 规范化 URL 命中同一行（更新，不新增）
+    // 同源新真实GUID独立持久化，URL规范化不覆盖真实身份。
     let (aid_a2, n2) = db::upsert_article_with_feed(
         &conn,
         1,
@@ -138,8 +133,8 @@ fn dedup_uses_normalized_url() {
         true,
     )
     .unwrap();
-    assert_eq!(aid_a2, aid_a, "同源同 URL 不同饰词必须命中同一行");
-    assert!(!n2, "同源重放不得新增行（规范化键仍是源内匹配的键）");
+    assert_ne!(aid_a2, aid_a, "不同真实 GUID 必须独立持久化");
+    assert!(n2, "新的真实 GUID 新建实体");
 
     // 跨源（feed B）同 URL：OPT-008B 起**必须独立入库**（旧期望「被去重拦截」
     // 已按新语义迁移：智能去重改为查询呈现层聚合，不再在入库丢身份）
@@ -159,7 +154,7 @@ fn dedup_uses_normalized_url() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(total, 2, "同文两源各一条");
+    assert_eq!(total, 3, "三个真实 GUID 都保留各自身份");
 
     // 原始 url 保留（打开源网页用原始链接）
     let orig: String = conn
@@ -180,7 +175,7 @@ fn dedup_uses_normalized_url() {
 ============================================================ */
 
 #[tokio::test]
-async fn read_intent_flows_both_ways_across_feeds() {
+async fn read_intent_remains_with_exact_source_identity() {
     let server = mock_greader::MockGReader::start()
         .await
         .expect("start mock");
@@ -191,7 +186,7 @@ async fn read_intent_flows_both_ways_across_feeds() {
     // 服务端先建条目（mock 自动分配 entry id），本地文章绑定到真实 id
     // （准备段：锁内操作完毕后 drop，sync_now 内部会再拿锁——同一任务
     //   里长持 guard 跨 sync 会自死锁）
-    let (xid, _own_id, copy_id) = {
+    let (xid, own_id, copy_id) = {
         let conn = db.lock().await;
         let own_id = server.add_entry_ret(10, "http://x/story", "Own copy", true, false);
         let copy_id = server.add_entry_ret(20, "http://x/story", "Other feed copy", false, false);
@@ -238,11 +233,6 @@ async fn read_intent_flows_both_ways_across_feeds() {
             0,
             "部分绑定轮不得推进条目游标"
         );
-        let dups = db::article_dup_entries(&conn, xid).unwrap();
-        assert!(
-            dups.contains(&copy_id),
-            "cross-feed copy recorded as dup entry (got {dups:?})"
-        );
         let still_read: bool = conn
             .query_row("SELECT is_read FROM articles WHERE id = ?1", [xid], |r| {
                 r.get::<_, i64>(0).map(|v| v != 0)
@@ -254,8 +244,11 @@ async fn read_intent_flows_both_ways_across_feeds() {
         );
     }
 
-    // ---- 手机端读了副本（copy entry → read）：桌面必须跟随 ----
+    // 另一源已读与本源未读同时出现，本源只接受自己的状态。
     server.entries.lock().unwrap().iter_mut().for_each(|e| {
+        if e.id == own_id {
+            e.read = false;
+        }
         if e.id == copy_id {
             e.read = true;
             // TASK-097 契约：状态变更即变更——真实 Miniflux SetEntriesStatus 对
@@ -273,12 +266,12 @@ async fn read_intent_flows_both_ways_across_feeds() {
             })
             .unwrap();
         assert!(
-            still_read2,
-            "reading on the phone (any copy) keeps desktop read"
+            !still_read2,
+            "another source read cannot override this source remote unread"
         );
     }
 
-    // ---- 桌面端标读：广播到副本 entry ----
+    // 桌面标读只发送本源精确远端目标。
     let (yid, y_own, y_copy) = {
         let conn = db.lock().await;
         let y_own = server.add_entry_ret(10, "http://x/story-y", "Y own", false, false);
@@ -293,11 +286,6 @@ async fn read_intent_flows_both_ways_across_feeds() {
     let _ = app_lib::sync::sync_now(&db, &http).await.expect("sync 3");
     {
         let conn = db.lock().await;
-        let dups_y = db::article_dup_entries(&conn, yid).unwrap();
-        assert!(
-            dups_y.contains(&y_copy),
-            "Y's copy recorded (got {dups_y:?})"
-        );
         // 桌面读 Y → 入队 → 同步 → 推送应同时标读 own 和 copy
         db::set_read(&conn, yid, true).unwrap();
         db::enqueue_sync(&conn, Some(yid), None, "read", None).unwrap();
@@ -315,8 +303,8 @@ async fn read_intent_flows_both_ways_across_feeds() {
     );
     assert_eq!(
         updates.get(&y_copy).map(|s| s.as_str()),
-        Some("read"),
-        "copy entry broadcast read (phone sees it read)"
+        None,
+        "other source entry must not receive this read"
     );
 
     let _ = std::fs::remove_file(&tmp);

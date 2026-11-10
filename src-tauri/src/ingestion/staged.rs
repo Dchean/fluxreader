@@ -64,6 +64,7 @@ pub enum RefreshApplyOutcome {
 pub enum FeedRefreshOutcome {
     Applied {
         new_articles: usize,
+        data_changed: bool,
         feed_url: String,
     },
     SkippedInFlight,
@@ -77,6 +78,60 @@ impl FeedRefreshOutcome {
             Self::SkippedInFlight | Self::Superseded => 0,
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+struct RefreshVisibleSnapshot {
+    feed: (String, Option<String>, Option<String>, bool, Option<String>),
+    articles: Vec<RefreshArticleSnapshot>,
+}
+
+#[derive(Debug, PartialEq)]
+struct RefreshArticleSnapshot {
+    id: i64,
+    title: String,
+    content_id: Option<i64>,
+    revision: i64,
+    summary: Option<String>,
+    image_url: Option<String>,
+    enclosure_url: Option<String>,
+    enclosure_mime: Option<String>,
+    duration_sec: Option<i64>,
+    author: Option<String>,
+    url: Option<String>,
+    published_at: Option<String>,
+    media_revision: i64,
+}
+
+fn refresh_visible_snapshot(conn: &Connection, feed_id: i64) -> AppResult<RefreshVisibleSnapshot> {
+    let feed = conn.query_row(
+        "SELECT title,favicon_url,site_url,fetch_failed,fetch_error FROM feeds WHERE id=?1",
+        [feed_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    let mut stmt=conn.prepare("SELECT a.id,a.title,a.content_id,COALESCE(c.revision,0),a.summary,a.image_url,
+        a.enclosure_url,a.enclosure_mime,a.duration_sec,a.author,a.url,a.published_at,a.media_revision
+        FROM articles a LEFT JOIN contents c ON c.id=a.content_id WHERE a.feed_id=?1 ORDER BY a.id")?;
+    let articles = stmt
+        .query_map([feed_id], |r| {
+            Ok(RefreshArticleSnapshot {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                content_id: r.get(2)?,
+                revision: r.get(3)?,
+                summary: r.get(4)?,
+                image_url: r.get(5)?,
+                enclosure_url: r.get(6)?,
+                enclosure_mime: r.get(7)?,
+                duration_sec: r.get(8)?,
+                author: r.get(9)?,
+                url: r.get(10)?,
+                published_at: r.get(11)?,
+                media_revision: r.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RefreshVisibleSnapshot { feed, articles })
 }
 
 /// 本轮写回需要的源身份、代际与旧条件头。304 分支没有新头，必须复用本轮开始时
@@ -319,7 +374,11 @@ pub async fn refresh_feed_staged(
                 }
             }
             let conn = db.lock().await;
-            apply_refresh_result(
+            if !feed_url_matches(&conn, feed_id, &attempt.feed_url)? {
+                return Ok(FeedRefreshOutcome::Superseded);
+            }
+            let before = refresh_visible_snapshot(&conn, feed_id)?;
+            let outcome = apply_refresh_result(
                 &conn,
                 feed_id,
                 &RefreshWriteContext::new(
@@ -331,17 +390,15 @@ pub async fn refresh_feed_staged(
                 &fetched,
                 &parsed,
                 dedup,
-            )
-            .map(|outcome| match outcome {
-                RefreshApplyOutcome::Applied(new_articles) => FeedRefreshOutcome::Applied {
+            )?;
+            match outcome {
+                RefreshApplyOutcome::Applied(new_articles) => Ok(FeedRefreshOutcome::Applied {
                     new_articles,
+                    data_changed: before != refresh_visible_snapshot(&conn, feed_id)?,
                     feed_url: attempt.feed_url.clone(),
-                },
-                RefreshApplyOutcome::Superseded => {
-                    log::debug!("ingestion: feed {feed_id} 刷新结果已被更新轮次取代，丢弃");
-                    FeedRefreshOutcome::Superseded
-                }
-            })
+                }),
+                RefreshApplyOutcome::Superseded => Ok(FeedRefreshOutcome::Superseded),
+            }
         }
         Err(e) => {
             let conn = db.lock().await;

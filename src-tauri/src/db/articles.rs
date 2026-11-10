@@ -4,6 +4,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct ArticleRow {
+    pub images: Vec<String>,
     pub id: i64,
     pub feed_id: i64,
     pub url: Option<String>,
@@ -35,6 +36,11 @@ pub struct ArticleRow {
     pub first_seen_at: Option<String>,
     /// published_at 的来源：feed / feed_clamped / inferred_fetch / legacy_unknown。
     pub published_at_source: String,
+    pub retained: bool,
+    pub body_missing: bool,
+    pub image_count: i64,
+    pub media_revision: i64,
+    pub gallery_first_image_url: Option<String>,
 }
 
 /// 列表页条目（轻量：默认不含正文 HTML，snippet 截断；with_content 时附带正文，
@@ -71,6 +77,11 @@ pub struct ArticleListItem {
     pub first_seen_at: Option<String>,
     /// published_at 的来源：feed / feed_clamped / inferred_fetch / legacy_unknown。
     pub published_at_source: String,
+    pub retained: bool,
+    pub body_missing: bool,
+    pub image_count: i64,
+    pub media_revision: i64,
+    pub gallery_first_image_url: Option<String>,
 }
 
 /* ============================================================
@@ -85,7 +96,7 @@ pub struct ArticleListItem {
 /// - `None`：源未提供日期，DB 新行用 first_seen_at 兜底并标 `inferred_fetch`。
 ///
 /// 抓取时间不得再被写成 `Some(Utc::now())`。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NewArticle {
     pub guid: String,
     pub url: Option<String>,
@@ -94,6 +105,7 @@ pub struct NewArticle {
     pub summary: Option<String>,
     pub content_html: Option<String>,
     pub body_text: String,
+    /// RSS media thumbnail or inline-image candidate; independent page covers use explicit DB helpers.
     pub image_url: Option<String>,
     pub enclosure_url: Option<String>,
     pub enclosure_mime: Option<String>,
@@ -105,13 +117,21 @@ pub struct NewArticle {
 /// 详情/水合查询列（OPT-008B 第二阶段：正文只从 contents 取；条目级字段从 a 取）。
 /// 尾部两列为 content_id/content_revision（前端修订失效依据）；
 /// OPT-013 B1：再追加两列 AI 产物缓存签名。
-const ARTICLE_COLS: &str = "a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, a.is_read, a.is_starred, COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig, a.first_seen_at, a.published_at_source";
+fn article_columns() -> String {
+    format!("a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, COALESCE((SELECT MIN(b.is_read) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_read), COALESCE((SELECT MAX(b.is_starred) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_starred), COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig, a.first_seen_at, a.published_at_source, a.image_count, a.media_revision, COALESCE((SELECT active = 0 FROM feeds WHERE id = a.feed_id), 0), (c.id IS NULL OR (COALESCE(c.content_html, '') = '' AND COALESCE(c.body_text, '') = '')), a.images_json, json_extract(a.images_json, '$[0]')")
+}
 
 /// 详情/水合查询的 FROM（单一正文所有权 JOIN）。
 const ARTICLE_FROM: &str = " FROM articles a LEFT JOIN contents c ON c.id = a.content_id";
 
 fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
+    let images_json: String = r.get(28)?;
+    let images = serde_json::from_str(&images_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(28, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(ArticleRow {
+        images,
+        gallery_first_image_url: r.get(29)?,
         id: r.get(0)?,
         feed_id: r.get(1)?,
         url: r.get(2)?,
@@ -136,6 +156,10 @@ fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
         translated_sig: r.get(21)?,
         first_seen_at: r.get(22)?,
         published_at_source: r.get(23)?,
+        image_count: r.get(24)?,
+        media_revision: r.get(25)?,
+        retained: r.get(26)?,
+        body_missing: r.get(27)?,
     })
 }
 
@@ -167,6 +191,11 @@ fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem>
         translated_sig: r.get(21)?,
         first_seen_at: r.get(22)?,
         published_at_source: r.get(23)?,
+        image_count: r.get(24)?,
+        media_revision: r.get(25)?,
+        retained: r.get(26)?,
+        body_missing: r.get(27)?,
+        gallery_first_image_url: r.get(28)?,
     })
 }
 
@@ -249,11 +278,15 @@ OPT-008B 第一阶段：smartDedup 的显示聚合谓词
   `scope_counts` 全部消费同一生成器 `dedup_exists_clause` 或其等价常量。
 ============================================================ */
 
-/// smartDedup 开关（app_settings JSON，默认关 = 关闭去重展示，全部条目可见）。
-/// 读取失败按关闭处理（显示层默认展示全部，不隐藏任何条目）；不是入库语义。
-fn smart_dedup_on(conn: &Connection) -> bool {
-    crate::db::app_settings_bool(conn, "smartDedup", false)
+/// 新格式固定按源内非空 RSS 等价组显示；旧 smartDedup 设置不再控制该契约。
+fn smart_dedup_on(_conn: &Connection) -> bool {
+    true
 }
+
+// Note: 源内非空RSS内容等价组；真实身份保留，四向动作同组事务 — 见 .agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md
+const SAME_RSS_GROUP: &str = "b.feed_id = a.feed_id AND a.rss_content_id IS NOT NULL AND b.rss_content_id = a.rss_content_id AND b.title = a.title AND COALESCE(b.enclosure_url, '') = COALESCE(a.enclosure_url, '') AND COALESCE(b.enclosure_mime, '') = COALESCE(a.enclosure_mime, '')";
+const VISIBLE_ARTICLE: &str = "(a.is_starred = 1 OR EXISTS(SELECT 1 FROM feeds visible_feed WHERE visible_feed.id=a.feed_id AND visible_feed.active=1))";
+const VISIBLE_GROUP_MEMBER: &str = "(b.is_starred = 1 OR EXISTS(SELECT 1 FROM feeds visible_feed WHERE visible_feed.id=b.feed_id AND visible_feed.active=1))";
 
 /// 显示聚合谓词生成器：`NOT EXISTS (同组更低 id 的行在**同一 scope 与视图**
 /// 内)`。返回 (SQL 片段, 绑定值)；总是以 `a` 为外部行别名，内部以 `b` 为
@@ -274,10 +307,11 @@ struct DedupScope<'a> {
     today_only: bool,
     /// 与 `scope_clause` 的 since 同构的边界（unix ms；闭区间用 >= 与外部一致）。
     since_ms: Option<i64>,
+    until_ms: Option<i64>,
 }
 
 fn dedup_exists_clause(scope: DedupScope) -> (String, Vec<rusqlite::types::Value>) {
-    let mut cond = String::from("b.url_norm = a.url_norm AND b.id < a.id");
+    let mut cond = format!("{SAME_RSS_GROUP} AND {VISIBLE_GROUP_MEMBER} AND b.id < a.id");
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if scope.feed {
         cond.push_str(" AND b.feed_id = a.feed_id");
@@ -288,8 +322,8 @@ fn dedup_exists_clause(scope: DedupScope) -> (String, Vec<rusqlite::types::Value
     }
     if let Some(layout) = scope.layout {
         cond.push_str(
-            " AND (SELECT CASE WHEN f4.layout != 'inherit' THEN f4.layout ELSE fo4.layout END \
-             FROM feeds f4 JOIN folders fo4 ON f4.folder_id = fo4.id WHERE f4.id = b.feed_id) = ?",
+            " AND (SELECT CASE WHEN f4.layout != 'inherit' THEN f4.layout ELSE COALESCE(fo4.layout, 'article') END \
+             FROM feeds f4 LEFT JOIN folders fo4 ON f4.folder_id = fo4.id WHERE f4.id = b.feed_id) = ?",
         );
         params.push(layout.to_string().into());
     }
@@ -304,6 +338,10 @@ fn dedup_exists_clause(scope: DedupScope) -> (String, Vec<rusqlite::types::Value
     }
     if let Some(ms) = scope.since_ms {
         cond.push_str(" AND datetime(b.published_at) >= datetime(?, 'unixepoch')");
+        params.push((ms / 1000).into());
+    }
+    if let Some(ms) = scope.until_ms {
+        cond.push_str(" AND datetime(b.published_at) < datetime(?, 'unixepoch')");
         params.push((ms / 1000).into());
     }
     (
@@ -322,6 +360,7 @@ fn dedup_scope_of(q: &ArticleQuery) -> DedupScope<'_> {
         starred_only: q.only_starred,
         today_only: q.only_today,
         since_ms: None,
+        until_ms: None,
     }
 }
 
@@ -329,25 +368,38 @@ fn dedup_scope_of(q: &ArticleQuery) -> DedupScope<'_> {
 /// EXPLAIN QUERY PLAN，见 `list_query_plan_*`）。
 /// `dedup` = smartDedup 显示聚合是否开启（由 `list_articles` 从设置解析后传入，
 /// 测试可显式控制）。
+#[cfg(test)]
 fn list_articles_sql(q: &ArticleQuery, dedup: bool) -> (String, Vec<rusqlite::types::Value>) {
+    list_articles_window_sql(q, dedup, None)
+}
+
+fn article_list_projection(with_content: bool) -> String {
     // 正文列只在 with_content 时 SELECT（社交/通知布局需要），其余布局保持轻量查询。
     // 尾部两列（content_id/content_revision）两种模式都返回——前端修订失效依据。
-    let content_cols = if q.with_content {
+    let content_cols = if with_content {
         "a.url, c.content_html, a.translated_content, COALESCE(c.fulltext_extracted, 0)"
     } else {
         "NULL, NULL, NULL, 0"
     };
-    let mut sql = format!(
+    format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
+                a.ai_summary, a.source, a.published_at, COALESCE((SELECT MIN(b.is_read) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_read), COALESCE((SELECT MAX(b.is_starred) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_starred),
                 {content_cols}, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
-                a.first_seen_at, a.published_at_source
+                a.first_seen_at, a.published_at_source, a.image_count, a.media_revision, COALESCE((SELECT active = 0 FROM feeds WHERE id = a.feed_id), 0), (c.id IS NULL OR (COALESCE(c.content_html, '') = '' AND COALESCE(c.body_text, '') = '')), json_extract(a.images_json, '$[0]')
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id",
-    );
+    )
+}
+
+fn list_articles_window_sql(
+    q: &ArticleQuery,
+    dedup: bool,
+    window: Option<(i64, i64)>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut sql = article_list_projection(q.with_content);
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
-    let (mut where_clauses, mut params) = article_where(q, dedup);
+    let (mut where_clauses, mut params) = article_where_window(q, dedup, window);
     // TASK-121：R1 修复——keyset 谓词追加处 `where_clauses.push`（本函数内，紧随
     // 其后）需可变绑定，漏 mut 即 CI rust job 的 error[E0596]
     // （lib 编译失败即止，tests/ 目标从未编译）。
@@ -404,9 +456,17 @@ fn list_articles_sql(q: &ArticleQuery, dedup: bool) -> (String, Vec<rusqlite::ty
 
 /// 列表条目（含 body_text 截断生成的 snippet；with_content 时附带正文）
 pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<ArticleListItem>> {
+    list_articles_in_window(conn, q, None)
+}
+
+pub fn list_articles_in_window(
+    conn: &Connection,
+    q: &ArticleQuery,
+    window: Option<(i64, i64)>,
+) -> AppResult<Vec<ArticleListItem>> {
     // OPT-008B：显示聚合开关在查询入口解析一次（设置读取失败按关闭处理——显示
     // 层默认展示全部条目，不隐藏任何数据）。
-    let (sql, params) = list_articles_sql(q, smart_dedup_on(conn));
+    let (sql, params) = list_articles_window_sql(q, smart_dedup_on(conn), window);
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params), article_list_item)?;
     let mut items = rows.collect::<Result<Vec<_>, _>>()?;
@@ -427,8 +487,12 @@ pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<Artic
 /// 构建列表查询的 WHERE 条件 + 绑定参数（`list_articles` 与 `article_index`
 /// 共用，保证「绝对位置」与「列表顺序」口径一致；OPT-008B 起 smartDedup 显示
 /// 聚合谓词也在同一处追加，两处口径天然同构）。
-fn article_where(q: &ArticleQuery, dedup: bool) -> (Vec<String>, Vec<rusqlite::types::Value>) {
-    let mut where_clauses: Vec<String> = vec![];
+fn article_where_window(
+    q: &ArticleQuery,
+    dedup: bool,
+    window: Option<(i64, i64)>,
+) -> (Vec<String>, Vec<rusqlite::types::Value>) {
+    let mut where_clauses: Vec<String> = vec![VISIBLE_ARTICLE.into()];
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(fid) = q.feed_id {
         where_clauses.push("a.feed_id = ?".to_string());
@@ -447,7 +511,11 @@ fn article_where(q: &ArticleQuery, dedup: bool) -> (Vec<String>, Vec<rusqlite::t
     if q.only_starred {
         where_clauses.push("a.is_starred = 1".to_string());
     }
-    if q.only_today {
+    if let Some((start, end)) = window {
+        where_clauses.push("datetime(a.published_at) >= datetime(?, 'unixepoch') AND datetime(a.published_at) < datetime(?, 'unixepoch')".into());
+        params.push((start / 1000).into());
+        params.push((end / 1000).into());
+    } else if q.only_today {
         // TASK-064 N5：两侧统一本地时区——published_at 存 RFC3339（常带 offset），
         // SQLite 的 date() 对带 offset 值归一到 UTC，直接 date(a.published_at) 会
         // 与 date('now','localtime') 错位：非本地时区用户本地凌晨（+08:00 的
@@ -466,7 +534,13 @@ fn article_where(q: &ArticleQuery, dedup: bool) -> (Vec<String>, Vec<rusqlite::t
     if dedup {
         // OPT-008B：显示聚合（见 dedup_exists_clause 文件段注释）——谓词与
         // 上述 scope/视图条件逐项同构，追加在最后，绑定顺序紧随其后。
-        let (clause, dedup_params) = dedup_exists_clause(dedup_scope_of(q));
+        let mut scope = dedup_scope_of(q);
+        if let Some((start, end)) = window {
+            scope.today_only = false;
+            scope.since_ms = Some(start);
+            scope.until_ms = Some(end);
+        }
+        let (clause, dedup_params) = dedup_exists_clause(scope);
         where_clauses.push(clause);
         params.extend(dedup_params);
     }
@@ -487,7 +561,16 @@ pub fn article_index(
     q: &ArticleQuery,
     article_id: i64,
 ) -> AppResult<Option<i64>> {
-    let (sql, params) = article_index_sql(q, article_id, smart_dedup_on(conn));
+    article_index_in_window(conn, q, article_id, None)
+}
+
+pub fn article_index_in_window(
+    conn: &Connection,
+    q: &ArticleQuery,
+    article_id: i64,
+    window: Option<(i64, i64)>,
+) -> AppResult<Option<i64>> {
+    let (sql, params) = article_index_window_sql(q, article_id, smart_dedup_on(conn), window);
     let pos = conn
         .prepare(&sql)?
         .query_row(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
@@ -497,12 +580,22 @@ pub fn article_index(
 
 /// 组装 article_index 的窗口 SQL + 绑定（生产字节；测试对同一产物跑
 /// EXPLAIN QUERY PLAN，见 `list_query_plan_*`）。
+#[cfg(test)]
 fn article_index_sql(
     q: &ArticleQuery,
     article_id: i64,
     dedup: bool,
 ) -> (String, Vec<rusqlite::types::Value>) {
-    let (where_clauses, mut params) = article_where(q, dedup);
+    article_index_window_sql(q, article_id, dedup, None)
+}
+
+fn article_index_window_sql(
+    q: &ArticleQuery,
+    article_id: i64,
+    dedup: bool,
+    window: Option<(i64, i64)>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let (where_clauses, mut params) = article_where_window(q, dedup, window);
     let order = if q.newest_first {
         PUBLISHED_ORDER_DESC
     } else {
@@ -552,7 +645,7 @@ fn sanitize_renderable_fields(
 pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> {
     let mut row = conn
         .query_row(
-            &format!("SELECT {ARTICLE_COLS}{ARTICLE_FROM} WHERE a.id = ?1"),
+            &format!("SELECT {}{ARTICLE_FROM} WHERE a.id = ?1", article_columns()),
             params![id],
             article_row,
         )
@@ -575,7 +668,10 @@ pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>
         return Ok(Vec::new());
     }
     let placeholders = vec!["?"; ids.len()].join(",");
-    let sql = format!("SELECT {ARTICLE_COLS}{ARTICLE_FROM} WHERE a.id IN ({placeholders})");
+    let sql = format!(
+        "SELECT {}{ARTICLE_FROM} WHERE a.id IN ({placeholders})",
+        article_columns()
+    );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), article_row)?;
     let mut articles = rows.collect::<Result<Vec<_>, _>>()?;
@@ -587,6 +683,74 @@ pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>
         );
     }
     Ok(articles)
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArticleUpdates {
+    pub items: Vec<ArticleListItem>,
+    pub missing_ids: Vec<i64>,
+}
+
+/// Reading-session membership is supplied by the caller. Do not reapply filters,
+/// pagination or deduplication here: an item becoming read must remain addressable.
+pub fn get_article_updates(conn: &Connection, ids: &[i64]) -> AppResult<ArticleUpdates> {
+    let mut items = Vec::new();
+    let projection = article_list_projection(false);
+    for chunk in ids.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut stmt = conn.prepare(&format!("{projection} WHERE a.id IN ({placeholders})"))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), article_list_item)?;
+        items.extend(rows.collect::<Result<Vec<_>, _>>()?);
+    }
+    let found: HashSet<_> = items.iter().map(|item| item.id).collect();
+    let missing_ids = ids
+        .iter()
+        .copied()
+        .filter(|id| !found.contains(id))
+        .collect();
+    Ok(ArticleUpdates { items, missing_ids })
+}
+
+/// Capture only the ordered membership at entry to a reading session. No bodies and
+/// no long-lived SQLite transaction are held while the frontend consumes the IDs.
+pub fn list_article_member_ids(
+    conn: &Connection,
+    q: &ArticleQuery,
+    window: Option<(i64, i64)>,
+) -> AppResult<Vec<i64>> {
+    let (clauses, params) = article_where_window(q, true, window);
+    let where_sql = if clauses.is_empty() {
+        "1=1".to_string()
+    } else {
+        clauses.join(" AND ")
+    };
+    let order = if q.newest_first {
+        PUBLISHED_ORDER_DESC
+    } else {
+        PUBLISHED_ORDER_ASC
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT a.id FROM articles a WHERE {where_sql} ORDER BY {order}"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Called only after a transport has durably acknowledged its captured state frontier.
+/// Active stubs are never removed; pending server intents still keep a retained identity alive.
+pub fn prune_retained_confirmed(conn: &Connection, ids: &[i64]) -> AppResult<usize> {
+    let mut removed = 0;
+    for id in ids {
+        removed+=conn.execute("DELETE FROM articles WHERE id=?1 AND is_starred=0 AND feed_id IN (SELECT id FROM feeds WHERE active=0) AND NOT EXISTS(SELECT 1 FROM sync_queue WHERE article_id=?1)",[id])?;
+    }
+    Ok(removed)
+}
+
+pub fn article_group_has_pending(conn: &Connection, id: i64, field: &str) -> AppResult<bool> {
+    if field != "read" && field != "star" {
+        return Err(crate::error::AppError::internal("invalid state field"));
+    }
+    Ok(conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM articles a JOIN articles b ON b.id=a.id OR ({SAME_RSS_GROUP}) JOIN sync_queue q ON q.article_id=b.id WHERE a.id=?1 AND q.field=?2)"),params![id,field],|r|r.get(0))?)
 }
 
 /// 全文搜索：标题/正文/摘要/AI 摘要/AI 翻译的 LIKE 子串匹配（词间 AND，按
@@ -795,7 +959,7 @@ fn build_search_sql(
         (
             format!(
                 " AND NOT EXISTS (SELECT 1 FROM articles b LEFT JOIN contents bc ON bc.id = b.content_id \
-                 WHERE b.url_norm = a.url_norm AND b.id < a.id AND {})",
+                 WHERE {SAME_RSS_GROUP} AND {VISIBLE_GROUP_MEMBER} AND b.id < a.id AND {})",
                 inner_parts.join(" AND ")
             ),
             extra,
@@ -818,11 +982,11 @@ fn build_search_sql(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
+                a.ai_summary, a.source, a.published_at, COALESCE((SELECT MIN(b.is_read) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_read), COALESCE((SELECT MAX(b.is_starred) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_starred),
                 NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
-                a.first_seen_at, a.published_at_source
+                a.first_seen_at, a.published_at_source, a.image_count, a.media_revision, COALESCE((SELECT active = 0 FROM feeds WHERE id = a.feed_id), 0), (c.id IS NULL OR (COALESCE(c.content_html, '') = '' AND COALESCE(c.body_text, '') = '')), json_extract(a.images_json, '$[0]')
          FROM {from_clause}
-         WHERE {where}{candidate_sql}{dedup_sql}
+         WHERE {VISIBLE_ARTICLE} AND {where}{candidate_sql}{dedup_sql}
          ORDER BY a.published_at DESC
          LIMIT ?{limit_idx}",
         from_clause = from_clause,
@@ -898,10 +1062,7 @@ pub(crate) fn purge_remote_data_in(tx: &rusqlite::Transaction<'_>) -> AppResult<
     // 1. 服务端来源订阅（级联：articles → sync_queue / deduped_urls 墓碑 / FTS 触发器）
     let feeds = tx.execute("DELETE FROM feeds WHERE origin = 'remote'", [])?;
     // 2. 本地直连条目上的绑定/副本/已读态全部回归纯本地
-    let articles = tx.execute(
-        "UPDATE articles SET remote_id = NULL, remote_dup_ids = ''",
-        [],
-    )?;
+    let articles = tx.execute("UPDATE articles SET remote_id = NULL", [])?;
     // 3. 本地直连源/分类的 remote_id 绑定清除
     tx.execute("UPDATE feeds SET remote_id = NULL", [])?;
     tx.execute("UPDATE folders SET remote_id = NULL", [])?;
@@ -940,19 +1101,21 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
     if scope == "articles" {
         deleted = tx.execute(
             &format!(
-                "DELETE FROM articles
+                "UPDATE articles AS a SET content_id = NULL, rss_content_id = NULL, summary = NULL,
+                    image_url = NULL, image_source = 'page', enclosure_url = NULL, enclosure_mime = NULL, duration_sec = NULL,
+                    ai_summary = NULL, translated_content = NULL, ai_summary_sig = NULL,
+                    translated_sig = NULL, ai_epoch = ai_epoch + 1
                  WHERE datetime(published_at) < {cutoff}
-                   AND is_read = 1
-                   AND is_starred = 0
-                   AND id NOT IN (SELECT article_id FROM sync_queue WHERE article_id IS NOT NULL)"
+                   AND is_read = 1 AND is_starred = 0
+                   AND (content_id IS NOT NULL OR rss_content_id IS NOT NULL)
+                   AND id NOT IN (SELECT article_id FROM sync_queue WHERE article_id IS NOT NULL)
+                   AND NOT EXISTS(SELECT 1 FROM articles b WHERE {SAME_RSS_GROUP}
+                       AND (b.is_read=0 OR b.is_starred=1 OR datetime(b.published_at)>={cutoff}
+                           OR EXISTS(SELECT 1 FROM sync_queue q WHERE q.article_id=b.id)))"
             ),
             [],
         )?;
-        // 墓碑指向被删文章的清掉（kept_aid 级联已处理，这里兜底空墓碑）
-        tx.execute(
-            "DELETE FROM deduped_urls WHERE kept_aid NOT IN (SELECT id FROM articles)",
-            [],
-        )?;
+        tx.execute("DELETE FROM ai_segments WHERE article_id IN (SELECT id FROM articles WHERE content_id IS NULL)", [])?;
     } else if scope == "ai" {
         // OPT-008B 第二阶段：清理按**条目行**生效（原年龄范围不变）——共享 contents
         // 的兄弟条目不受影响（不误清年轻兄弟）；被清条目 ai_epoch+1，使网络在途的
@@ -1111,6 +1274,7 @@ struct VisibleFields {
     published_at_source: String,
     /// OPT-008B 第二阶段：正文身份（重指/分叉在内容变化判定内，不只看字节相等）
     content_id: Option<i64>,
+    rss_content_id: Option<i64>,
 }
 
 /// 读既有行的可见字段快照；读取失败透传 Err（不得吞成「无变化」）。
@@ -1120,7 +1284,7 @@ fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
     let f = conn.query_row(
         "SELECT a.url, a.title, a.author, a.summary, c.content_html, c.body_text, a.image_url,
                 a.enclosure_url, a.enclosure_mime, a.duration_sec, a.published_at,
-                a.published_at_source, a.content_id
+                a.published_at_source, a.content_id, a.rss_content_id
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
         params![id],
         |r| {
@@ -1138,6 +1302,7 @@ fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
                 published_at: null_if_empty(r.get(10)?),
                 published_at_source: r.get(11)?,
                 content_id: r.get(12)?,
+                rss_content_id: r.get(13)?,
             })
         },
     )?;
@@ -1158,7 +1323,6 @@ fn normalized_url_key(url: Option<&str>) -> Option<String> {
 #[derive(Debug)]
 struct ExistingArticle {
     id: i64,
-    guid: String,
     fulltext_extracted: bool,
 }
 
@@ -1176,7 +1340,6 @@ fn find_article_by_guid(
             |r| {
                 Ok(ExistingArticle {
                     id: r.get(0)?,
-                    guid: r.get(1)?,
                     fulltext_extracted: r.get::<_, i64>(2)? != 0,
                 })
             },
@@ -1184,81 +1347,133 @@ fn find_article_by_guid(
         .optional()?)
 }
 
-fn find_article_by_url(
+fn find_equivalent_article(
     conn: &Connection,
     feed_id: i64,
-    url_norm: &str,
+    a: &NewArticle,
+    unbound_only: bool,
 ) -> AppResult<Option<ExistingArticle>> {
-    Ok(conn
-        .query_row(
-            "SELECT a.id, a.guid, COALESCE(c.fulltext_extracted, 0)
-             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
-             WHERE a.feed_id = ?1 AND a.url_norm = ?2 ORDER BY a.id LIMIT 1",
-            params![feed_id, url_norm],
-            |r| {
-                Ok(ExistingArticle {
+    if !super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text) {
+        return Ok(None);
+    }
+    let url_norm = normalized_url_key(a.url.as_deref());
+    if url_norm.is_none() && unbound_only {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.guid, COALESCE(display.fulltext_extracted,0), rss.content_html, rss.body_text
+         FROM articles a JOIN contents rss ON rss.id = a.rss_content_id
+         LEFT JOIN contents display ON display.id = a.content_id
+         WHERE a.feed_id = ?1 AND a.title = ?3
+           AND ((?2 IS NOT NULL AND a.url_norm = ?2)
+             OR (?2 IS NULL AND ?6 = 0 AND a.url_norm IS NULL
+                 AND substr(a.guid,1,length(?7)) = ?7))
+           AND COALESCE(a.enclosure_url,'') = COALESCE(?4,'')
+           AND COALESCE(a.enclosure_mime,'') = COALESCE(?5,'')
+           AND (?6 = 0 OR a.remote_id IS NULL) ORDER BY a.id")?;
+    let rows = stmt.query_map(
+        params![
+            feed_id,
+            url_norm,
+            a.title,
+            a.enclosure_url,
+            a.enclosure_mime,
+            unbound_only,
+            super::identity::SYNTHETIC_GUID_PREFIX
+        ],
+        |r| {
+            Ok((
+                ExistingArticle {
                     id: r.get(0)?,
-                    guid: r.get(1)?,
-                    fulltext_extracted: r.get::<_, i64>(2)? != 0,
-                })
-            },
-        )
-        .optional()?)
+                    fulltext_extracted: r.get(2)?,
+                },
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        },
+    )?;
+    let expected_html =
+        crate::sanitize::sanitize(a.content_html.as_deref().unwrap_or(""), a.url.as_deref());
+    let expected_body = if expected_html.is_empty() {
+        a.body_text.clone()
+    } else {
+        crate::sanitize::html_to_text(&expected_html)
+    };
+    let mut matched = None;
+    for row in rows {
+        let (candidate, html, body) = row?;
+        let html = crate::sanitize::sanitize(html.as_deref().unwrap_or(""), a.url.as_deref());
+        let body = if html.is_empty() {
+            body
+        } else {
+            crate::sanitize::html_to_text(&html)
+        };
+        if html == expected_html && body == expected_body {
+            if matched.is_some() {
+                return Ok(None);
+            } // ambiguous identities are never guessed
+            matched = Some(candidate);
+        }
+    }
+    Ok(matched)
 }
 
-/// 供既有弱身份升级/换形匹配的重算候选（按身份优先级去重）。
-fn identity_candidates(a: &NewArticle) -> Vec<String> {
-    let mut out = Vec::with_capacity(4);
-    let mut push = |guid: String| {
-        if !out.contains(&guid) {
-            out.push(guid);
-        }
+/// A weak URL/date key is a candidate, never authority to overwrite different RSS bytes.
+/// Length-prefixing keeps the hash input unambiguous; matching the hash still needs byte proof.
+fn weak_storage_input(a: &NewArticle) -> NewArticle {
+    use sha2::{Digest, Sha256};
+    let mut out = a.clone();
+    let html = crate::sanitize::sanitize(a.content_html.as_deref().unwrap_or(""), a.url.as_deref());
+    out.body_text = if html.is_empty() {
+        a.body_text.clone()
+    } else {
+        crate::sanitize::html_to_text(&html)
     };
-    push(a.guid.clone());
-    if let Some(url) = a.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-        push(url_identity_guid(url));
-    }
-    if let Some(published) = a
-        .published_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    out.content_html = Some(html);
+    let mut hash = Sha256::new();
+    // Nonempty content identity is independent of observed date/candidate spelling.
+    // Empty payload has no equivalence proof, so retain its weak observation domain.
+    let domain = if super::contents::content_non_empty(out.content_html.as_deref(), &out.body_text)
     {
-        push(title_date_identity_guid(&a.title, published));
+        normalized_url_key(a.url.as_deref()).unwrap_or_default()
+    } else {
+        a.guid.clone()
+    };
+    for part in [
+        "weak-payload-v2",
+        domain.as_str(),
+        a.title.as_str(),
+        out.content_html.as_deref().unwrap_or(""),
+        out.body_text.as_str(),
+        a.enclosure_url.as_deref().unwrap_or(""),
+        a.enclosure_mime.as_deref().unwrap_or(""),
+    ] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
     }
-    push(content_identity_guid(
-        &a.title,
-        a.content_html.as_deref(),
-        &a.body_text,
-    ));
+    out.guid = format!(
+        "{}payload:{:x}",
+        super::identity::SYNTHETIC_GUID_PREFIX,
+        hash.finalize()
+    );
     out
 }
 
-/// 仅允许把合成身份升级为真实 feed id；唯一键冲突时保持旧身份（不改写别的行）。
-fn promote_synthetic_guid(
-    conn: &Connection,
-    feed_id: i64,
-    id: i64,
-    old_guid: &str,
-    new_guid: &str,
-) -> AppResult<bool> {
-    let n = conn.execute(
-        "UPDATE articles SET guid = ?1
-          WHERE id = ?2 AND guid = ?3
-            AND NOT EXISTS (
-                SELECT 1 FROM articles x
-                 WHERE x.feed_id = ?4 AND x.guid = ?1 AND x.id != ?2
-            )",
-        params![new_guid, id, old_guid, feed_id],
-    )?;
-    Ok(n > 0)
+fn same_rss_payload(conn: &Connection, id: i64, a: &NewArticle) -> AppResult<bool> {
+    Ok(conn.query_row(
+        "SELECT a.rss_content_id IS NULL OR (a.title=?2 AND COALESCE(c.content_html,'')=?3 AND COALESCE(c.body_text,'')=?4
+         AND COALESCE(a.enclosure_url,'')=COALESCE(?5,'') AND COALESCE(a.enclosure_mime,'')=COALESCE(?6,'')
+         ) FROM articles a LEFT JOIN contents c ON c.id=a.rss_content_id WHERE a.id=?1",
+        params![id,a.title,a.content_html.as_deref().unwrap_or(""),a.body_text,a.enclosure_url,a.enclosure_mime],
+        |r| r.get(0),
+    )?)
 }
 
 /// R3 核心：返回富结果的 upsert。匹配逻辑与旧入口完全同源（本函数即原实现，
 /// 旧入口为薄包装）——禁止在别处再写第二份 URL/guid 匹配。
 ///
 /// OPT-008B：`dedup` 参数保留为接线兼容但不再决定入库（跨源同 URL 一律独立
-/// 成行）；同源匹配（guid → 同 feed url_norm）保持原语义不变。
+/// 成行）；真实 GUID 只精确匹配，弱身份候选还须正文等价。
 pub fn upsert_article_with_feed_tracked(
     conn: &Connection,
     feed_id: i64,
@@ -1286,27 +1501,23 @@ fn upsert_article_with_feed_tracked_impl(
             matched = Some((existing, true));
         }
     }
-    if matched.is_none() {
-        // 同 feed 内按规范化 URL 兜底去重：direct 抓取与 Miniflux 同步的 guid 不同
-        // （direct 用原始 guid，Miniflux 用 `remote-{id}`），但 URL 相同是同一篇。
-        // 命中已有文章时只更新内容（正文/标题/封面/附件），**保留 source 与状态**
-        // （is_read/is_starred/remote_id）——抓取只负责内容、同步只负责状态，
-        // 避免「切换本地抓取后数量翻倍」与「状态被抓取覆盖回未读」。
-        if let Some(url_norm) = normalized_url_key(a.url.as_deref()) {
-            if let Some(existing) = find_article_by_url(conn, feed_id, &url_norm)? {
-                matched = Some((existing, false));
-            }
+    if matched.is_none() && is_synthetic_guid(&a.guid) {
+        // Weak candidates, including a newly supplied date, require RSS byte confirmation.
+        if let Some(existing) = find_equivalent_article(conn, feed_id, a, false)? {
+            matched = Some((existing, false));
         }
     }
-    if matched.is_none() {
-        for guid in identity_candidates(a) {
-            if !is_synthetic_guid(&guid) {
-                continue;
+    let weak_input = is_synthetic_guid(&a.guid).then(|| weak_storage_input(a));
+    let a = weak_input.as_ref().unwrap_or(a);
+    if matched.is_none() && is_synthetic_guid(&a.guid) {
+        if let Some(existing) = find_article_by_guid(conn, feed_id, &a.guid)? {
+            if !same_rss_payload(conn, existing.id, a)? {
+                return Err(crate::error::AppError::new(
+                    "identityConflict",
+                    "弱身份哈希命中但正文不等价，保留原条目",
+                ));
             }
-            if let Some(existing) = find_article_by_guid(conn, feed_id, &guid)? {
-                matched = Some((existing, true));
-                break;
-            }
+            matched = Some((existing, true));
         }
     }
     if let Some((existing, include_url)) = matched {
@@ -1321,9 +1532,6 @@ fn upsert_article_with_feed_tracked_impl(
             include_url,
             published_at_clamped,
         )?;
-        if !is_synthetic_guid(&a.guid) && is_synthetic_guid(&existing.guid) {
-            promote_synthetic_guid(conn, feed_id, existing.id, &existing.guid, &a.guid)?;
-        }
         Ok(ArticleUpsert {
             id: existing.id,
             inserted: false,
@@ -1357,7 +1565,7 @@ fn refresh_existing_article(
     /// 条目当前指向的内容快照（正文保护判定用）：
     /// (content_id, extraction_source, fulltext_extracted)。正文本身不进快照——
     /// 保护时只经 contents::repair_extracted_body_if_mismatch 就地修复。
-    type CurrentContent = (Option<i64>, String, i64);
+    type CurrentContent = (Option<i64>, String, i64, Option<i64>);
     // OPT-008B 第二阶段：**正文保护上移到 contents**——条目当前指向 readability
     // 提取行（source='readability' 且 fulltext_extracted=1）时，RSS 刷新不得覆盖/
     // 重指该内容（既定保护，旧 articles.fulltext_extracted 语义等价迁移）；否则
@@ -1365,13 +1573,14 @@ fn refresh_existing_article(
     // 条目重指过去（FTS 触发器随 content_id 更新：每个引用条目的索引都保持正确）。
     let cur: Option<CurrentContent> = conn
         .query_row(
-            "SELECT a.content_id, COALESCE(c.extraction_source, ''), COALESCE(c.fulltext_extracted, 0)
+            "SELECT a.content_id, COALESCE(c.extraction_source, ''), COALESCE(c.fulltext_extracted, 0), a.rss_content_id
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (cur_id, cur_source, cur_extracted) = cur.unwrap_or((None, String::new(), 0));
+    let (cur_id, cur_source, cur_extracted, cur_rss_id) =
+        cur.unwrap_or((None, String::new(), 0, None));
     let protected = cur_source == super::contents::SOURCE_READABILITY && cur_extracted != 0;
     if protected {
         // OPT-003 R1（历史错配修复，二期迁移到此保持同一用户保证）：flag1 行的
@@ -1383,7 +1592,7 @@ fn refresh_existing_article(
             super::contents::repair_extracted_body_if_mismatch(conn, cid)?;
         }
     }
-    if !protected && super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text) {
+    if super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text) {
         let input = super::contents::ContentInput {
             content_html: a.content_html.clone(),
             body_text: a.body_text.clone(),
@@ -1396,24 +1605,32 @@ fn refresh_existing_article(
         新行；SAVEPOINT 兼容调用方已有事务（sync 入库路径）。 */
         super::contents::with_write_savepoint(conn, "contents_refresh_repoint", || {
             let (new_id, _rev, _created) = super::contents::ensure_content(conn, &input, Some(id))?;
-            if Some(new_id) != cur_id {
+            conn.execute(
+                "UPDATE articles SET rss_content_id = ?1 WHERE id = ?2",
+                params![new_id, id],
+            )?;
+            if !protected && Some(new_id) != cur_id {
                 conn.execute(
                     "UPDATE articles SET content_id = ?1 WHERE id = ?2",
                     params![new_id, id],
                 )?;
-                /* 重指后旧行若无引用：回收（「最后引用才回收」——否则每次内容替换都会
-                留下孤儿行；触发器只在条目删除时兜底）。 */
-                if let Some(old_id) = cur_id {
-                    conn.execute(
-                        "DELETE FROM contents WHERE id = ?1
-                         AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1)",
-                        params![old_id],
-                    )?;
-                }
+            }
+            // A protected display body can still release the previous RSS-only reference.
+            for old_id in [cur_id, cur_rss_id].into_iter().flatten() {
+                conn.execute(
+                    "DELETE FROM contents WHERE id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)",
+                    params![old_id],
+                )?;
             }
             Ok(())
         })?;
     }
+    // RSS cover provenance is explicit. A page cover survives RSS image changes;
+    // a complete nonempty RSS revision may remove only its own derived cover.
+    let rss_image = a.image_url.as_deref().filter(|url| !url.trim().is_empty());
+    let has_rss_payload =
+        super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text);
     // 条目级字段（正文列已不在 articles；其余同旧语义：非空才覆盖/COALESCE 保护）。
     // guid 与规范化 URL 两条命中路径同口径。发布时间按来源升级/保留：
     // - feed 已是权威：后续 feed/钳制日期、推断值、抓取时间都不再覆盖；
@@ -1428,7 +1645,13 @@ fn refresh_existing_article(
                 title = ?3,
                 author = COALESCE(?4, author),
                 summary = COALESCE(?5, summary),
-                image_url = COALESCE(?6, image_url),
+                image_url = CASE
+                    WHEN image_source='page' AND NULLIF(trim(image_url),'') IS NOT NULL THEN image_url
+                    WHEN ?6 IS NOT NULL THEN ?6
+                    WHEN ?13 AND image_source='rss' THEN NULL ELSE image_url END,
+                image_source = CASE
+                    WHEN image_source='page' AND NULLIF(trim(image_url),'') IS NOT NULL THEN 'page'
+                    WHEN ?6 IS NOT NULL THEN 'rss' ELSE image_source END,
                 enclosure_url = COALESCE(?7, enclosure_url),
                 enclosure_mime = COALESCE(?8, enclosure_mime),
                 duration_sec = COALESCE(?9, duration_sec),
@@ -1453,13 +1676,14 @@ fn refresh_existing_article(
                 a.title,
                 a.author,
                 a.summary,
-                a.image_url,
+                rss_image,
                 a.enclosure_url,
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
                 normalized_url_key(a.url.as_deref()),
                 published_at_clamped as i64,
+                has_rss_payload,
             ],
         )?;
     } else {
@@ -1470,7 +1694,13 @@ fn refresh_existing_article(
                 title = ?1,
                 author = COALESCE(?2, author),
                 summary = COALESCE(?3, summary),
-                image_url = COALESCE(?4, image_url),
+                image_url = CASE
+                    WHEN image_source='page' AND NULLIF(trim(image_url),'') IS NOT NULL THEN image_url
+                    WHEN ?4 IS NOT NULL THEN ?4
+                    WHEN ?11 AND image_source='rss' THEN NULL ELSE image_url END,
+                image_source = CASE
+                    WHEN image_source='page' AND NULLIF(trim(image_url),'') IS NOT NULL THEN 'page'
+                    WHEN ?4 IS NOT NULL THEN 'rss' ELSE image_source END,
                 enclosure_url = COALESCE(?5, enclosure_url),
                 enclosure_mime = COALESCE(?6, enclosure_mime),
                 duration_sec = COALESCE(?7, duration_sec),
@@ -1493,17 +1723,41 @@ fn refresh_existing_article(
                 a.title,
                 a.author,
                 a.summary,
-                a.image_url,
+                rss_image,
                 a.enclosure_url,
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
                 id,
                 published_at_clamped as i64,
+                has_rss_payload,
             ],
         )?;
     }
     Ok(())
+}
+
+/// Exact bound remote identity receives revisions without replacing its GUID or local flags.
+/// RSS reference, display body, metadata and cache invalidation commit atomically.
+pub fn refresh_bound_remote_article(conn: &Connection, id: i64, a: &NewArticle) -> AppResult<bool> {
+    super::contents::with_write_savepoint(conn, "remote_identity_revision", || {
+        let before = visible_fields(conn, id)?;
+        let token_before = article_ai_commit_token(conn, id)?;
+        let mut input = a.clone();
+        if input.title.trim().is_empty() {
+            input.title = before.title.clone().unwrap_or_default();
+        }
+        refresh_existing_article(conn, id, &input, false, true, false)?;
+        let after = visible_fields(conn, id)?;
+        if token_before != article_ai_commit_token(conn, id)? {
+            conn.execute(
+                "UPDATE articles SET ai_epoch=ai_epoch+1,ai_summary=NULL,ai_summary_sig=NULL,
+                translated_content=NULL,translated_sig=NULL WHERE id=?1",
+                [id],
+            )?;
+        }
+        Ok(before != after)
+    })
 }
 
 /// 同步条目入库（OPT-008B R1）：**精确协议 entry 的独立身份**入库。
@@ -1511,7 +1765,7 @@ fn refresh_existing_article(
 /// 与 [`upsert_article_with_feed_tracked`] 的唯一差别在 URL 兜底守卫：
 /// 同 feed 同 `url_norm` 的候选行**已绑定另一个精确 entry（remote_id != eid）**
 /// 时不得复用/改写该行——精确协议 ID 必须保有自己身份（各自绑定/读藏），本
-/// entry 插入独立新行（guid = remote-{eid}）。候选未绑定（直连行首绑 /
+/// entry 插入独立新行（控制字符命名空间内的远端键）。候选未绑定（直连行首绑 /
 /// 快照外竞态行）时保持「URL 稳定复用」的既有语义（直连 guid 变化、URL 一致
 /// → 同一行）。
 ///
@@ -1542,29 +1796,23 @@ pub fn upsert_remote_article(
             content_changed: before != visible_fields(conn, id)?,
         });
     }
-    if let Some(url) = a.url.as_deref().filter(|u| !u.trim().is_empty()) {
-        let by_url: Option<(i64, bool, Option<i64>)> = conn
-            .query_row(
-                "SELECT a.id, COALESCE(c.fulltext_extracted, 0), a.remote_id
-                 FROM articles a LEFT JOIN contents c ON c.id = a.content_id
-                 WHERE a.feed_id = ?1 AND a.url_norm = ?2 ORDER BY a.id LIMIT 1",
-                params![feed_id, normalize_url(url)],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)),
-            )
-            .optional()?;
-        if let Some((id, ft_extracted, bound)) = by_url {
-            if bound.is_none() || bound == eid {
-                let before = visible_fields(conn, id)?;
-                refresh_existing_article(conn, id, a, ft_extracted, false, false)?;
-                return Ok(ArticleUpsert {
-                    id,
-                    inserted: false,
-                    content_changed: before != visible_fields(conn, id)?,
-                });
-            }
-            // 候选行属于另一个精确 entry：不复用——独立新行（下方 insert）。
-        }
+    if let Some(existing) = find_equivalent_article(conn, feed_id, a, true)? {
+        let before = visible_fields(conn, existing.id)?;
+        refresh_existing_article(
+            conn,
+            existing.id,
+            a,
+            existing.fulltext_extracted,
+            false,
+            false,
+        )?;
+        return Ok(ArticleUpsert {
+            id: existing.id,
+            inserted: false,
+            content_changed: before != visible_fields(conn, existing.id)?,
+        });
     }
+    let _ = eid; // exact remote identity is checked by the caller before this path.
     let (id, inserted) = insert_new_article(conn, feed_id, a, false)?;
     Ok(ArticleUpsert {
         id,
@@ -1637,9 +1885,9 @@ fn insert_new_article(
             "INSERT INTO articles
                 (feed_id, guid, url, url_norm, title, author, summary, image_url,
                  enclosure_url, enclosure_mime, duration_sec, published_at, source,
-                 first_seen_at, published_at_source)
+                 first_seen_at, published_at_source, image_source)
              VALUES (?1, ?2, ?3, ?13, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     COALESCE(?11, ?14), ?12, ?14, ?15)",
+                     COALESCE(?11, ?14), ?12, ?14, ?15, 'rss')",
             params![
                 feed_id,
                 a.guid,
@@ -1668,8 +1916,13 @@ fn insert_new_article(
         };
         let (content_id, _rev, _created) = super::contents::ensure_content(conn, &input, Some(id))?;
         conn.execute(
-            "UPDATE articles SET content_id = ?1 WHERE id = ?2",
-            params![content_id, id],
+            "UPDATE articles SET content_id = ?1, rss_content_id = ?3 WHERE id = ?2",
+            params![
+                content_id,
+                id,
+                super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text)
+                    .then_some(content_id)
+            ],
         )?;
         Ok((id, true))
     })
@@ -1936,7 +2189,7 @@ pub fn replace_article_content_checked(
             if let Some(old_id) = current.content_id {
                 conn.execute(
                     "DELETE FROM contents WHERE id = ?1
-                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1)",
+                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)",
                     params![old_id],
                 )?;
             }
@@ -1982,50 +2235,24 @@ fn set_read_enqueue_in_tx(
     id: i64,
     read: bool,
 ) -> AppResult<Vec<ReadWriteReceipt>> {
-    if read {
-        // OPT-008B R1（读广播的本地半边）：用户标读入口 = 当前行 ∪ 同 `url_norm`
-        // 未读副本——全部标读 + 版本递增 + 入队 `read`，与推送侧 read 广播
-        // （同组 remote_id 展开）同政策、同集合。unread 不广播（下方直通单行）。
-        // 副本只在「未读」时处理（已读副本无变化可记，避免版本噪音与重复入队）；
-        // 主行始终按既有语义写入（即使已读，仍表达一次本地意图）。
-        // R2（N1）：返回**真实翻转行**回执（操作前未读的行），供前端把被闭包
-        // 影响但不在被点位置上的条目与计数本地收敛（无需全量 reload）。
-        let mut receipts = Vec::new();
-        for (target, feed_id, was_unread) in read_targets_with_state(conn, id)? {
-            set_read(conn, target, true)?;
-            enqueue_sync(conn, Some(target), None, "read", None)?;
-            if was_unread {
-                receipts.push(ReadWriteReceipt {
-                    id: target,
-                    feed_id,
-                });
-            }
+    let mut receipts = Vec::new();
+    for (target, feed_id, was_unread) in read_targets_with_state(conn, id)? {
+        set_read(conn, target, read)?;
+        enqueue_sync(
+            conn,
+            Some(target),
+            None,
+            if read { "read" } else { "unread" },
+            None,
+        )?;
+        if was_unread == read {
+            receipts.push(ReadWriteReceipt {
+                id: target,
+                feed_id,
+            });
         }
-        return Ok(receipts);
     }
-    let was_read: bool = conn
-        .query_row(
-            "SELECT is_read FROM articles WHERE id = ?1",
-            rusqlite::params![id],
-            |r| Ok(r.get::<_, i64>(0)? != 0),
-        )
-        .optional()?
-        .unwrap_or(false);
-    let feed_id: i64 = conn
-        .query_row(
-            "SELECT feed_id FROM articles WHERE id = ?1",
-            rusqlite::params![id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(-1);
-    set_read(conn, id, false)?;
-    enqueue_sync(conn, Some(id), None, "unread", None)?;
-    Ok(if was_read && feed_id >= 0 {
-        vec![ReadWriteReceipt { id, feed_id }]
-    } else {
-        Vec::new()
-    })
+    Ok(receipts)
 }
 
 // Note: 读闭包查询计划由 v30 部分索引 `idx_articles_url_norm_unread`
@@ -2036,48 +2263,28 @@ fn set_read_enqueue_in_tx(
 /// 读闭包目标查询：同 `url_norm` 且未读的兄弟行（排除自身），按 id 升序。
 /// 提取为常量使 EXPLAIN 计划回归测试与生产**同字节**（`opt017g_read_closure_tests`
 /// 直接复用本常量）——测试不得另抄一份 SQL。
-pub(crate) const READ_CLOSURE_SQL: &str = "SELECT id FROM articles
-             WHERE id != ?1 AND url_norm = ?2 AND is_read = 0
-             ORDER BY id";
+#[cfg(test)]
+pub(crate) const READ_CLOSURE_SQL: &str = "SELECT b.id FROM articles a JOIN articles b ON b.feed_id=a.feed_id AND b.rss_content_id=a.rss_content_id AND b.title=a.title AND COALESCE(b.enclosure_url,'')=COALESCE(a.enclosure_url,'') AND COALESCE(b.enclosure_mime,'')=COALESCE(a.enclosure_mime,'') WHERE a.id=?1 AND b.id!=a.id AND b.is_read=0 ORDER BY b.id";
 
-/// 读目标行随状态：`(id, feed_id, 操作前是否未读)`。读闭包 = 主行 + 同组未读副本。
 fn read_targets_with_state(conn: &Connection, id: i64) -> AppResult<Vec<(i64, i64, bool)>> {
-    let norm: Option<String> = conn
-        .query_row(
-            "SELECT url_norm FROM articles WHERE id = ?1",
-            rusqlite::params![id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    let mut targets: Vec<i64> = vec![id];
-    if let Some(norm) = norm {
-        let mut stmt = conn.prepare(READ_CLOSURE_SQL)?;
-        let rows = stmt.query_map(rusqlite::params![id, norm], |r| r.get::<_, i64>(0))?;
-        targets.extend(rows.collect::<Result<Vec<_>, _>>()?);
-    }
-    let mut out = Vec::with_capacity(targets.len());
-    for tid in targets {
-        let (feed_id, is_read): (i64, i64) = conn.query_row(
-            "SELECT feed_id, is_read FROM articles WHERE id = ?1",
-            rusqlite::params![tid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        out.push((tid, feed_id, is_read == 0));
-    }
-    Ok(out)
+    let mut stmt = conn.prepare(&format!("SELECT b.id,b.feed_id,b.is_read=0 FROM articles a JOIN articles b ON b.id=a.id OR ({SAME_RSS_GROUP}) WHERE a.id=?1 ORDER BY b.id"))?;
+    let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// 收藏版事务内核，同 [`set_read_enqueue_in_tx`]（action 名 `star`/`unstar`）。
 fn set_starred_enqueue_in_tx(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
-    set_starred(conn, id, starred)?;
-    enqueue_sync(
-        conn,
-        Some(id),
-        None,
-        if starred { "star" } else { "unstar" },
-        None,
-    )
+    for (target, _, _) in read_targets_with_state(conn, id)? {
+        set_starred(conn, target, starred)?;
+        enqueue_sync(
+            conn,
+            Some(target),
+            None,
+            if starred { "star" } else { "unstar" },
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 /// 单条已读状态 + 同步入队（TASK-108，REQ-002）：复合操作包进**单一事务**——
@@ -2103,6 +2310,10 @@ pub fn set_read_with_enqueue(
 pub fn set_starred_with_enqueue(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
     let tx = conn.unchecked_transaction()?;
     set_starred_enqueue_in_tx(&tx, id, starred)?;
+    if !starred {
+        tx.execute("UPDATE articles SET content_id=NULL,rss_content_id=NULL,summary=NULL,image_url=NULL,image_source='page',enclosure_url=NULL,enclosure_mime=NULL,duration_sec=NULL,ai_summary=NULL,translated_content=NULL,ai_summary_sig=NULL,translated_sig=NULL,ai_epoch=ai_epoch+1 WHERE is_starred=0 AND feed_id IN (SELECT id FROM feeds WHERE active=0)",[])?;
+        tx.execute("DELETE FROM ai_segments WHERE article_id IN (SELECT id FROM articles WHERE content_id IS NULL AND feed_id IN (SELECT id FROM feeds WHERE active=0))",[])?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -2122,13 +2333,27 @@ pub fn set_read_bulk_with_enqueue(
         return Ok(Vec::new());
     }
     let tx = conn.unchecked_transaction()?;
-    let mut seen = std::collections::HashSet::new();
-    let mut receipts = Vec::new();
+    let mut targets = std::collections::BTreeMap::new();
     for id in ids {
-        for r in set_read_enqueue_in_tx(&tx, *id, read)? {
-            if seen.insert(r.id) {
-                receipts.push(r);
-            }
+        for (target, feed_id, was_unread) in read_targets_with_state(&tx, *id)? {
+            targets.entry(target).or_insert((feed_id, was_unread));
+        }
+    }
+    let mut receipts = Vec::new();
+    for (target, (feed_id, was_unread)) in targets {
+        set_read(&tx, target, read)?;
+        enqueue_sync(
+            &tx,
+            Some(target),
+            None,
+            if read { "read" } else { "unread" },
+            None,
+        )?;
+        if was_unread == read {
+            receipts.push(ReadWriteReceipt {
+                id: target,
+                feed_id,
+            });
         }
     }
     tx.commit()?;
@@ -2144,11 +2369,9 @@ pub fn set_read_bulk_with_enqueue(
 /// OPT-017D（覆盖面）：此前只选 `source='direct'`，理由是「Miniflux 源入库时已
 /// 用正文第一图兜底」——但该兜底只覆盖**正文里有图**的服务端文章；正文无图的
 /// 服务端文章此前既没有封面、又永不进入补全队列，形成永久缺口（真实库实测见
-/// 归属 Note）。旧理由中「本地补的封面会被同步覆盖回空」也不成立：两处封面
-/// 写入都不会把本地封面清成空——[`crate::db::backfill_article_content`] 是
-/// `COALESCE(旧值, 新值)` 严格只填空；`refresh_existing_article` 是
-/// `COALESCE(新值, 旧值)`（远端给出非空新图会覆盖本地值，NULL 保留本地值，
-/// R1-P2-1 修正）。因此候选不再按 source 过滤。
+/// 归属 Note）。候选不按文章 source 过滤。封面来源独立由 image_source 标识：
+/// page 封面保留，完整非空 RSS 修订可以清理它自己的 rss 派生图；空回包保留。
+/// 两个页面补图入口显式写 page，不从封面URL是否恰好出现在正文猜测来源。
 ///
 /// 失效上报按当前图片URL精确CAS对全来源清本机封面，不推远端；成功缓存由
 /// 同一AppState持有并随失败上报撤销，避免刚清空又把同一个坏缓存填回。
@@ -2180,7 +2403,7 @@ pub fn clear_article_cover_if_matches(
 ) -> AppResult<usize> {
     Ok(conn.execute(
         "UPDATE articles
-         SET image_url = NULL
+         SET image_url = NULL, image_source = 'page'
          WHERE id = ?1
            AND image_url = ?2
            AND image_url IS NOT NULL
@@ -2203,7 +2426,7 @@ pub fn clear_article_cover_if_matches(
 /// 常量本体不含前导 ` AND `（article_where 走子句 join；其余两处拼接时自带）；
 /// 列名 `feed_id` 不限定表名——三处消费方的目标表都只有 articles（同旧写法）。
 /// 占位符 ? 绑定一次（布局值）。
-pub(crate) const LAYOUT_FILTER_SQL: &str = "(SELECT CASE WHEN f2.layout != 'inherit' THEN f2.layout ELSE fo2.layout END FROM feeds f2 JOIN folders fo2 ON f2.folder_id = fo2.id WHERE f2.id = feed_id) = ?";
+pub(crate) const LAYOUT_FILTER_SQL: &str = "(SELECT CASE WHEN f2.layout != 'inherit' THEN f2.layout ELSE COALESCE(fo2.layout, 'article') END FROM feeds f2 LEFT JOIN folders fo2 ON f2.folder_id = fo2.id WHERE f2.id = feed_id) = ?";
 
 /// 分类过滤谓词（M-5）：标量子查询形态（原 `feed_id IN (SELECT id FROM feeds
 /// WHERE folder_id = ?)` 的等价改写），理由同 [`LAYOUT_FILTER_SQL`]——使列表
@@ -2223,7 +2446,7 @@ pub(crate) fn scope_clause(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut sql = String::new();
+    let mut sql = " AND (is_starred=1 OR EXISTS(SELECT 1 FROM feeds visible_feed WHERE visible_feed.id=feed_id AND visible_feed.active=1))".to_string();
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(fid) = feed_id {
         sql.push_str(" AND feed_id = ?");
@@ -2252,15 +2475,8 @@ pub(crate) fn scope_clause(
     (sql, binds)
 }
 
-/// 读目标集合（OPT-008B R1）：范围未读行 ∪ 这些行的同 `url_norm` 组全部行。
-///
-/// 政策（主控裁决）：**显示去重不意味着操作只改代表**——read 传播的本地半边
-/// 与推送广播同政策，同组 read 原子更新相应本地条目版本与队列；
-/// unread/star 只当前条目（不经过本谓词）。
-/// 谓词形如 `((1=1{scope}) OR url_norm IN (SELECT url_norm FROM articles
-/// WHERE is_read = 0{scope}))`，外层语句另加 `is_read = 0`：seed 是范围未读、
-/// 闭包是同组全部行，最终只有「未读且在读目标集合内」的行被改（幂等，重放
-/// 不产生新变化）。两条 scope 绑定按文本序重复一次。
+/// 范围内可见未读行及其源内 RSS 等价成员组成读目标。
+/// 整组写入真实实体，范围外其他来源不传播；调用方以同一事务完成版本和队项。
 fn read_target_clause(
     feed_id: Option<i64>,
     folder_id: Option<i64>,
@@ -2268,14 +2484,8 @@ fn read_target_clause(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let (scope, mut binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
-    let (_, inner_binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
-    let clause = format!(
-        "((1=1{scope}) OR (url_norm IS NOT NULL AND url_norm IN \
-         (SELECT url_norm FROM articles WHERE is_read = 0{scope} AND url_norm IS NOT NULL)))"
-    );
-    binds.extend(inner_binds);
-    (clause, binds)
+    let (scope, binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
+    (format!("id IN (SELECT b.id FROM (SELECT * FROM articles WHERE is_read = 0{scope}) a JOIN articles b ON b.id=a.id OR ({SAME_RSS_GROUP}))"), binds)
 }
 
 /// 读目标集合的 id 列表（与 [`mark_all_read_with_enqueue`] 的 WHERE 同源；
@@ -2289,7 +2499,7 @@ pub fn list_read_target_ids_scoped(
     layout: Option<&str>,
 ) -> AppResult<Vec<i64>> {
     let (clause, binds) = read_target_clause(feed_id, folder_id, starred_only, since_ms, layout);
-    let sql = format!("SELECT a.id FROM articles a WHERE a.is_read = 0 AND {clause} ORDER BY a.id");
+    let sql = format!("SELECT a.id FROM articles a WHERE {clause} ORDER BY a.id");
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), |r| r.get(0))?;
@@ -2311,13 +2521,18 @@ pub fn mark_all_read(
 ) -> AppResult<usize> {
     let (clause, binds) = read_target_clause(feed_id, folder_id, starred_only, since_ms, layout);
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    let changed: usize = conn.query_row(
+        &format!("SELECT COUNT(*) FROM articles a WHERE a.is_read=0 AND {clause}"),
+        refs.as_slice(),
+        |row| row.get(0),
+    )?;
     ensure_read_version_can_grow(conn, &format!(" AND {clause}"), refs.as_slice())?;
     let sql = format!(
         "UPDATE articles AS a SET is_read = 1, read_version = read_version + 1 \
-         WHERE a.is_read = 0 AND {clause}"
+         WHERE {clause}"
     );
-    let n = conn.execute(&sql, refs.as_slice())?;
-    Ok(n)
+    conn.execute(&sql, refs.as_slice())?;
+    Ok(changed)
 }
 
 /// OPT-007：读目标集合内是否出现 read_version 饱和行（= i64::MAX 且将被本次标读）。
@@ -2330,7 +2545,7 @@ fn ensure_read_version_can_grow(
     refs: &[&dyn rusqlite::ToSql],
 ) -> AppResult<()> {
     let sql = format!(
-        "SELECT COUNT(*) FROM articles a WHERE a.is_read = 0{clause} AND a.read_version = {max}",
+        "SELECT COUNT(*) FROM articles a WHERE 1=1{clause} AND a.read_version = {max}",
         max = i64::MAX
     );
     let saturated: i64 = conn.query_row(&sql, refs, |r| r.get(0))?;
@@ -2350,10 +2565,11 @@ fn ensure_read_version_can_grow(
 /// 这里固定 4 条语句（OPT-007 起补一条 read_version 饱和预检）：
 ///   ① 批量删除读目标行条目的 read/unread 旧队项（与逐条 enqueue 的「同向互斥
 ///      覆盖」语义一致：每个 id 至多保留一条最新 read 队项）；
-///   ② `INSERT ... SELECT` 为读目标集合内的未读条目入 `read` 队项（feed_url/payload
+///   ② `INSERT ... SELECT` 为读目标集合内的全部成员入 `read` 队项（feed_url/payload
 ///      为 NULL，与 `enqueue_sync(conn, Some(id), None, "read", None)` 逐列相同）；
 ///   ③ read_version 饱和预检（目标集合内有行到 i64::MAX 即整条拒绝，见 bump 内核）；
-///   ④ 单条 UPDATE 标读并同语句递增 read_version，返回受影响行数。
+///   ④ 单条 UPDATE 标读并同语句递增全部成员的 read_version。
+/// 返回值单独统计原本未读的真实翻转行；已读成员也入队确认这次组意图。
 /// ①② 与 ④ 共用同一 [`read_target_clause`]（同一事务内求值两次即冻结集合——
 /// 单连接互斥、无并发写入缝隙），「入队集合 = 标读集合 = 读目标集合」逐行相同
 /// （F8 + R1 闭包，由等价性测试与主控探针回归锁定）；语句全在同一事务。
@@ -2370,10 +2586,15 @@ pub fn mark_all_read_with_enqueue(
     let (clause, binds) = read_target_clause(feed_id, folder_id, starred_only, since_ms, layout);
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let tx = conn.unchecked_transaction()?;
+    let changed: usize = tx.query_row(
+        &format!("SELECT COUNT(*) FROM articles a WHERE a.is_read=0 AND {clause}"),
+        refs.as_slice(),
+        |row| row.get(0),
+    )?;
     let del = format!(
         "DELETE FROM sync_queue WHERE action IN ('read', 'unread')
            AND article_id IN
-             (SELECT a.id FROM articles a WHERE a.is_read = 0 AND {clause})"
+             (SELECT a.id FROM articles a WHERE {clause})"
     );
     tx.execute(&del, refs.as_slice())?;
     let ins = format!(
@@ -2401,7 +2622,7 @@ pub fn mark_all_read_with_enqueue(
            LEFT JOIN (
              SELECT id AS fr_id, remote_id AS fr_remote_id FROM feeds
            ) f ON f.fr_id = a.feed_id
-          WHERE a.is_read = 0 AND {clause}"
+          WHERE {clause}"
     );
     tx.execute(&ins, refs.as_slice())?;
     // OPT-007：标读与 read_version 递增同语句同事务——「全部已读」也是本地
@@ -2409,11 +2630,11 @@ pub fn mark_all_read_with_enqueue(
     ensure_read_version_can_grow(&tx, &format!(" AND {clause}"), refs.as_slice())?;
     let upd = format!(
         "UPDATE articles AS a SET is_read = 1, read_version = read_version + 1 \
-         WHERE a.is_read = 0 AND {clause}"
+         WHERE {clause}"
     );
-    let n = tx.execute(&upd, refs.as_slice())?;
+    tx.execute(&upd, refs.as_slice())?;
     tx.commit()?;
-    Ok(n)
+    Ok(changed)
 }
 
 /// 条目计数（侧边栏角标）：按 feed 聚合，含未读/收藏/今日细分。
@@ -2438,11 +2659,26 @@ pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
 /// [`feed_counts`] 的显式开关内核（R2/N2：`counts_snapshot` 在同一开关值下
 /// 同时计算源计数与 scope 计数——两个数字来自同一次读取、同一口径）。
 fn feed_counts_with_dedup(conn: &Connection, dedup: bool) -> AppResult<Vec<FeedCounts>> {
+    let sql = feed_counts_sql(dedup);
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(FeedCounts {
+            feed_id: r.get(0)?,
+            total: r.get(1)?,
+            unread: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            starred: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            today: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn feed_counts_sql(dedup: bool) -> String {
     // TASK-064 N5：today 判定与 only_today 同口径（本地时区两侧对齐），理由见
     // list_articles 的 where 构建处。
     let base_sql = "SELECT a.feed_id, {total}, {unread}, {starred}, {today}
-         FROM articles a GROUP BY a.feed_id";
-    let sql = if dedup {
+         FROM articles a JOIN feeds f ON f.id=a.feed_id WHERE f.active=1 OR a.is_starred=1 GROUP BY a.feed_id";
+    if dedup {
         // 源 scope 显示聚合：b.feed_id = a.feed_id（代表在源内选）。
         let ex = |scope: DedupScope| dedup_exists_clause(scope).0;
         let total = ex(DedupScope {
@@ -2468,7 +2704,7 @@ fn feed_counts_with_dedup(conn: &Connection, dedup: bool) -> AppResult<Vec<FeedC
             "SELECT a.feed_id, SUM({total}), SUM(a.is_read = 0 AND {unread}),
                     SUM(a.is_starred = 1 AND {starred}),
                     SUM(date(a.published_at, 'localtime') = date('now', 'localtime') AND {today})
-             FROM articles a GROUP BY a.feed_id"
+             FROM articles a JOIN feeds f ON f.id=a.feed_id WHERE f.active=1 OR a.is_starred=1 GROUP BY a.feed_id"
         )
     } else {
         base_sql
@@ -2479,29 +2715,15 @@ fn feed_counts_with_dedup(conn: &Connection, dedup: bool) -> AppResult<Vec<FeedC
                 "{today}",
                 "SUM(date(a.published_at, 'localtime') = date('now', 'localtime'))",
             )
-    };
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |r| {
-        Ok(FeedCounts {
-            feed_id: r.get(0)?,
-            total: r.get(1)?,
-            unread: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            starred: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-            today: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 /* ============================================================
-OPT-008B 第一阶段：scope 精确计数（前端聚合数字的同口径来源）
+源内显示组计数（前端聚合数字的同口径来源）
 
-`feed_counts` 是「每源自己的 scope」计数（与源自己的列表一致）；侧边栏
-「全部 / 分类」角的数字是**另一个 scope 的显示集合**——跨源同 URL 的两行在
-「全部」scope 里只算 1（代表），在各自源的 scope 里各算 1。要让每个数字都与
-「点进去看到的列表」逐行一致，聚合数字必须按各自的 scope 计算，不能拿每源
-数字相加（层级去重的计数不可由子集数字重建）。本函数用与
-列表/搜索/markAll 同一谓词族在 SQL 内计算三个层级的计数。
+列表、搜索、计数使用同一个RSS等价组谓词。不同源永不组成显示组，所以全部与
+分类计数可以直接加总所属源；counts_snapshot只扫描一次文章，布局过滤在已得
+到的源计数上应用，避免相同层级反复扫描。
 ============================================================ */
 
 /// 单个 scope（全部/某分类/某源）的显示集合计数。
@@ -2531,162 +2753,6 @@ pub struct ScopeCountsDetail {
     pub feeds: Vec<ScopedCounts>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ScopeLevel {
-    All,
-    Folder,
-    Feed,
-}
-
-#[derive(Clone, Copy)]
-struct ScopedCountsRow {
-    scope_id: i64,
-    total: i64,
-    unread: i64,
-    starred: i64,
-    today: i64,
-}
-
-fn counts_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ScopedCountsRow> {
-    Ok(ScopedCountsRow {
-        scope_id: r.get(0)?,
-        total: r.get(1)?,
-        unread: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-        starred: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-        today: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-    })
-}
-
-/// 生成某层级 scope 的计数 SQL + 绑定。
-/// 占位符次序 = SQL 文本次序：SELECT 列表里的 4 个 EXISTS（各在 layout 给定时
-/// 绑一次；feed 级无布局占位，见 F1 注释）在前，外层 WHERE 的 layout 绑定在后。
-fn scope_counts_sql(
-    level: ScopeLevel,
-    dedup: bool,
-    layout: Option<&str>,
-) -> (String, Vec<rusqlite::types::Value>) {
-    let b_layout = layout.is_some();
-    // F1（B2）：feed 级 EXISTS 的内层约束 `b.feed_id = a.feed_id` 使 fb 与外层
-    // fa 是同一行，b_layout_cond 与外层 WHERE 的布局条件逐字同构——layout 给定
-    // 时不匹配的 feed 整组已被外层排除，组内 b 的布局复核恒真。因此 feed 级
-    // 去掉 `JOIN feeds fb` 与布局复核：子查询回到单表形态，计划稳定为
-    // `SEARCH b USING INDEX idx_articles_url_norm[_unread] (url_norm=? AND rowid<?)`
-    // （修前 JOIN feeds 形态在真实语料上退化为逐行 rowid 范围搜索，
-    // 50k 行实测 155s/轮；改写后与无去重变体同量级）。All/Folder 级的 b 可能
-    // 来自其它 feed，仍需 fb 参与 scope/布局判定，保持原模板。
-    // Note: feed 级去 fb join 的等价性论证与 ANALYZE 否决 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
-    let feed_level = level == ScopeLevel::Feed;
-    let b_scope = match level {
-        ScopeLevel::All => "",
-        ScopeLevel::Feed => " AND b.feed_id = a.feed_id",
-        ScopeLevel::Folder => " AND fb.folder_id = fo.id",
-    };
-    let b_layout_cond = if b_layout && !feed_level {
-        " AND (CASE WHEN fb.layout != 'inherit' THEN fb.layout \
-           ELSE (SELECT fo5.layout FROM folders fo5 WHERE fo5.id = fb.folder_id) END) = ?"
-    } else {
-        ""
-    };
-    let exists = |view: &str| {
-        let from = if feed_level {
-            "FROM articles b"
-        } else {
-            "FROM articles b JOIN feeds fb ON fb.id = b.feed_id"
-        };
-        format!(
-            "NOT EXISTS (SELECT 1 {from} \
-             WHERE b.url_norm = a.url_norm AND b.id < a.id{b_scope}{b_layout_cond}{view})"
-        )
-    };
-    let (total, unread, starred, today) = if dedup {
-        // Note: 空集聚合仍产出一行，所有 smartDedup 计数必须由 SQL 归零 — 见
-        // .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
-        let sum_or_zero = |predicate: String| format!("COALESCE(SUM({predicate}), 0)");
-        (
-            sum_or_zero(exists("")),
-            sum_or_zero(format!(
-                "a.is_read = 0 AND {}",
-                exists(" AND b.is_read = 0")
-            )),
-            sum_or_zero(format!(
-                "a.is_starred = 1 AND {}",
-                exists(" AND b.is_starred = 1")
-            )),
-            sum_or_zero(format!(
-                "date(a.published_at, 'localtime') = date('now', 'localtime') AND {}",
-                exists(" AND date(b.published_at, 'localtime') = date('now', 'localtime')")
-            )),
-        )
-    } else {
-        (
-            "COUNT(*)".to_string(),
-            "SUM(a.is_read = 0)".to_string(),
-            "SUM(a.is_starred = 1)".to_string(),
-            "SUM(date(a.published_at, 'localtime') = date('now', 'localtime'))".to_string(),
-        )
-    };
-    let (head, group, outer_where) = match level {
-        ScopeLevel::All => (
-            format!("SELECT 0, {total}, {unread}, {starred}, {today} FROM articles a JOIN feeds fa ON fa.id = a.feed_id"),
-            String::new(),
-            if b_layout {
-                " WHERE (CASE WHEN fa.layout != 'inherit' THEN fa.layout ELSE fo.layout END) = ?"
-            } else {
-                ""
-            },
-        ),
-        ScopeLevel::Feed => (
-            format!("SELECT a.feed_id, {total}, {unread}, {starred}, {today} FROM articles a JOIN feeds fa ON fa.id = a.feed_id"),
-            " GROUP BY a.feed_id".to_string(),
-            if b_layout {
-                " WHERE (CASE WHEN fa.layout != 'inherit' THEN fa.layout ELSE fo.layout END) = ?"
-            } else {
-                ""
-            },
-        ),
-        ScopeLevel::Folder => (
-            format!("SELECT fo.id, {total}, {unread}, {starred}, {today} FROM articles a JOIN feeds fa ON fa.id = a.feed_id JOIN folders fo ON fo.id = fa.folder_id"),
-            " GROUP BY fo.id".to_string(),
-            if b_layout {
-                " WHERE (CASE WHEN fa.layout != 'inherit' THEN fa.layout ELSE fo.layout END) = ?"
-            } else {
-                ""
-            },
-        ),
-    };
-    // All/Feed + layout：外层需要 fo 参与布局解析；Folder 恒有 fo。
-    let join_fo = if b_layout && level != ScopeLevel::Folder {
-        " JOIN folders fo ON fo.id = fa.folder_id"
-    } else {
-        ""
-    };
-    let sql = format!("{head}{join_fo}{outer_where}{group}");
-    // 绑定：先 SELECT 列表里 4 个 b_layout 占位（仅 dedup 开启且非 feed 级
-    // 时存在——feed 级 b_layout_cond 已去掉），再外层 layout（SQL 文本次序）。
-    let mut params: Vec<rusqlite::types::Value> = Vec::new();
-    if let Some(l) = layout {
-        if dedup && !feed_level {
-            for _ in 0..4 {
-                params.push(l.to_string().into());
-            }
-        }
-        params.push(l.to_string().into());
-    }
-    (sql, params)
-}
-
-fn scope_counts_level(
-    conn: &Connection,
-    level: ScopeLevel,
-    layout: Option<&str>,
-    dedup: bool,
-) -> AppResult<Vec<ScopedCountsRow>> {
-    let (sql, params) = scope_counts_sql(level, dedup, layout);
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params), counts_from_row)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
 /// 计算「全部 / 每分类 / 每源」三个层级的显示集合计数（可选布局过滤，
 /// 与列表查询同一布局解析：feed 级覆盖 → 分类兜底）。
 /// 结果供前端侧边栏聚合数字使用，保证「数字 == 点进去看到的列表条数」。
@@ -2701,42 +2767,69 @@ fn scope_counts_with_dedup(
     layout: Option<&str>,
     dedup: bool,
 ) -> AppResult<ScopeCountsDetail> {
-    let all_rows = scope_counts_level(conn, ScopeLevel::All, layout, dedup)?;
-    let all_row = all_rows.first().copied().unwrap_or(ScopedCountsRow {
-        scope_id: 0,
+    let feeds = feed_counts_with_dedup(conn, dedup)?;
+    scope_counts_from_feeds(conn, layout, &feeds)
+}
+
+/// Source-local display groups make parent counts additive across sources.
+/// Reuse source counts instead of rescanning all articles once per scope level.
+fn scope_counts_from_feeds(
+    conn: &Connection,
+    layout: Option<&str>,
+    counts: &[FeedCounts],
+) -> AppResult<ScopeCountsDetail> {
+    let mut stmt=conn.prepare("SELECT f.id,f.folder_id,CASE WHEN f.layout!='inherit' THEN f.layout ELSE COALESCE(fo.layout,'article') END FROM feeds f LEFT JOIN folders fo ON fo.id=f.folder_id")?;
+    let metadata = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get::<_, Option<i64>>(1)?, r.get::<_, String>(2)?),
+            ))
+        })?
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+    let mut all = ScopeCounts {
         total: 0,
         unread: 0,
         starred: 0,
         today: 0,
-    });
-    let folders = scope_counts_level(conn, ScopeLevel::Folder, layout, dedup)?
-        .into_iter()
-        .map(|r| ScopedCounts {
-            scope_id: r.scope_id,
-            total: r.total,
-            unread: r.unread,
-            starred: r.starred,
-            today: r.today,
-        })
-        .collect();
-    let feeds = scope_counts_level(conn, ScopeLevel::Feed, layout, dedup)?
-        .into_iter()
-        .map(|r| ScopedCounts {
-            scope_id: r.scope_id,
-            total: r.total,
-            unread: r.unread,
-            starred: r.starred,
-            today: r.today,
-        })
-        .collect();
+    };
+    let mut folders = std::collections::BTreeMap::<i64, ScopedCounts>::new();
+    let mut feeds = Vec::new();
+    for row in counts {
+        let Some((folder, source_layout)) = metadata.get(&row.feed_id) else {
+            continue;
+        };
+        if layout.is_some_and(|wanted| wanted != source_layout) {
+            continue;
+        }
+        all.total += row.total;
+        all.unread += row.unread;
+        all.starred += row.starred;
+        all.today += row.today;
+        feeds.push(ScopedCounts {
+            scope_id: row.feed_id,
+            total: row.total,
+            unread: row.unread,
+            starred: row.starred,
+            today: row.today,
+        });
+        if let Some(folder) = folder {
+            let sum = folders.entry(*folder).or_insert(ScopedCounts {
+                scope_id: *folder,
+                total: 0,
+                unread: 0,
+                starred: 0,
+                today: 0,
+            });
+            sum.total += row.total;
+            sum.unread += row.unread;
+            sum.starred += row.starred;
+            sum.today += row.today;
+        }
+    }
     Ok(ScopeCountsDetail {
-        all: ScopeCounts {
-            total: all_row.total,
-            unread: all_row.unread,
-            starred: all_row.starred,
-            today: all_row.today,
-        },
-        folders,
+        all,
+        folders: folders.into_values().collect(),
         feeds,
     })
 }
@@ -2755,7 +2848,7 @@ pub struct CountsSnapshot {
 pub fn counts_snapshot(conn: &Connection, layout: Option<&str>) -> AppResult<CountsSnapshot> {
     let dedup = smart_dedup_on(conn);
     let feeds = feed_counts_with_dedup(conn, dedup)?;
-    let scope = scope_counts_with_dedup(conn, layout, dedup)?;
+    let scope = scope_counts_from_feeds(conn, layout, &feeds)?;
     Ok(CountsSnapshot { feeds, scope })
 }
 
@@ -2780,7 +2873,7 @@ mod tests {
             author: None,
             summary: None,
             content_html: None,
-            body_text: "b".into(),
+            body_text: format!("body-{guid}"),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -3263,7 +3356,8 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(left, 0, "文章应已被清理");
+        assert_eq!(left, 1, "清正文保留轻量身份");
+        assert!(get_article(&conn, aid).unwrap().unwrap().body_missing);
     }
 
     /// 明显年轻于阈值的文章（本机时区无关）绝不能被删——基本防误删回归。
@@ -3369,9 +3463,13 @@ mod tests {
         };
         assert_eq!(
             left,
-            vec![unread, starred, pending],
-            "未读/收藏/待同步文章必须全部保留"
+            vec![deletable, unread, starred, pending],
+            "清正文保留所有轻量身份"
         );
+        assert!(get_article(&conn, deletable).unwrap().unwrap().body_missing);
+        for id in [unread, starred, pending] {
+            assert!(!get_article(&conn, id).unwrap().unwrap().body_missing);
+        }
     }
 
     /* ---------- P3[8]：search_articles 的 LIMIT 必须是绑定参数且有上界 ---------- */
@@ -3570,7 +3668,8 @@ mod tests {
         )
         .unwrap();
         for layout in [None, Some("article")] {
-            let (sql, p) = scope_counts_sql(ScopeLevel::Feed, true, layout);
+            let sql = feed_counts_sql(true);
+            let p = Vec::new();
             // 模板形态：feed 级必须没有 fb join 与布局复核（SELECT 列表布局
             // 占位随之消失，绑定只剩外层一处——由下面 explain 的绑定数同源验证）。
             assert!(
@@ -3591,8 +3690,8 @@ mod tests {
                 "layout={layout:?} EXISTS 退化为对 b 的逐行 rowid 搜索（F1 慢路径）：\n{plan}"
             );
             assert!(
-                plan.contains("idx_articles_url_norm"),
-                "layout={layout:?} EXISTS 未走 url_norm 索引：\n{plan}"
+                plan.contains("idx_articles_rss_group"),
+                "layout={layout:?} EXISTS 未走 rss_group 索引：\n{plan}"
             );
         }
     }
@@ -4620,7 +4719,7 @@ mod opt017b_search_tests {
             (
                 format!(
                     " AND NOT EXISTS (SELECT 1 FROM articles b LEFT JOIN contents bc ON bc.id = b.content_id \
-                     WHERE b.url_norm = a.url_norm AND b.id < a.id AND {})",
+                     WHERE {SAME_RSS_GROUP} AND b.id < a.id AND {})",
                     inner_parts.join(" AND ")
                 ),
                 extra,
@@ -4633,9 +4732,9 @@ mod opt017b_search_tests {
             "SELECT a.id, a.feed_id, a.title, a.author,
                     COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                     a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                    a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
+                    a.ai_summary, a.source, a.published_at, COALESCE((SELECT MIN(b.is_read) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_read), COALESCE((SELECT MAX(b.is_starred) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_starred),
                     NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
-                    a.first_seen_at, a.published_at_source
+                    a.first_seen_at, a.published_at_source, a.image_count, a.media_revision, COALESCE((SELECT active = 0 FROM feeds WHERE id = a.feed_id), 0), (c.id IS NULL OR (COALESCE(c.content_html, '') = '' AND COALESCE(c.body_text, '') = '')), json_extract(a.images_json, '$[0]')
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id
              WHERE {}{dedup_sql}
              ORDER BY a.published_at DESC
@@ -5017,7 +5116,7 @@ mod opt017g_read_closure_tests {
     use crate::db::{create_folder, insert_feed, scope_counts, MIGRATIONS};
     use rusqlite::Connection;
 
-    const NEW_INDEX: &str = "idx_articles_url_norm_unread";
+    const NEW_INDEX: &str = "idx_articles_rss_group";
 
     fn conn() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -5139,6 +5238,24 @@ mod opt017g_read_closure_tests {
             )
             .unwrap();
         }
+        // Same-source nonempty RSS content forms groups; matching URLs in other sources do not.
+        for (ids, body) in [(&[a1, a2, a3][..], "group-a"), (&[b1, b2][..], "group-b")] {
+            let input = super::super::contents::ContentInput {
+                content_html: None,
+                body_text: body.into(),
+                extraction_source: "rss".into(),
+                fulltext_extracted: false,
+                url_norm: None,
+            };
+            let (cid, _, _) = super::super::contents::ensure_content(conn, &input, None).unwrap();
+            for id in ids {
+                conn.execute(
+                    "UPDATE articles SET content_id=?1,rss_content_id=?1 WHERE id=?2",
+                    params![cid, id],
+                )
+                .unwrap();
+            }
+        }
         Fixture {
             all: vec![a1, a2, a3, b1, b2, unique, null_norm],
             g1: [a1, a2, a3],
@@ -5156,11 +5273,11 @@ mod opt017g_read_closure_tests {
                 |r| r.get::<_, Option<String>>(0),
             )
             .unwrap();
-        let Some(norm) = norm else {
+        let Some(_norm) = norm else {
             return Vec::new();
         };
         let mut stmt = conn.prepare(READ_CLOSURE_SQL).unwrap();
-        stmt.query_map(rusqlite::params![id, norm], |r| r.get::<_, i64>(0))
+        stmt.query_map(rusqlite::params![id], |r| r.get::<_, i64>(0))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
@@ -5199,8 +5316,8 @@ mod opt017g_read_closure_tests {
             index_present(&conn, NEW_INDEX),
             "v30 必须在最新 schema 建立 {NEW_INDEX}"
         );
-        let plan = explain_plan(&conn, READ_CLOSURE_SQL, 2);
-        let plan_ref = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        let plan = explain_plan(&conn, READ_CLOSURE_SQL, 1);
+        let plan_ref = explain_plan(&conn, READ_CLOSURE_SQL, 1);
         assert_eq!(plan, plan_ref, "同库同查询计划必须稳定");
         assert!(
             plan.iter().any(|s| s.contains(NEW_INDEX)),
@@ -5223,7 +5340,7 @@ mod opt017g_read_closure_tests {
     fn fallback_when_index_dropped_keeps_results_and_transitions() {
         let conn = conn();
         let fx = seed_fixture(&conn);
-        let plan_with = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        let plan_with = explain_plan(&conn, READ_CLOSURE_SQL, 1);
         assert!(
             plan_with.iter().any(|s| s.contains(NEW_INDEX)),
             "前置：索引在场时计划必须引用新索引：{plan_with:?}"
@@ -5234,17 +5351,12 @@ mod opt017g_read_closure_tests {
         // 应用级损坏探测；缺失即规划回落，损坏由 SQLite 报错——本测试覆盖缺失。）
         conn.execute(&format!("DROP INDEX {NEW_INDEX}"), [])
             .unwrap();
-        let plan_without = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        let plan_without = explain_plan(&conn, READ_CLOSURE_SQL, 1);
         assert!(
             !plan_without.iter().any(|s| s.contains(NEW_INDEX)),
             "删索引后计划不得再引用 {NEW_INDEX}：{plan_without:?}"
         );
-        assert!(
-            plan_without
-                .iter()
-                .any(|s| s.contains("idx_articles_unread")),
-            "删索引后必须回落旧未读扫描计划：{plan_without:?}"
-        );
+        assert!(!plan_without.is_empty(), "缺索引仍应有合法查询计划");
         let after: Vec<Vec<i64>> = fx.all.iter().map(|id| closure_rowset(&conn, *id)).collect();
         assert_eq!(before, after, "索引缺失前后闭包结果集必须逐字一致");
 
@@ -5363,7 +5475,7 @@ mod opt017g_read_closure_tests {
         let want_states: Vec<(i64, i64, i64, i64)> = vec![
             (fx1.g1[0], 1, 2, 0),
             (fx1.g1[1], 0, 1, 1),
-            (fx1.g1[2], 1, 1, 0),
+            (fx1.g1[2], 1, 2, 0),
             (fx1.g2[0], 0, 1, 1),
             (fx1.g2[1], 0, 1, 0),
             (fx1.null_norm, 1, 1, 0),

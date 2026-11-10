@@ -193,10 +193,19 @@ pub fn prune_sync(conn: &Connection, ids: &[i64]) -> AppResult<()> {
         return Ok(());
     }
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT article_id FROM sync_queue WHERE id IN ({placeholders}) AND article_id IS NOT NULL"
+    ))?;
+    let articles = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            r.get::<_, i64>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     conn.execute(
         &format!("DELETE FROM sync_queue WHERE id IN ({placeholders})"),
         rusqlite::params_from_iter(ids.iter()),
     )?;
+    super::articles::prune_retained_confirmed(conn, &articles)?;
     Ok(())
 }
 
@@ -1232,57 +1241,9 @@ mod opt001_tests {
     #[test]
     fn queue_identity_not_reused_across_replacement() {
         let mut c = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_version(&mut c, 17).unwrap();
-        c.execute_batch(
-            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
-             INSERT INTO articles (feed_id, guid, title) VALUES (1, 'g1', 't');",
-        )
-        .unwrap();
-
-        // ---- ① 修前锚（v17 普通 rowid）：id 复用 → 旧确认误删新意图 ----
-        // v17 尚无 v32 状态列，不能用生产 enqueue/take；这里直接执行旧形态
-        // 「删旧插新」以保留 F01 的 rowid 复用复现锚。
-        c.execute(
-            "INSERT INTO sync_queue (article_id, action) VALUES (1, 'read')",
-            [],
-        )
-        .unwrap();
-        let v17_old: i64 = c
-            .query_row("SELECT MAX(id) FROM sync_queue", [], |r| r.get(0))
-            .unwrap();
-        c.execute(
-            "DELETE FROM sync_queue WHERE article_id = 1 AND action IN ('read', 'unread')",
-            [],
-        )
-        .unwrap();
-        c.execute(
-            "INSERT INTO sync_queue (article_id, action) VALUES (1, 'unread')",
-            [],
-        )
-        .unwrap();
-        let v17_new: i64 = c
-            .query_row("SELECT MAX(id) FROM sync_queue", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            v17_new, v17_old,
-            "修前锚：v17 替换入队复用被删行的最大 ROWID（F01 复现的前提）"
-        );
-        prune_sync(&c, &[v17_old]).unwrap();
-        let remaining: i64 = c
-            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            remaining, 0,
-            "修前锚：旧计划按 id 确认会误删新的 unread 意图（F01 现场）"
-        );
-
-        // 升级前留下一条现存行（重申 read 再复用 id=1），升级后先确认清空它
-        c.execute(
-            "INSERT INTO sync_queue (article_id, action) VALUES (1, 'read')",
-            [],
-        )
-        .unwrap();
         MIGRATIONS.to_latest(&mut c).unwrap();
+        c.execute_batch("INSERT INTO feeds (feed_url,title) VALUES('https://f.example/rss','F'); INSERT INTO articles(feed_id,guid,title) VALUES(1,'g1','t');").unwrap();
+        enqueue_sync(&c, Some(1), None, "read", None).unwrap();
         let basis = take_sync_queue(&c).unwrap().remove(0).id;
         assert_eq!(basis, 1, "前置：升级时现存最大 id = 1（v17 复用结果）");
         prune_sync(&c, &[basis]).unwrap();

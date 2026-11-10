@@ -101,6 +101,8 @@ export interface BodyEntry {
   rawContent: string;
   /** 译文（cleared 后为空串） */
   translatedContent: string;
+  /** 仅内存：当前未消毒译文属于哪笔请求。正文水合替换产物时不能继承旧owner。 */
+  translationDraftOwner?: symbol;
   /** AI 摘要（cleared 后为空串） */
   aiSummary: string;
   /** OPT-013 B1：两类产物的缓存签名（null = 旧无签名产物/未生成——B3 五态判定
@@ -181,16 +183,16 @@ function nextRevision(current?: number): number {
    在 bindAppStore 后注入「bump AppState.bodyCacheNonce」的实现，选择器引用该
    nonce 建立订阅依赖（见 selectors.ts）。notify 由宿主注入而非直接 import
    store：保持本模块零 store 依赖（internals ← bodyCache 单向，无环）。 */
-let notifyWrite: (() => void) | null = null;
+let notifyWrite: ((id?: string, safeTranslation?: boolean) => void) | null = null;
 
 /** 宿主（store.ts）注入写入通知；多次注入以后一次为准（测试重装载同）。 */
-export function bindBodyCacheNotify(fn: () => void): void {
+export function bindBodyCacheNotify(fn: (id?: string, safeTranslation?: boolean) => void): void {
   notifyWrite = fn;
 }
 
 /** 每个真实写入的公共尾：触发通知（未注入时静默——纯函数级测试场景）。 */
-function touch(): void {
-  notifyWrite?.();
+function touch(id?: string, safeTranslation = false): void {
+  notifyWrite?.(id, safeTranslation);
 }
 
 /** 读记录（命中即刷新 LRU 新鲜度）。无记录 = 未请求/已淘汰。 */
@@ -234,7 +236,7 @@ export function markBodyLoading(id: string): number {
   const next = { ...emptyRecord('loading'), ...(existing ?? {}), state: 'loading' as const };
   const revision = next.contentRevision;
   bodyById.set(id, next);
-  touch();
+  touch(id);
   return revision;
 }
 
@@ -263,7 +265,7 @@ export function applyBodyRow(
   id: string,
   row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null; content_id?: number | null; content_revision?: number | null; feed_id?: number | null; title?: string | null; ai_summary_sig?: string | null; translated_sig?: string | null },
   stamp: number,
-  aiFallback: { translatedContent: string; aiSummary: string },
+  aiFallback: { translatedContent: string; aiSummary: string; translationDraftOwner?: symbol },
 ): boolean {
   const current = bodyById.get(id);
   if (!current || current.contentRevision !== stamp) return false;
@@ -279,6 +281,9 @@ export function applyBodyRow(
     content: row.content_html ?? '',
     rawContent: row.fulltext_extracted ? base.rawContent : row.content_html ?? '',
     translatedContent: row.translated_content ?? aiFallback.translatedContent,
+    translationDraftOwner: row.translated_content == null
+      ? aiFallback.translationDraftOwner ?? (aiFallback.translatedContent === base.translatedContent ? base.translationDraftOwner : undefined)
+      : undefined,
     aiSummary: row.ai_summary ?? aiFallback.aiSummary,
     aiSummarySig: summarySig,
     translatedSig,
@@ -292,7 +297,7 @@ export function applyBodyRow(
     aiWrittenAt: Date.now(),
     message: '',
   });
-  touch();
+  touch(id, row.translated_content != null);
   return true;
 }
 
@@ -329,7 +334,7 @@ export function invalidateContentRevision(
     entryAnchor: anchor ?? current.entryAnchor,
     contentRevision: nextRevision(current.contentRevision),
   });
-  touch();
+  touch(id);
   return true;
 }
 
@@ -338,7 +343,7 @@ export function markBodyMissing(id: string, stamp: number): void {
   const current = bodyById.get(id);
   if (!current || current.contentRevision !== stamp) return;
   bodyById.set(id, { ...(current ?? emptyRecord('missing')), state: 'missing', message: BODY_MISSING_MESSAGE });
-  touch();
+  touch(id);
 }
 
 /** 水合失败：failed 终态 + 错误文案（内联重试依据）。stamp 比对同 applyBodyRow。 */
@@ -346,13 +351,13 @@ export function markBodyFailed(id: string, stamp: number, message: string): void
   const current = bodyById.get(id);
   if (!current || current.contentRevision !== stamp) return;
   bodyById.set(id, { ...(current ?? emptyRecord('failed')), state: 'failed', message });
-  touch();
+  touch(id);
 }
 
 /** 删除记录 → 回「未请求」态：retryHydration 的重试入口、以及未来任何需要
     强制重取的路径。LRU 淘汰与删除语义相同。 */
 export function dropBodyEntry(id: string): void {
-  if (bodyById.delete(id)) touch();
+  if (bodyById.delete(id)) touch(id);
 }
 
 /** 全文提取成功：正文被 Readability 结果覆盖（rawContent 保留 RSS 原文）。
@@ -377,7 +382,7 @@ export function applyExtractedFulltext(
     contentId: identity ? identity.contentId : current.contentId,
     contentRev: identity ? identity.contentRev : current.contentRev,
   });
-  touch();
+  touch(id);
 }
 
 /** AI 生成完成（摘要/译文回读 DB 消毒版后落账）：解除 cleared、bump revision。
@@ -393,14 +398,17 @@ export function applyAiProduct(
   field: 'aiSummary' | 'translatedContent',
   value: string,
   signature?: string | null,
+  draftOwner?: symbol,
 ): boolean {
   const current = bodyById.get(id);
   if (!current) return false;
   const sigPatch: Partial<BodyEntry> = signature === undefined
     ? {}
     : (field === 'aiSummary' ? { aiSummarySig: signature } : { translatedSig: signature });
-  bodyById.set(id, withExplicitAiWrite({ ...current, [field]: value, ...sigPatch }, 'ready'));
-  touch();
+  bodyById.set(id, withExplicitAiWrite({ ...current, [field]: value, ...sigPatch,
+    ...(field === 'translatedContent' ? { translationDraftOwner: draftOwner } : {}),
+  }, 'ready'));
+  touch(id, field === 'translatedContent' && draftOwner === undefined);
   return true;
 }
 
@@ -408,16 +416,27 @@ export function applyAiProduct(
     （保护流式产物不被旧行对齐清除），cleared 期间生成视为再次生成的开始
     （回 ready，完成时 applyAiProduct 再 bump）；无记录 → 返回 false，
     调用方回退写视图行。 */
-export function appendAiDelta(id: string, field: 'aiSummary' | 'translatedContent', delta: string): boolean {
+export function appendAiDelta(id: string, field: 'aiSummary' | 'translatedContent', delta: string, draftOwner?: symbol): boolean {
   const current = bodyById.get(id);
   if (!current) return false;
   bodyById.set(id, {
     ...current,
     [field]: (current[field] || '') + delta,
+    ...(field === 'translatedContent' ? { translationDraftOwner: draftOwner } : {}),
     state: current.state === 'cleared' ? 'ready' : current.state,
     aiWrittenAt: Date.now(),
   });
-  touch();
+  touch(id);
+  return true;
+}
+
+/** 失效请求只能丢弃自己的未消毒草稿。保留正文state/水合stamp，不能让旧流清理
+ * 把cleared误变ready或废掉已开始的新正文水合。安全回读/水合已替换的产物不动。 */
+export function discardTranslationDraft(id: string, owner: symbol): boolean {
+  const current = bodyById.get(id);
+  if (!current || current.translationDraftOwner !== owner) return false;
+  bodyById.set(id, { ...current, translatedContent: '', translatedSig: null, translationDraftOwner: undefined });
+  touch(id, true);
   return true;
 }
 
@@ -453,7 +472,7 @@ export function reconcileBodyEntities(
     if (prevSnippet !== undefined && prevSnippet !== fact.snippet) {
       if (rec.state !== 'cleared' || rec.content !== '') {
         bodyById.set(id, { ...rec, state: 'cleared', content: '', rawContent: '', fulltextExtracted: false, contentRevision: nextRevision(rec.contentRevision) });
-        touch();
+        touch(id);
       }
       continue;
     }
@@ -463,13 +482,15 @@ export function reconcileBodyEntities(
     if (rec.aiWrittenAt > rowsFetchedAt) continue; // 记录比行新（生成刚落库、行是旧查询）
     if (hadAi && !rowHasAi) {
       // DB 已删除 AI 产物（清理 AI 缓存）→ 显式失效：cleared + bump（不再被 reload 复活）
-      bodyById.set(id, withExplicitAiWrite({ ...rec, aiSummary: '', translatedContent: '', aiSummarySig: null, translatedSig: null }, 'cleared'));
-      touch();
+      bodyById.set(id, withExplicitAiWrite({ ...rec, aiSummary: '', translatedContent: '', aiSummarySig: null, translatedSig: null, translationDraftOwner: undefined }, 'cleared'));
+      touch(id, true);
     } else if (rec.state === 'ready' && (rec.aiSummary !== fact.aiSummary || rec.translatedContent !== fact.translatedContent)) {
       // 行带来不同的 DB 真值（他端再生/本端未见过）→ 对齐为行真值（不解除 cleared）；
       // OPT-013 B1：签名随行真值一起对齐（产物与签名成对，不出现新产物配旧签名）
-      bodyById.set(id, { ...rec, aiSummary: fact.aiSummary, translatedContent: fact.translatedContent, aiSummarySig: fact.aiSummarySig, translatedSig: fact.translatedSig, aiWrittenAt: rowsFetchedAt });
-      touch();
+      bodyById.set(id, { ...rec, aiSummary: fact.aiSummary, translatedContent: fact.translatedContent, aiSummarySig: fact.aiSummarySig, translatedSig: fact.translatedSig,
+        translationDraftOwner: rec.translatedContent === fact.translatedContent && rec.translatedSig === fact.translatedSig ? rec.translationDraftOwner : undefined,
+        aiWrittenAt: rowsFetchedAt });
+      touch(id, rec.translatedContent !== fact.translatedContent || rec.translatedSig !== fact.translatedSig);
     }
   }
 }

@@ -300,12 +300,18 @@ fn inside_hidden_text_subtree(mut node: NodeRef<'_, Node>) -> bool {
 
 /// 正文第一张图（卡片缩略图兜底）
 pub fn first_image(html: &str) -> Option<String> {
+    ordered_images(html).into_iter().next()
+}
+
+/// Ordered, unique renderable article images. No network work is performed.
+pub fn ordered_images(html: &str) -> Vec<String> {
     let html = preprocess_html(html);
     let img_selector: LazyLock<Selector> =
         LazyLock::new(|| Selector::parse("img[src]").expect("valid selector"));
+    let mut seen = std::collections::HashSet::new();
     Html::parse_document(&html)
         .select(&img_selector)
-        .find_map(|i| {
+        .filter_map(|i| {
             let element = i.value();
             let src = element.attr("src")?.trim();
             let dimension = |name| {
@@ -322,6 +328,8 @@ pub fn first_image(html: &str) -> Option<String> {
                 && cover_image_candidate(src, dimension("width"), dimension("height"), &roles))
             .then(|| src.to_string())
         })
+        .filter(|url| seen.insert(url.clone()))
+        .collect()
 }
 
 /// 只剔除有明确小尺寸或角色证据的封面候选；缺尺寸的正常新闻图保留。

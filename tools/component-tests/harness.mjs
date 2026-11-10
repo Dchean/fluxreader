@@ -234,6 +234,7 @@ const aiSliceMod = await import('../../dist-test/store/slices/ai.js');
 export const resetAiRequestStateForTests = aiSliceMod.resetAiRequestStateForTests;
 const syncSliceMod = await import('../../dist-test/store/slices/sync.js');
 const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+const { resetReadingPositionForTests } = await import('../../dist-test/lib/readingPosition.js');
 export const resetGithubLoginForTests = syncSliceMod.resetGithubLoginForTests;
 
 /* ------------------------------------------------------------------
@@ -472,6 +473,8 @@ export function resetStore(extra = {}) {
     openedReadIds: {},
     categories: [],
     entries: [],
+    readingSession: null,
+    sourceIndex: new Map(),
     feedIndex: new Map(),
     feedCounts: new Map(),
     /* OPT-008B R2：scope 计数快照随基线清空——否则上一个用例/域的快照会按
@@ -485,6 +488,7 @@ export function resetStore(extra = {}) {
     closeAskVisible: false,
     lightboxUrl: null,
     lightboxEntryId: null,
+    lightboxGallery: null,
     newCategoryModalOpen: false,
     addFeedModalOpen: false,
     editFeedModalOpen: false,
@@ -539,6 +543,7 @@ export function resetStore(extra = {}) {
   resetBodyCacheForTests();
   resetAiRequestStateForTests();
   resetGithubLoginForTests();
+  resetReadingPositionForTests();
 }
 
 /** 全量清理：卸载所有挂载树（聚合错误）、复位 store、移除遗留 DOM、关闭 jsdom。
@@ -576,6 +581,7 @@ export function componentTest(name, options, body) {
     try {
       const act = await getAct();
       await act(async () => { await awaitLocalFlagWriteFrontier(); });
+      resetReadingPositionForTests();
       await fn(t);
     } catch (e) {
       errors.push(e);
@@ -601,6 +607,8 @@ export function componentTest(name, options, body) {
     } catch (e) {
       errors.push(e);
     }
+    // RS4：卸载effect也可能存档锚；即使body或卸载失败，仍清活锚/存档/节流基准。
+    try { resetReadingPositionForTests(); } catch (e) { errors.push(e); }
     const ledgerErr = endTestErrors();
     currentActPhase = 'between tests';
     if (ledgerErr) errors.push(ledgerErr);

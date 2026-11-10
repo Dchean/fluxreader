@@ -7,13 +7,30 @@
 export const id = 'mutations-and-counts';
 
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, resetStore, bootFixture, NOW, iso, mkRow, countsFromRows, COUNTS, selectVisibleEntries, selectTreeCounts, selectViewCounts, bodyOf, overrideGlobal, viewEntriesCache } = ctx;
+  const { S, store, checkNew, nTick, resetStore, entityFixture, NOW, iso, mkRow, countsFromRows, COUNTS, selectVisibleEntries, selectTreeCounts, selectViewCounts, bodyOf, overrideGlobal, viewEntriesCache } = ctx;
   await ctx.useMainBackend();
+  // 全读用例必须经真实member接口捕获当前范围；旧entityFixture只用于离屏实体/单条动作。
+  const captureMarkScope = async () => {
+    if (store.getState().dataMode !== 'tauri') return;
+    if (store.getState().backendReloadsInFlight > 0) {
+      await ctx.waitUntil(() => store.getState().backendReloadsInFlight === 0);
+    }
+    const state = store.getState();
+    const query = state.readingSession?.query;
+    if (state.readingSession?.ready && query.layout === state.activeContentLayout
+      && query.view === state.activeViewFilter && query.scope === state.activeFeedFilter
+      && query.filter === state.timelineFilter && query.sort === state.timelineSort) return;
+    store.setState({readingSession:null});
+    await store.getState().reloadFromBackend();
+  };
 
   /* ============================================================
      (e) 已读 / 收藏切换与未读计数
      ============================================================ */
-  await bootFixture();
+  await entityFixture();
+  // 所有旗标写入现在都会精确对账；使用与实体一致的计数，而非旧静态全库数字。
+  S.feedCountsImpl = countsFromRows;
+  store.setState({ feedCounts: new Map(countsFromRows().map((c) => [String(c.feed_id), c])) });
   store.setState({ activeArticleId: '101' });
   S.invokeCalls.length = 0;
   store.getState().toggleCurrentReadStatus();
@@ -23,16 +40,16 @@ export async function run(ctx) {
   checkNew('(e) 标已读：落库 read=true + 条目置位 + 该源未读 -1 + toast 文案正确',
     eReadCall?.args.id === 101 && eReadCall?.args.read === true
     && eRead.entries.find((a) => a.id === '101')?.isRead === true
-    && eRead.feedCounts.get('10')?.unread === 2
+    && eRead.feedCounts.get('10')?.unread === 1
     && eRead.toasts[eRead.toasts.length - 1]?.text === '已标为已读');
   store.getState().toggleCurrentReadStatus();
   await nTick(0);
   const eUnread = store.getState();
   const eUnreadCall = S.invokeCalls.filter((c) => c.cmd === 'set_read').pop();
-  checkNew('(e) 再切回未读：落库 read=false + 未读计数回到 3 + toast 文案正确',
+  checkNew('(e) 再切回未读：落库 read=false + 未读计数回到后端真值 2 + toast 文案正确',
     eUnreadCall?.args.read === false
     && eUnread.entries.find((a) => a.id === '101')?.isRead === false
-    && eUnread.feedCounts.get('10')?.unread === 3
+    && eUnread.feedCounts.get('10')?.unread === 2
     && eUnread.toasts[eUnread.toasts.length - 1]?.text === '已标为未读');
   const eToastCount = store.getState().toasts.length;
   store.getState().toggleCurrentStar();
@@ -42,7 +59,7 @@ export async function run(ctx) {
   checkNew('(e) 收藏切换：落库 starred=true + 收藏计数 +1 + 未读计数不受影响 + 不弹 toast',
     eStarCall?.args.id === 101 && eStarCall?.args.starred === true
     && eStar.entries.find((a) => a.id === '101')?.isStarred === true
-    && eStar.feedCounts.get('10')?.starred === 2 && eStar.feedCounts.get('10')?.unread === 3
+    && eStar.feedCounts.get('10')?.starred === 3 && eStar.feedCounts.get('10')?.unread === 2
     && eStar.toasts.length === eToastCount);
   S.invokeCalls.length = 0;
   const eNoToast = store.getState().toasts.length;
@@ -62,9 +79,11 @@ export async function run(ctx) {
     feedCounts: new Map([['12', { total: 2, unread: 0, starred: 0, today: 0 }]]),
   });
   store.getState().toggleCurrentReadStatus();
+  checkNew('(e) 后端旧计数为 0 时乐观标读不产生负数',
+    store.getState().feedCounts.get('12')?.unread === 0);
   await nTick(0);
-  checkNew('(e) 后端计数已为 0 时标读不产生负数（未读计数夹取在 0）',
-    store.getState().feedCounts.get('12')?.unread === 0
+  checkNew('(e) 标读结束按真实剩余未读对账，修正旧计数为 1',
+    store.getState().feedCounts.get('12')?.unread === 1
     && store.getState().entries.find((a) => a.id === '104')?.isRead === true);
 
   /* ============================================================
@@ -82,10 +101,10 @@ export async function run(ctx) {
      响应经 overrideGlobal 挂起、释放时手动落库（模拟后端在快照读取之后提交）；
      释放的陈旧快照传静态 COUNTS（= set_read 提交前的读数：101 仍未读）。
      ============================================================ */
-  await bootFixture();
+  await entityFixture();
   S.feedCountsImpl = countsFromRows;
   store.setState({
-    settings: { ...store.getState().settings, smartDedup: false },
+    settings: { ...store.getState().settings },
     activeArticleId: '101',
   });
   S.invokeCalls.length = 0;
@@ -132,18 +151,18 @@ export async function run(ctx) {
      整体替换——期望值从「乐观按已加载推算」改为后端真值（本块行级数据：
      feed10 未读 101/103、feed11 未读 201、feed12 未读 104/105；starredOnly
      只标 103/201）。保护意图不变且更强：数字必须等于后端口径而非本地推算。 */
-  await bootFixture();
+  await entityFixture();
   S.feedCountsImpl = countsFromRows;
   store.setState({ activeViewFilter: 'starred', timelineFilter: 'all', activeFeedFilter: 'all', openedReadIds: { '103': true } });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(0);   // api.markAllRead 内部 await getInvoke()，需让出微任务
   const f1 = store.getState();
-  const fMark = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
-  checkNew('(f) 收藏视图全部已读：范围参数 starredOnly=true，且只标该视图可见条目',
-    fMark?.args.starredOnly === true && fMark?.args.feedId === null && fMark?.args.sinceMs === null
+  const fMark = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
+  checkNew('(f) 收藏全读消费真实捕获的102/103，范围外101不被标读',
+    fMark?.args.ids.join(',') === '102,103'
     && f1.entries.find((a) => a.id === '103')?.isRead === true
-    && f1.entries.find((a) => a.id === '101')?.isRead === false
+    && S.backendRows.find((a) => a.id === 101)?.is_read === false
     && f1.entries.find((a) => a.id === '102')?.isRead === true);
   /* 本块 scope = all × article 布局 × starred 视图：被标读的只有 103（feed10）；
      feed11 是 social 布局源，201 两侧（前端可见集/后端范围）都不在范围内 → 计数 1 保持 */
@@ -154,63 +173,66 @@ export async function run(ctx) {
     Object.keys(f1.openedReadIds).length === 0);
   checkNew('(f) 全部已读给出 toast 反馈', f1.toasts.some((t) => t.text === '已全部标为已读'));
 
-  await bootFixture();
+  await entityFixture();
   S.feedCountsImpl = countsFromRows;
   store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'cat-1' });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(0);
-  const fCatCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
+  const fCatCall = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
   const fCat = store.getState();
-  checkNew('(f) 分类范围 → folderId=数字、feedId=null（cat- 前缀不被当作源 id）',
-    fCatCall?.args.folderId === 1 && fCatCall?.args.feedId === null);
+  checkNew('(f) 分类查询folder_id=1且全读载荷恰为该分类article未读成员',
+    S.invokeCalls.find(c=>c.cmd==='list_article_member_ids')?.args.args.folder_id===1
+    && fCatCall?.args.ids.slice().sort((a,b)=>a-b).join(',')==='101,103,104,105');
   /* TASK-107：计数期望值改为后端对账口径（整个分类范围的未读 101/103/104/105
      都被标读：feed10 2→0、feed12 2→0）；分类外的 feed11（201）计数与读态均不受影响 */
   checkNew('(f) 分类范围只标该分类可见条目，分类外条目不受影响',
     fCat.entries.find((a) => a.id === '101')?.isRead === true
     && fCat.entries.find((a) => a.id === '103')?.isRead === true
-    && fCat.entries.find((a) => a.id === '201')?.isRead === false
+    && S.backendRows.find((a) => a.id === 201)?.is_read === false
     && fCat.feedCounts.get('10')?.unread === 0 && fCat.feedCounts.get('12')?.unread === 0
     && fCat.feedCounts.get('11')?.unread === 1);
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: '12' });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(0);
-  const fFeedCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
+  const fFeedCall = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
   const fFeed = store.getState();
-  checkNew('(f) 单源范围 → feedId=12（纯数字 id 提取，不截成 NaN）且只标该源条目',
-    fFeedCall?.args.feedId === 12 && fFeedCall?.args.folderId === null
+  checkNew('(f) 单源查询feed_id=12且全读只写104/105，不混入源10',
+    S.invokeCalls.find(c=>c.cmd==='list_article_member_ids')?.args.args.feed_id===12
+    && fFeedCall?.args.ids.slice().sort((a,b)=>a-b).join(',')==='104,105'
     && fFeed.entries.filter((a) => a.feedId === '12').every((a) => a.isRead)
-    && fFeed.entries.find((a) => a.id === '101')?.isRead === false);
+    && S.backendRows.find((a) => a.id === 101)?.is_read === false);
 
   /* 布局维度：后端范围必须与当前布局同口径——修前不带 layout，文章布局点一次
      会把社交/通知/播客/画廊布局的源一并标读并逐条推远端（审计 round-3 真机：
      可见 14 张、后端写入 74 条，覆盖 5 个布局）。 */
-  await bootFixture();
+  await entityFixture();
   store.getState().selectLayout('social');
   store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', openedReadIds: {} });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(0);
-  const fLayoutCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
-  checkNew('(f) 全部已读带当前布局：layout=social（缺此参数则跨布局误标并推远端）',
-    fLayoutCall?.args.layout === 'social' && fLayoutCall?.args.feedId === null
-    && fLayoutCall?.args.folderId === null);
+  const fLayoutCall = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
+  checkNew('(f) 布局成员捕获后全读只写social未读201/301，article未读不被跨分区标记',
+    fLayoutCall?.args.ids.join(',') === '201,301'
+    && S.backendRows.find(row=>row.id===101)?.is_read===false);
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ dataMode: 'mock', activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'all' });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(0);
   checkNew('(f) mock 模式全部已读：本地生效但不发 IPC（无库可写，绝不伪造落库）',
-    S.invokeCalls.filter((c) => c.cmd === 'mark_all_read').length === 0
+    S.invokeCalls.filter((c) => c.cmd === 'set_read_bulk').length === 0
     && store.getState().entries.find((a) => a.id === '101')?.isRead === true
     && store.getState().toasts.some((t) => t.text === '已全部标为已读'));
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ openedReadIds: { '999': true } });
+  S.feedCountsImpl = countsFromRows;
   S.invokeCalls.length = 0;
   store.getState().markEntriesReadBulk(['101', '102', '103']);
   await nTick(0);
@@ -227,8 +249,8 @@ export async function run(ctx) {
       .slice().sort((a, b) => a - b).join(',') === '101,103');
   checkNew('(f) 批量标读的保留快照是「合并」而非替换（既有记录不丢）',
     store.getState().openedReadIds['999'] === true && store.getState().openedReadIds['101'] === true);
-  checkNew('(f) 批量标读按源聚合未读减量（源A 标 2 条 → 3-2=1）',
-    store.getState().feedCounts.get('10')?.unread === 1);
+  checkNew('(f) 批量标读结束按源对账（源A 两个未读均已标读 → 0）',
+    store.getState().feedCounts.get('10')?.unread === 0);
   S.invokeCalls.length = 0;
   store.getState().markEntriesReadBulk([]);
   checkNew('(f) 空 id 列表批量标读为 no-op（不发 IPC）', S.invokeCalls.length === 0);
@@ -238,12 +260,12 @@ export async function run(ctx) {
      失败语义（本地保持已读假成功、重启回退）。新契约：失败即回滚（乐观读态/
      计数/已读保留快照全部还原），成功 toast 不再提前弹；断言升级为「回滚到位
      + 失败 toast 带重试 + 无假成功提示」，保护更强非弱化。 */
-  await bootFixture();
-  S.rejectCmds.add('mark_all_read');
+  await entityFixture();
+  S.rejectCmds.add('set_read_bulk');
   store.setState({ activeViewFilter: 'all', activeFeedFilter: '10', toasts: [] });
   const p1BeforeCounts = store.getState().feedCounts.get('10')?.unread;
   const p1BeforeOpened = Object.keys(store.getState().openedReadIds).length;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(10);
   const p1After = store.getState();
   checkNew('(p1) 全部已读失败必须可见且带重试入口（TASK-107：无「已全部标为已读」假成功提示）',
@@ -257,9 +279,9 @@ export async function run(ctx) {
   /* ============================================================
      OPT-020 P1-C1：mark-all-read 的重试是不可变范围/视图/布局快照
      ============================================================ */
-  await bootFixture();
+  await entityFixture();
   let opt020MarkAttempt = 0;
-  S.rejectWhen = (cmd) => cmd === 'mark_all_read' && ++opt020MarkAttempt <= 3;
+  S.rejectWhen = (cmd) => cmd === 'set_read_bulk' && ++opt020MarkAttempt <= 3;
   store.setState({
     activeFeedFilter: '10',
     activeViewFilter: 'all',
@@ -270,7 +292,7 @@ export async function run(ctx) {
     errors: [],
   });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(20);
   const opt020MarkAError = store.getState().errors.find((e) => e.key.startsWith('mark:all-read'));
   checkNew('(OPT-020 mark) 失败条目 key 带稳定上下文（同 key 不跨视图/范围合并）',
@@ -288,9 +310,10 @@ export async function run(ctx) {
   checkNew('(OPT-020 mark) 重试再次失败仍保留同上下文可重试入口（不是死按钮）',
     !!opt020MarkARetryError && opt020MarkARetryError.id !== opt020MarkAOldId);
 
-  const opt020Feed12BeforeRetry = store.getState().entries
-    .filter((e) => e.feedId === '12')
-    .map((e) => `${e.id}:${e.isRead}`)
+  const opt020Feed12BeforeRetry = S.backendRows
+    .filter((e) => e.feed_id === 12)
+    .sort((a,b)=>a.id-b.id)
+    .map((e) => `${e.id}:${e.is_read}`)
     .join(',');
   store.setState({
     activeFeedFilter: '12',
@@ -300,7 +323,7 @@ export async function run(ctx) {
     openedReadIds: {},
   });
   S.invokeCalls.length = 0;
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(20);
   const opt020MarkErrors = store.getState().errors.filter(
     (e) => e.key.startsWith('mark:all-read'),
@@ -316,17 +339,14 @@ export async function run(ctx) {
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020MarkAForRetry?.id);
   await nTick(20);
-  const opt020MarkRetryCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
+  const opt020MarkRetryCall = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
   const opt020Feed12AfterRetry = store.getState().entries
     .filter((e) => e.feedId === '12')
+    .sort((a,b)=>Number(a.id)-Number(b.id))
     .map((e) => `${e.id}:${e.isRead}`)
     .join(',');
-  checkNew('(OPT-020 mark) 切到源 12 后重试源 10：后端只收到失败快照的 feed/layout/view 参数',
-    opt020MarkRetryCall?.args.feedId === 10
-    && opt020MarkRetryCall?.args.folderId === null
-    && opt020MarkRetryCall?.args.starredOnly === false
-    && opt020MarkRetryCall?.args.sinceMs === null
-    && opt020MarkRetryCall?.args.layout === 'article');
+  checkNew('(OPT-020 mark) 切到源12后重试源10，仍精确发送原捕获未读成员101/103',
+    opt020MarkRetryCall?.args.ids.join(',') === '101,103');
   checkNew('(OPT-020 mark) 旧重试不把当前源 12 的条目标读',
     opt020Feed12AfterRetry === opt020Feed12BeforeRetry);
   const opt020MarkACache = viewEntriesCache.get('article|all|10');
@@ -336,7 +356,7 @@ export async function run(ctx) {
     && opt020MarkACache.entries.filter((e) => e.feedId === '10').every((e) => e.isRead));
 
   /* 首次写已提交但响应丢失：切 B 后重试返回 affected=0，A 缓存仍须收敛并重新对账。 */
-  await bootFixture();
+  await entityFixture();
   S.feedCountsImpl = countsFromRows;
   store.setState({
     activeFeedFilter: '10',
@@ -350,7 +370,7 @@ export async function run(ctx) {
   const realInvokeForLostResponse = globalThis.__INVOKE__;
   let opt020LostMarkCalls = 0;
   const restoreLostResponse = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-    if (cmd !== 'mark_all_read') return realInvokeForLostResponse(cmd, args);
+    if (cmd !== 'set_read_bulk') return realInvokeForLostResponse(cmd, args);
     opt020LostMarkCalls += 1;
     const call = opt020LostMarkCalls;
     return realInvokeForLostResponse(cmd, args).then((affected) => (
@@ -358,7 +378,7 @@ export async function run(ctx) {
     ));
   });
   try {
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(30);
     const opt020LostError = store.getState().errors.find(
       (e) => e.key.startsWith('mark:all-read'),
@@ -386,7 +406,7 @@ export async function run(ctx) {
   }
 
   /* A 乐观写已进入目标缓存后，用户切 B；A 迟到失败仍必须恢复 A 缓存。 */
-  await bootFixture();
+  await entityFixture();
   store.setState({
     activeFeedFilter: '10',
     activeViewFilter: 'all',
@@ -399,13 +419,13 @@ export async function run(ctx) {
   const realInvokeForAInFlight = globalThis.__INVOKE__;
   let rejectAInFlight = null;
   const restoreAInFlightInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-    if (cmd === 'mark_all_read') {
+    if (cmd === 'set_read_bulk') {
       return new Promise((_resolve, reject) => { rejectAInFlight = reject; });
     }
     return realInvokeForAInFlight(cmd, args);
   });
   try {
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     const aCacheOptimistic = viewEntriesCache.get('article|all|10');
     checkNew('(OPT-020 mark in-flight) 前置：A 的乐观已读已写入 A 目标缓存',
@@ -431,7 +451,7 @@ export async function run(ctx) {
       .join(',');
     checkNew('(OPT-020 mark in-flight) A 在途切 B 后失败：A 缓存按 capturedReadById 恢复未读，B 缓存不变',
       aCacheRestored?.entries.find((e) => e.id === '101')?.isRead === false
-      && aCacheRestored?.entries.find((e) => e.id === '102')?.isRead === true
+      && !aCacheRestored?.entries.some((e) => e.id === '102')
       && aCacheRestored?.entries.find((e) => e.id === '103')?.isRead === false
       && bCacheStateAfter === bCacheStateBefore);
   } finally {
@@ -439,7 +459,7 @@ export async function run(ctx) {
   }
 
   /* 失败恢复必须逐 id 比较操作版本；用户接管后的读态不得被旧快照覆盖。 */
-  await bootFixture();
+  await entityFixture();
   store.setState({
     activeFeedFilter: '10',
     activeViewFilter: 'all',
@@ -452,13 +472,13 @@ export async function run(ctx) {
   const realInvokeForTakeover = globalThis.__INVOKE__;
   let rejectTakeoverMark = null;
   const restoreTakeoverInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-    if (cmd === 'mark_all_read') {
+    if (cmd === 'set_read_bulk') {
       return new Promise((_resolve, reject) => { rejectTakeoverMark = reject; });
     }
     return realInvokeForTakeover(cmd, args);
   });
   try {
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     store.getState().toggleEntryFlag('102', 'isRead');
     await nTick(20);
@@ -479,7 +499,7 @@ export async function run(ctx) {
   }
 
   /* 成功回包同样必须尊重在途用户接管，不能把用户改回的未读再次收敛为已读。 */
-  await bootFixture();
+  await entityFixture();
   store.setState({
     activeFeedFilter: '10',
     activeViewFilter: 'all',
@@ -492,17 +512,17 @@ export async function run(ctx) {
   const realInvokeForSuccessTakeover = globalThis.__INVOKE__;
   let resolveSuccessMark = null;
   const restoreSuccessTakeoverInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-    if (cmd === 'mark_all_read') {
+    if (cmd === 'set_read_bulk') {
       return new Promise((resolve) => { resolveSuccessMark = resolve; });
     }
     return realInvokeForSuccessTakeover(cmd, args);
   });
   try {
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     store.getState().toggleEntryFlag('102', 'isRead');
     await nTick(20);
-    resolveSuccessMark?.(2);
+    resolveSuccessMark?.([{id:101,feed_id:10},{id:103,feed_id:10}]);
     await nTick(30);
     const aCacheAfterSuccessTakeover = viewEntriesCache.get('article|all|10');
     checkNew('(OPT-020 mark success takeover) 成功回包只收敛版本未变的 id：用户改回的 102 保持未读，101/103 收敛已读',
@@ -517,9 +537,9 @@ export async function run(ctx) {
   }
 
   /* retry attempt 重新建立版本：A 失败→B→重试 A 失败，A 的 entries/cache 仍恢复未读。 */
-  await bootFixture();
+  await entityFixture();
   let abAAttempt = 0;
-  S.rejectWhen = (cmd) => cmd === 'mark_all_read' && ++abAAttempt <= 2;
+  S.rejectWhen = (cmd) => cmd === 'set_read_bulk' && ++abAAttempt <= 2;
   store.setState({
     activeFeedFilter: '10',
     activeViewFilter: 'all',
@@ -529,7 +549,7 @@ export async function run(ctx) {
     toasts: [],
     errors: [],
   });
-  store.getState().markCurrentViewAllRead();
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
   await nTick(20);
   const abAError = store.getState().errors.find((e) => e.key.startsWith('mark:all-read'));
   store.getState().toggleEntryFlag('102', 'isRead');
@@ -557,7 +577,7 @@ export async function run(ctx) {
   S.rejectWhen = null;
 
   /* A 在途切 B 后失败：计数按 attempt 读态/feedId 回补，不依赖 current entries。 */
-  await bootFixture();
+  await entityFixture();
   store.setState({
     activeFeedFilter: '10',
     activeViewFilter: 'all',
@@ -566,12 +586,13 @@ export async function run(ctx) {
     openedReadIds: {},
     toasts: [],
     errors: [],
-    settings: { ...store.getState().settings, smartDedup: false },
+    settings: { ...store.getState().settings },
   });
   const realInvokeForCountRestore = globalThis.__INVOKE__;
+  await captureMarkScope();
   let rejectCountRestoreMark = null;
   const restoreCountRestoreInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-    if (cmd === 'mark_all_read') {
+    if (cmd === 'set_read_bulk') {
       return new Promise((_resolve, reject) => { rejectCountRestoreMark = reject; });
     }
     return realInvokeForCountRestore(cmd, args);
@@ -579,7 +600,7 @@ export async function run(ctx) {
   S.feedCountsPlan = { mode: 'defer' };
   try {
     const feed10UnreadBefore = store.getState().feedCounts.get('10')?.unread;
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     const feed10UnreadOptimistic = store.getState().feedCounts.get('10')?.unread;
     store.setState((s) => ({
@@ -597,7 +618,7 @@ export async function run(ctx) {
     restoreCountRestoreInvoke();
   }
 
-  await bootFixture();
+  await entityFixture();
   S.rejectCmds.add('set_read');
   store.setState({ toasts: [], settings: { ...store.getState().settings, markReadOnOpen: true } });
   store.getState().selectArticle('101');
@@ -610,7 +631,7 @@ export async function run(ctx) {
      TASK-093 加强（审查 F4：本条修前代码下也通过，无判别力）：把「失败后不得
      残留乐观值 + 失败 toast」并入本条——修前（静默 catch / 回滚被去掉）下本条
      变红，乐观置位与回滚两侧各有判据。 */
-  await bootFixture();
+  await entityFixture();
   S.rejectCmds.add('set_read');
   store.setState({ toasts: [] });
   const p2bBefore = store.getState().entries.find((e) => e.id === '101')?.isRead;
@@ -628,7 +649,7 @@ export async function run(ctx) {
     && store.getState().toasts.some((t) => t.text.startsWith('标读保存失败：')));
 
   /* (p2c) CF-03：搜索/命令面板锚定打开（anchorToArticle）的标读失败同样可见 */
-  await bootFixture();
+  await entityFixture();
   S.rejectCmds.add('set_read');
   store.setState({ toasts: [], settings: { ...store.getState().settings, markReadOnOpen: true } });
   await store.getState().anchorToArticle('101');
@@ -636,7 +657,7 @@ export async function run(ctx) {
   checkNew('(p2c) 锚定打开标读失败必须可见（修前无声：本地已置读、库里没有）',
     store.getState().toasts.some((t) => t.text.startsWith('标读失败：')));
 
-  await bootFixture();
+  await entityFixture();
   S.failReload = { message: 'db busy' };
   store.setState({ toasts: [] });
   await store.getState().reloadFromBackend().catch(() => {});
@@ -661,7 +682,7 @@ export async function run(ctx) {
      成功；两次 toggle 在同一同步帧内完成（连点），click1 的迟到失败在其后才
      落地。修前（「再翻一次当前值」回滚）：click1 迟到的 catch 把 click2 已落库
      的 false 再翻回 true——UI=true / DB=false，本条红。 */
-  await bootFixture();
+  await entityFixture();
   S.rejectWhen = (cmd, args) => cmd === 'set_read' && args.read === true;
   store.setState({ toasts: [] });
   const p3f2ReadBefore = store.getState().entries.find((e) => e.id === '101')?.isRead;
@@ -674,7 +695,7 @@ export async function run(ctx) {
     && store.getState().toasts.some((t) => t.text.startsWith('标读保存失败：')));
 
   /* F2 收藏连点（set_starred 路径同形） */
-  await bootFixture();
+  await entityFixture();
   S.rejectWhen = (cmd, args) => cmd === 'set_starred' && args.starred === true;
   store.setState({ toasts: [] });
   const p3f2StarBefore = store.getState().entries.find((e) => e.id === '101')?.isStarred;
@@ -687,7 +708,7 @@ export async function run(ctx) {
     && store.getState().toasts.some((t) => t.text.startsWith('收藏保存失败：')));
 
   /* M2c（审查：收藏失败回滚在修后回归网下全绿）：收藏单击失败必须回滚 + 计数复原 */
-  await bootFixture();
+  await entityFixture();
   S.rejectCmds.add('set_starred');
   store.setState({ toasts: [] });
   const p3f2StarOrig = store.getState().entries.find((e) => e.id === '101')?.isStarred;
@@ -699,7 +720,7 @@ export async function run(ctx) {
     && store.getState().toasts.some((t) => t.text.startsWith('收藏保存失败：')));
 
   /* F3 阅读器 toggleCurrentReadStatus：成功提示只在落库成功后；失败回滚且只出失败提示 */
-  await bootFixture();
+  await entityFixture();
   S.rejectCmds.add('set_read');
   store.setState({ activeArticleId: '101', toasts: [] });
   store.getState().toggleCurrentReadStatus();
@@ -712,7 +733,7 @@ export async function run(ctx) {
     && store.getState().toasts.some((t) => t.text.startsWith('标读状态保存失败：'))
     && !store.getState().toasts.some((t) => t.text === '已标为已读'));
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ activeArticleId: '101', toasts: [] });
   store.getState().toggleCurrentReadStatus();
   await nTick(30);
@@ -720,7 +741,7 @@ export async function run(ctx) {
     store.getState().entries.find((a) => a.id === '101')?.isRead === true
     && store.getState().toasts.some((t) => t.text === '已标为已读'));
 
-  await bootFixture();
+  await entityFixture();
   S.rejectCmds.add('set_starred');
   store.setState({ activeArticleId: '103', toasts: [] });
   store.getState().toggleCurrentStar();
@@ -731,7 +752,7 @@ export async function run(ctx) {
     && store.getState().toasts.some((t) => t.text.startsWith('收藏状态保存失败：')));
 
   /* F3 阅读器翻译失败：rawTranslatedIds 按「无半截未消毒产物即清」规则处理（成对） */
-  await bootFixture();
+  await entityFixture();
   S.aiTr = { deltas: [], error: '限流', reject: null, finish: true, holdIds: [] };
   store.setState({ toasts: [] });
   store.getState().selectArticle('201');
@@ -743,7 +764,7 @@ export async function run(ctx) {
     && store.getState().translateErrors['201'] === '限流'
     && store.getState().isShowingTranslatedProse === false);
 
-  await bootFixture();
+  await entityFixture();
   S.aiTr = { deltas: ['<b>半截'], error: '限流', reject: null, finish: true, holdIds: [] };
   store.setState((s) => ({
     toasts: [],
@@ -757,7 +778,7 @@ export async function run(ctx) {
     store.getState().rawTranslatedIds['201'] === true
     && bodyOf(store.getState(), '201').translatedContent === '<b>半截');
 
-  await bootFixture();
+  await entityFixture();
   S.aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
   store.setState({ toasts: [] });
   store.getState().selectArticle('201');
@@ -770,7 +791,7 @@ export async function run(ctx) {
 
   /* M6（审查：onError 路径不清标记在修后回归网下全绿）：卡片翻译流内错误且
      无半截 → 标记清除（既有 (l2) 只盖 .catch 路径与「有半截保留」侧）。 */
-  await bootFixture();
+  await entityFixture();
   S.aiTr = { deltas: [], error: '限流', reject: null, finish: true, holdIds: [] };
   store.setState({ toasts: [] });
   store.getState().translateEntry('201');
@@ -779,7 +800,7 @@ export async function run(ctx) {
     store.getState().rawTranslatedIds['201'] === undefined
     && store.getState().translateErrors['201'] === '限流');
 
-  await bootFixture();
+  await entityFixture();
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   store.getState().translateEntry('201');
   store.getState().translateEntry('202');
@@ -794,7 +815,7 @@ export async function run(ctx) {
     && lTrErr.toasts[lTrErr.toasts.length - 1]?.text === '翻译失败：限流'
     && lTrErr.toasts[lTrErr.toasts.length - 1]?.action?.label === '重试');
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [] });
   S.aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
   store.getState().translateEntry('301', { silent: true });
@@ -811,7 +832,8 @@ export async function run(ctx) {
     && store.getState().toasts[store.getState().toasts.length - 1]?.text === '演示模式不支持 AI 服务');
 
   /* ---------- L1：批量标读索引化后语义不变（只增复杂度优化，行为契约不变） ---------- */
-  await bootFixture();
+  await entityFixture();
+  S.feedCountsImpl = countsFromRows;
   const l1Ids = store.getState().entries.map((e) => e.id);
   S.invokeCalls.length = 0;
   store.getState().markEntriesReadBulk(l1Ids);
@@ -830,9 +852,9 @@ export async function run(ctx) {
     && S.invokeCalls.filter((c) => c.cmd === 'set_read_bulk').length === 1
     && S.invokeCalls.filter((c) => c.cmd === 'set_read').length === 0
     && l1BulkIds === '101,103,104,105,201,301');
-  checkNew('(L1) 未读计数仍按源聚合扣减：源10 3→1、源12 2→0、源11 2→1、源20 1→0',
-    l1.feedCounts.get('10')?.unread === 1 && l1.feedCounts.get('12')?.unread === 0
-    && l1.feedCounts.get('11')?.unread === 1 && l1.feedCounts.get('20')?.unread === 0);
+  checkNew('(L1) 六个未读全部落库后按源精确对账，四源未读均为0',
+    l1.feedCounts.get('10')?.unread === 0 && l1.feedCounts.get('12')?.unread === 0
+    && l1.feedCounts.get('11')?.unread === 0 && l1.feedCounts.get('20')?.unread === 0);
   checkNew('(L1) 「已读保留」快照按被标读的未读项写入（6 条；本就已读的 102/202 不重复记）',
     Object.keys(l1.openedReadIds).length === 6
     && l1.openedReadIds['101'] === true && l1.openedReadIds['105'] === true
@@ -842,7 +864,7 @@ export async function run(ctx) {
   checkNew('(L1) 未知 id 被忽略：不发 IPC、不改状态', S.invokeCalls.length === 0);
 
   /* ---------- L2：feedCounts 缺项 → 有意的保守设计（本断言即该设计的锚） ---------- */
-  await bootFixture();
+  await entityFixture();
   const l2Before = selectViewCounts(store.getState()).all;
   const l2Counts = new Map(store.getState().feedCounts);
   l2Counts.delete('12');                               // 模拟后端精确计数缺该源
@@ -873,13 +895,14 @@ export async function run(ctx) {
     const rows107 = [];
     for (let i = 0; i < 600; i += 1) rows107.push(mkRow({ id: 40000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
     S.backendRows = rows107;
-    /* 注意：不能走 bootFixture()——resetStore 会复位 feedCountsImpl/backendRows，
+    /* 注意：不能走 entityFixture()——resetStore 会复位 feedCountsImpl/backendRows，
        自定义夹具必须在 resetStore 之后、bootstrapFromBackend 之前就位 */
     await store.getState().bootstrapFromBackend();
     /* 极端分页形态：范围 600 条未读、前端仅加载 1 条（其余 599 条不在册） */
     store.setState((s) => ({ entries: s.entries.slice(0, 1) }));
+    viewEntriesCache.clear(); // 600/1前置必须连缓存也只知1行，不能残留首500行的旧可投影副本。
     S.invokeCalls.length = 0;
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     checkNew('(t104-markall-count-authoritative) 600/1 探针：全部已读成功后未读计数=后端口径 0（修前按已加载推算残留 599）',
       store.getState().feedCounts.get('10')?.unread === 0
@@ -898,8 +921,8 @@ export async function run(ctx) {
       mkRow({ id: 41005, feed_id: 12, published_at: iso(NOW - 240000) }),
     ];
     await store.getState().bootstrapFromBackend();
-    S.rejectCmds.add('mark_all_read');
-    store.getState().markCurrentViewAllRead();
+    S.rejectCmds.add('set_read_bulk');
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     const rb107 = store.getState();
     checkNew('(t104-markall-failure-rollback) markAllRead 失败：无「已全部标为已读」假成功提示，失败 toast 可见且带重试',
@@ -930,7 +953,8 @@ export async function run(ctx) {
       && single107.feedCounts.get('12')?.unread === agg107.get('12')?.unread && single107.feedCounts.get('12')?.unread === 1);
     checkNew('(t104-single-read-count) 同文副本不重复扣减：主条目标读后，副本行（42003）读态与所属源计数均不变',
       agg107.get('11')?.unread === 2
-      && single107.entries.find((a) => a.id === '42003')?.isRead === false);
+      && S.backendRows.find((a) => a.id === 42003)?.is_read === false
+      && !single107.entries.some((a) => a.id === '42003'));
 
     /* ---------- t104-scope-isolation：范围外布局/范围计数不受影响 ---------- */
     await resetStore();
@@ -944,11 +968,12 @@ export async function run(ctx) {
       mkRow({ id: 43013, feed_id: 12, published_at: iso(NOW - 300000) }),
     ];
     await store.getState().bootstrapFromBackend();
+    store.getState().selectFeed('12');
+    await ctx.waitUntil(() => store.getState().readingSession?.ready && store.getState().backendReloadsInFlight === 0);
     /* 范围内仅部分条目已加载（分页快照形态）：feed12 共 3 条未读，在册 2 条 */
     store.setState((s) => ({ entries: s.entries.filter((a) => a.id === '43011' || a.id === '43012') }));
-    store.setState({ activeFeedFilter: '12' });
     const isoBefore107 = store.getState();
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     const isoAfter107 = store.getState();
     checkNew('(t104-scope-isolation) 单源范围全部已读（3 条未读仅 2 条在册）：该源计数=后端口径 0（修前残留 1）',
@@ -978,8 +1003,8 @@ export async function run(ctx) {
       mkRow({ id: 47002, feed_id: 10, published_at: iso(NOW - 60000) }),
     ];
     await store.getState().bootstrapFromBackend();
-    S.rejectCmds.add('mark_all_read');
-    store.getState().markCurrentViewAllRead();            // 乐观翻转 47001/47002 → read
+    S.rejectCmds.add('set_read_bulk');
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();            // 乐观翻转 47001/47002 → read
     store.getState().toggleEntryFlag('47001', 'isRead');  // 用户 read→unread（set_read(false) 落库）
     store.getState().toggleEntryFlag('47001', 'isRead');  // 用户 unread→read（最终意图=已读，set_read(true) 落库）
     store.getState().toggleEntryFlag('47002', 'isStarred'); // TASK-118：窗口内收藏写（set_starred(true) 落库；只 bump isStarred 版本）
@@ -1006,8 +1031,9 @@ export async function run(ctx) {
     S.backendRows = rows107F2;
     await store.getState().bootstrapFromBackend();
     store.setState((s) => ({ entries: s.entries.slice(0, 1) }));
+    viewEntriesCache.clear(); // 此反例故意只有1条已知属性；全读仍捕获600IDs。
     S.rejectCmds.add('counts_snapshot'); // 仅注入对账重取失败（mark_all_read 本身成功落库）
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10);
     const rF2 = store.getState();
     checkNew('(t104-reconcile-retry) 对账重取失败不再静默：诊断 toast 可见且不与「保存失败」混淆（标读本身已成功）',
@@ -1039,11 +1065,11 @@ export async function run(ctx) {
     let rejectMarkAll107v = null;
     // R1：__INVOKE__ 覆盖必须 finally 复原（成功/异常都保全原值）
     const restoreInvoke107v = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-      if (cmd === 'mark_all_read') return new Promise((_resolve, rej) => { rejectMarkAll107v = rej; });
+      if (cmd === 'set_read_bulk') return new Promise((_resolve, rej) => { rejectMarkAll107v = rej; });
       return realInvoke107v(cmd, args);
     });
     try {
-      store.getState().markCurrentViewAllRead(); // 乐观翻转 48001/48002 → read（计数 2→0，版本快照 v1）
+      await captureMarkScope(); store.getState().markCurrentViewAllRead(); // 乐观翻转 48001/48002 → read（计数 2→0，版本快照 v1）
       await nTick(0);
       /* 外部写入者（同步拉取语义）：绕过前端直接落库，行 is_read=1——不触发 flipEntryFlag/markEntriesRead */
       S.backendRows.forEach((r) => { r.is_read = true; }); // 外部落库为 wire 布尔
@@ -1080,11 +1106,11 @@ export async function run(ctx) {
     let rejectMarkAll107f = null;
     // R1：__INVOKE__ 覆盖必须 finally 复原
     const restoreInvoke107f = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-      if (cmd === 'mark_all_read') return new Promise((_resolve, rej) => { rejectMarkAll107f = rej; });
+      if (cmd === 'set_read_bulk') return new Promise((_resolve, rej) => { rejectMarkAll107f = rej; });
       return realInvoke107f(cmd, args);
     });
     try {
-      store.getState().markCurrentViewAllRead(); // 声明 #1：乐观翻转 → read（计数 2→0）
+      await captureMarkScope(); store.getState().markCurrentViewAllRead(); // 声明 #1：乐观翻转 → read（计数 2→0）
       await nTick(0);
       await store.getState().reloadFromBackend(); // 快照替换（行仍未读：mark_all_read 未落库）→ 计数重取 2、bump
       rejectMarkAll107f({ message: '注入失败:mark_all_read' });
@@ -1093,7 +1119,7 @@ export async function run(ctx) {
       checkNew('(t104-snapshot-fresh-claim-rollback) 陈旧声明失效：快照后行保持未读、计数保持重取值 2（不被陈旧回滚踩动）',
         staleClaim107.entries.every((a) => !a.isRead)
         && staleClaim107.feedCounts.get('10')?.unread === 2);
-      store.getState().markCurrentViewAllRead(); // 声明 #2（快照后新建）：乐观翻转 → read（计数 2→0）
+      await captureMarkScope(); store.getState().markCurrentViewAllRead(); // 声明 #2（快照后新建）：乐观翻转 → read（计数 2→0）
       await nTick(0);
       rejectMarkAll107f({ message: '注入失败:mark_all_read' });
       await nTick(10);
@@ -1137,11 +1163,11 @@ export async function run(ctx) {
     let rejectMarkAll118 = null;
     // R1：__INVOKE__ 覆盖必须 finally 复原
     const restoreInvoke118 = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-      if (cmd === 'mark_all_read') return new Promise((_res, rej) => { rejectMarkAll118 = rej; });
+      if (cmd === 'set_read_bulk') return new Promise((_res, rej) => { rejectMarkAll118 = rej; });
       return realInvoke118(cmd, args);
     });
     try {
-      store.getState().markCurrentViewAllRead();              // 全部已读在途（乐观：read、unread 0，isRead 版本快照 v1）
+      await captureMarkScope(); store.getState().markCurrentViewAllRead();              // 全部已读在途（乐观：read、unread 0，isRead 版本快照 v1）
       await nTick(0);
       store.getState().toggleEntryFlag('52001', 'isStarred'); // 用户收藏（set_starred(true) 落库；只 bump isStarred 版本）
       await nTick(0);
@@ -1274,13 +1300,13 @@ export async function run(ctx) {
       mkRow({ id: 58002, feed_id: 10, published_at: iso(NOW - 60000) }),
     ];
     await store.getState().bootstrapFromBackend();
-    S.rejectCmds.add('mark_all_read');
-    store.getState().markCurrentViewAllRead();
+    S.rejectCmds.add('set_read_bulk');
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10); // 第一轮失败回滚（两行恢复未读、版本停在 v1）
     checkNew('(t118-markall-twice) 第一轮全部已读失败：回滚到位（两行未读、unread=2）',
       store.getState().entries.every((a) => !a.isRead)
       && store.getState().feedCounts.get('10')?.unread === 2);
-    store.getState().markCurrentViewAllRead();
+    await captureMarkScope(); store.getState().markCurrentViewAllRead();
     await nTick(10); // 第二轮失败回滚：乐观写入重新翻转（bump → v2），快照取自首轮回滚后的现值
     checkNew('(t118-markall-twice) 第二轮全部已读失败：新快照（v2）下回滚照常恢复——机制不被首轮 bump/回滚瘫痪、计数不重复回补（两行未读、unread=2、无假成功提示）',
       store.getState().entries.every((a) => !a.isRead)
@@ -1290,4 +1316,52 @@ export async function run(ctx) {
 
     await resetStore(); // 夹具复位：不把 rejectCmds / 大夹具残留带给后续块
   }
+
+  // 固定成员的全部已读重试：上方no-session兼容范围参数保护仍保留；
+  // 这里用真实会话证明离屏重试只消费失败时600成员，不把后来新增文章或当前B范围带入。
+  await resetStore({ activeFeedFilter: '10' });
+  S.backendRows = [
+    ...Array.from({length:600},(_,i)=>mkRow({id:61000+i,feed_id:10,published_at:iso(NOW-i*1000)})),
+    mkRow({id:62000,feed_id:12}),
+  ];
+  S.feedCountsImpl = countsFromRows;
+  await store.getState().reloadFromBackend();
+  const sessionMembers = [...store.getState().readingSession.memberIds];
+  S.rejectCmds.add('set_read_bulk');
+  await captureMarkScope(); store.getState().markCurrentViewAllRead();
+  await ctx.waitUntil(() => store.getState().errors.some((error) => error.key.startsWith('mark:all-read:')));
+  const firstSessionError = store.getState().errors.find((error) => error.key.startsWith('mark:all-read:'));
+  checkNew('(session mark retry) 首次失败恢复500在册状态，完整600成员与未读计数都保留',
+    store.getState().entries.length === 500 && store.getState().entries.every((entry) => !entry.isRead)
+    && store.getState().readingSession.memberIds.length === 600 && store.getState().feedCounts.get('10').unread === 600);
+  store.getState().retryError(firstSessionError.id);
+  await ctx.waitUntil(() => store.getState().errors.some((error) => error.key === firstSessionError.key && error.id !== firstSessionError.id));
+  const retrySessionError = store.getState().errors.find((error) => error.key === firstSessionError.key);
+  checkNew('(session mark retry) 同会话重试再次失败仍留下原上下文入口',
+    retrySessionError.id !== firstSessionError.id && typeof retrySessionError.action?.run === 'function');
+  S.backendRows.unshift(mkRow({id:63000,feed_id:10,published_at:iso(NOW+1000)}));
+  store.getState().selectFeed('12');
+  await ctx.waitUntil(() => store.getState().readingSession?.ready && store.getState().backendReloadsInFlight === 0);
+  S.rejectCmds.delete('set_read_bulk');
+  S.invokeCalls.length = 0;
+  store.getState().retryError(retrySessionError.id);
+  await ctx.waitUntil(() => store.getState().feedCounts.get('10')?.unread === 1);
+  checkNew('(session mark retry) 切到B后重试精确发送原A600成员，一次bulk且无动态范围命令',
+    S.invokeCalls.filter((call) => call.cmd === 'set_read_bulk').length === 1
+    && S.invokeCalls.find((call) => call.cmd === 'set_read_bulk').args.ids.join(',') === sessionMembers.join(',')
+    && !S.invokeCalls.some((call) => call.cmd === 'mark_all_read'));
+  checkNew('(session mark retry) 新增A文章与B文章均不被旧重试标读，A原600身份实际已读',
+    !S.backendRows.find((row) => row.id === 63000).is_read && !S.backendRows.find((row) => row.id === 62000).is_read
+    && S.backendRows.filter((row) => row.id >= 61000 && row.id < 61600).every((row) => row.is_read));
+  checkNew('(session mark retry) 当前B窗口不被A重试改写，源计数和当前成员保持真实结果',
+    store.getState().readingSession.memberIds.join(',') === '62000'
+    && store.getState().entries.length === 1 && store.getState().entries[0].id === '62000' && !store.getState().entries[0].isRead
+    && store.getState().feedCounts.get('12').unread === 1);
+  await resetStore();
+  S.invokeCalls.length=0;
+  store.getState().markCurrentViewAllRead();
+  await nTick();
+  checkNew('(session mark unavailable) Tauri无会话时明确未就绪，不能退到动态全范围命令',
+    !S.invokeCalls.some(call=>['set_read','set_read_bulk','mark_all_read'].includes(call.cmd))
+    &&store.getState().toasts.some(toast=>toast.text==='列表尚未就绪，请加载后重试'));
 }

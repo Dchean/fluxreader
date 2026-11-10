@@ -698,13 +698,13 @@ fn staged_refresh_recomputes_stale_body_text_on_historical_fulltext_refresh() {
     )
     .unwrap();
 
-    // 直连刷新：guid 变化但规范化 URL 命中，RSS 只带摘要
+    // 同一真实 GUID 的直连刷新，RSS 只带摘要，已提取全文继续受保护
     let parsed = ingestion::ParsedFeed {
         title: Some("历史源".into()),
         site_url: None,
         icon: None,
         articles: vec![direct_article(
-            "ft-new",
+            "ft-old",
             "http://127.0.0.1/ft2",
             "标题二",
             "<p>新RSS摘要二</p>",

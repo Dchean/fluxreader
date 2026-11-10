@@ -13,7 +13,10 @@
     "translate_mode": "off",
     "fetch_failed": false,
     "fetch_error": null,
-    "last_fetched_at": null
+    "last_fetched_at": null,
+    "sync_id": "source-fixture",
+    "subscription_state": "active",
+    "effective_layout": "article"
   },
   "article_list_item": {
     "id": 42,
@@ -39,6 +42,11 @@
     "ai_summary_sig": "sig-summary-fixture",
     "translated_sig": "sig-translated-fixture",
     "first_seen_at": "2026-09-18T00:00:00+08:00",
-    "published_at_source": "feed_clamped"
+    "published_at_source": "feed_clamped",
+    "image_count": 1,
+    "media_revision": 3,
+    "retained": false,
+    "body_missing": false,
+    "gallery_first_image_url": "https://e.example/img.png"
   }
 }

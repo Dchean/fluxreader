@@ -42,7 +42,7 @@ pub fn clear_binding_incomplete_attempts(conn: &Connection) -> AppResult<()> {
 /// 当前库是否至少有一个远端 feed 绑定。
 pub fn has_remote_feed_binding(conn: &Connection) -> AppResult<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM feeds WHERE remote_id IS NOT NULL)",
+        "SELECT EXISTS(SELECT 1 FROM feeds WHERE active = 1 AND remote_id IS NOT NULL)",
         [],
         |r| r.get::<_, i64>(0),
     )? != 0)
@@ -50,7 +50,7 @@ pub fn has_remote_feed_binding(conn: &Connection) -> AppResult<bool> {
 
 pub fn remote_feed_binding_count(conn: &Connection) -> AppResult<i64> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL",
+        "SELECT COUNT(*) FROM feeds WHERE active = 1 AND remote_id IS NOT NULL",
         [],
         |r| r.get(0),
     )?)
@@ -61,7 +61,7 @@ pub fn remote_feed_binding_count(conn: &Connection) -> AppResult<i64> {
 pub fn unbound_remote_feeds(conn: &Connection) -> AppResult<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, feed_url FROM feeds
-         WHERE origin = 'remote' AND remote_id IS NULL
+         WHERE active = 1 AND origin = 'remote' AND remote_id IS NULL
          ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -195,9 +195,12 @@ pub struct FeedRow {
     pub fetch_failed: bool,
     pub fetch_error: Option<String>,
     pub last_fetched_at: Option<String>,
+    pub sync_id: String,
+    pub subscription_state: String,
+    pub effective_layout: String,
 }
 
-const FEED_COLS: &str = "id, folder_id, feed_url, site_url, title, favicon_url, layout, auto_summary, auto_translate, summary_mode, translate_mode, fetch_failed, fetch_error, last_fetched_at";
+const FEED_COLS: &str = "id, COALESCE(folder_id, 0), feed_url, site_url, title, favicon_url, layout, auto_summary, auto_translate, summary_mode, translate_mode, fetch_failed, fetch_error, last_fetched_at, sync_id, CASE active WHEN 1 THEN 'active' ELSE 'retained' END, CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END";
 
 fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FeedRow> {
     let auto_summary = r.get::<_, i64>(7)? != 0;
@@ -221,11 +224,22 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FeedRow> {
         fetch_failed: r.get::<_, i64>(11)? != 0,
         fetch_error: r.get(12)?,
         last_fetched_at: r.get(13)?,
+        sync_id: r.get(14)?,
+        subscription_state: r.get(15)?,
+        effective_layout: r.get(16)?,
     })
 }
 
 pub fn list_feeds(conn: &Connection) -> AppResult<Vec<FeedRow>> {
-    let mut stmt = conn.prepare(&format!("SELECT {FEED_COLS} FROM feeds ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FEED_COLS} FROM feeds WHERE active = 1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([], feed_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn list_article_sources(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+    let mut stmt = conn.prepare(&format!("SELECT {FEED_COLS} FROM feeds WHERE active=1 OR EXISTS(SELECT 1 FROM articles a WHERE a.feed_id=feeds.id AND a.is_starred=1) ORDER BY id"))?;
     let rows = stmt.query_map([], feed_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -327,6 +341,32 @@ pub fn insert_feed_origin_modes(
     translate_mode: FeedAiMode,
     origin: &str,
 ) -> AppResult<i64> {
+    let retained = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = ?1 AND active = 0",
+            [feed_url],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(id) = retained {
+        conn.execute(
+            "UPDATE feeds SET active = 1, lifecycle_version = lifecycle_version + 1,
+            folder_id = ?1, layout = ?2, summary_mode = ?3, translate_mode = ?4,
+            title = ?5, site_url = COALESCE(?6,site_url), origin = ?7 WHERE id = ?8",
+            params![
+                folder_id,
+                layout,
+                summary_mode.as_str(),
+                translate_mode.as_str(),
+                title,
+                site_url,
+                origin,
+                id
+            ],
+        )?;
+        remove_feed_tombstone(conn, feed_url)?;
+        return Ok(id);
+    }
     conn.execute(
         "INSERT INTO feeds (feed_url, site_url, title, favicon_url, folder_id, layout,
                             auto_summary, auto_translate, summary_mode, translate_mode, origin)
@@ -375,7 +415,29 @@ pub fn explicit_feed_title<'a>(title: &'a str, feed_url: &str) -> Option<&'a str
 }
 
 pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
-    conn.execute("DELETE FROM feeds WHERE id = ?1", params![id])?;
+    super::contents::with_write_savepoint(conn, "retain_unsubscribed", || {
+        conn.execute(
+            "UPDATE feeds SET lifecycle_version = lifecycle_version + 1 WHERE id=?1 AND active=1",
+            [id],
+        )?;
+        conn.execute(
+            "INSERT INTO source_tombstones(source_id,lifecycle_version,feed_url)
+            SELECT sync_id,lifecycle_version,feed_url FROM feeds WHERE id=?1
+            ON CONFLICT(source_id) DO UPDATE SET lifecycle_version=excluded.lifecycle_version,
+                feed_url=excluded.feed_url,deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            [id],
+        )?;
+        conn.execute("UPDATE feeds SET active = 0, fetch_generation = fetch_generation + 1,
+            layout = CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END
+            WHERE id = ?1", [id])?;
+        conn.execute(
+            "DELETE FROM articles WHERE feed_id = ?1 AND is_starred = 0",
+            [id],
+        )?;
+        // Keep the stable source identity and explicit exclusion even when no saved article
+        // remains; re-subscribing can recover this identity without inventing a new source.
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -449,7 +511,7 @@ pub struct FeedRefreshAttempt {
 pub fn begin_feed_refresh(conn: &Connection, feed_id: i64) -> AppResult<FeedRefreshAttempt> {
     let tx = conn.unchecked_transaction()?;
     let changed = tx.execute(
-        "UPDATE feeds SET fetch_generation = fetch_generation + 1 WHERE id = ?1",
+        "UPDATE feeds SET fetch_generation = fetch_generation + 1 WHERE id = ?1 AND active = 1",
         params![feed_id],
     )?;
     if changed == 0 {
@@ -510,7 +572,7 @@ pub fn feeds_due_for_refresh_candidates(
 ) -> AppResult<Vec<FeedRefreshCandidate>> {
     let mut stmt = conn.prepare(
         "SELECT id, feed_url FROM feeds
-         WHERE (last_fetched_at IS NULL
+         WHERE active = 1 AND (last_fetched_at IS NULL
             OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
                  AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
            AND (?2 OR origin != 'remote')",
@@ -542,8 +604,9 @@ pub fn feeds_all_candidates(
     conn: &Connection,
     include_remote: bool,
 ) -> AppResult<Vec<FeedRefreshCandidate>> {
-    let mut stmt =
-        conn.prepare("SELECT id, feed_url FROM feeds WHERE (?1 OR origin != 'remote')")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, feed_url FROM feeds WHERE active = 1 AND (?1 OR origin != 'remote')",
+    )?;
     let rows = stmt.query_map(params![include_remote], |r| Ok((r.get(0)?, r.get(1)?)))?;
     collect_refresh_candidates(rows)
 }
@@ -873,9 +936,10 @@ pub fn feed_remote_info(conn: &Connection, id: i64) -> AppResult<(String, Option
 pub fn feed_folder_label(conn: &Connection, id: i64) -> AppResult<Option<String>> {
     let folder_id: Option<i64> = conn
         .query_row("SELECT folder_id FROM feeds WHERE id = ?1", [id], |r| {
-            r.get(0)
+            r.get::<_, Option<i64>>(0)
         })
-        .optional()?;
+        .optional()?
+        .flatten();
     match folder_id {
         Some(fid) => super::folders::folder_name(conn, fid),
         None => Ok(None),

@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError, extractErrorCode } from '../../lib/api';
 import {
-  applyCategoryAiFlagPatch,
+  applyCategoryAiModePatch,
   applyFeedAiModePatch,
   reconcileCategories,
 } from '../internals';
@@ -64,6 +64,8 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           layout,
           autoSummary: false,
           autoTranslate: false,
+          summaryMode: 'inherit' as const,
+          translateMode: 'inherit' as const,
           feeds: [],
         },
       ];
@@ -294,8 +296,8 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       const binding = get().feedIndex.get(feedId);
       const cur = binding?.feed;
       if (!cur) return;
-      const curSummaryMode = normalizeFeedAiMode(cur.summaryMode, cur.autoSummary);
-      const curTranslateMode = normalizeFeedAiMode(cur.translateMode, cur.autoTranslate);
+      const curSummaryMode = normalizeFeedAiMode(cur.summaryMode);
+      const curTranslateMode = normalizeFeedAiMode(cur.translateMode);
       const targetFolderId = Number(next.catId.replace('cat-', ''));
       const args: Parameters<typeof api.updateFeed>[0] = { id: Number(feedId) };
       if (next.title.trim() && next.title.trim() !== cur.name) args.title = next.title.trim();
@@ -449,26 +451,26 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
        （《AI配置写入与快照对账》：读取凭据 / 意图 / 确认态分离）。 */
   toggleCatSummary: (catId, val) => {
     const cat = get().categories.find((c) => c.id === catId);
-    if (!cat || cat.autoSummary === val) return;
+    if (!cat || normalizeFeedAiMode(cat.summaryMode) === val) return;
     issueAiWrite({
       key: `cat:${catId}:summary`,
       value: val,
-      confirmed: cat.autoSummary,
-      apply: (v) => applyCategoryAiFlagPatch(catId, 'autoSummary', v),
-      request: () => api.setFolderAiFlags(numericId(catId), val, undefined),
+      confirmed: normalizeFeedAiMode(cat.summaryMode),
+      apply: (v) => applyCategoryAiModePatch(catId, 'summaryMode', v),
+      request: () => api.setFolderAiModes(numericId(catId), val, undefined),
       label: 'AI 摘要开关',
     });
   },
 
   toggleCatTranslate: (catId, val) => {
     const cat = get().categories.find((c) => c.id === catId);
-    if (!cat || cat.autoTranslate === val) return;
+    if (!cat || normalizeFeedAiMode(cat.translateMode) === val) return;
     issueAiWrite({
       key: `cat:${catId}:translate`,
       value: val,
-      confirmed: cat.autoTranslate,
-      apply: (v) => applyCategoryAiFlagPatch(catId, 'autoTranslate', v),
-      request: () => api.setFolderAiFlags(numericId(catId), undefined, val),
+      confirmed: normalizeFeedAiMode(cat.translateMode),
+      apply: (v) => applyCategoryAiModePatch(catId, 'translateMode', v),
+      request: () => api.setFolderAiModes(numericId(catId), undefined, val),
       label: 'AI 翻译开关',
     });
   },
@@ -478,7 +480,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       .categories.find((c) => c.id === catId)
       ?.feeds.find((f) => f.id === feedId);
     if (!cur) return;
-    const prevMode = normalizeFeedAiMode(cur.summaryMode, cur.autoSummary);
+    const prevMode = normalizeFeedAiMode(cur.summaryMode);
     if (prevMode === mode) return;
     issueAiWrite({
       key: `feed:${feedId}:summary`,
@@ -495,7 +497,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       .categories.find((c) => c.id === catId)
       ?.feeds.find((f) => f.id === feedId);
     if (!cur) return;
-    const prevMode = normalizeFeedAiMode(cur.translateMode, cur.autoTranslate);
+    const prevMode = normalizeFeedAiMode(cur.translateMode);
     if (prevMode === mode) return;
     issueAiWrite({
       key: `feed:${feedId}:translate`,

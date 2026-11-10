@@ -7,11 +7,13 @@ import type {
   FeedItem,
   ViewFilterType,
 } from '../types';
-import { normalizeFeedAiMode, resolveFeedAiMode } from '../types';
+import { resolveAiPolicy } from './aiPolicy';
 import { isSameLocalDay } from '../lib/format';
 import { getBodyEntry } from './bodyCache';
 import type { BodyEntry, BodyState } from './bodyCache';
 import type { AppState } from './types';
+import { projectReadingMembers, sameReadingNavigation } from './readingSession';
+import type { ReadingSession } from './readingSession';
 
 /* ============================================================
    Selector 钩子 —— 派生数据在组件层计算，store 保持精简
@@ -28,6 +30,12 @@ export const VIEW_NAMES: Record<string, string> = { all: '全部', today: '今�
 /** 解析订阅源生效的内容布局（feed 级覆盖 → 分类布局） */
 export function resolveFeedLayout(feed: { layout: string } | undefined, catLayout: ContentLayoutType): ContentLayoutType {
   return feed && feed.layout !== 'inherit' ? (feed.layout as ContentLayoutType) : catLayout;
+}
+
+export function selectArticleSource(s: Pick<AppState, 'feedIndex' | 'sourceIndex'>, feedId: string) {
+  const active = s.feedIndex.get(feedId);
+  return active ? { feed: active.feed, folderId: active.cat.id, layout: resolveFeedLayout(active.feed, active.cat.layout) }
+    : s.sourceIndex.get(feedId);
 }
 
 /** 视图筛选语义：与列表/树角标共用同一判定，保证数字与内容一致 */
@@ -109,6 +117,9 @@ function bodyViewFrom(rec: BodyEntry): ArticleBodyView {
 export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bodyCacheNonce'>, id: string | null | undefined): ArticleBodyView {
   void s.bodyCacheNonce; // 订阅依赖（见上）：值本身无意义，真值经 getBodyEntry 读取
   if (!id) return UNREQUESTED_BODY;
+  if (s.entries.some((entry) => entry.id === id && entry.unavailable)) {
+    return { ...UNREQUESTED_BODY, state: 'missing', message: '此条目已不在本地；切换筛选后更新列表' };
+  }
   const rec = getBodyEntry(id);
   if (rec) return bodyViewFrom(rec);
   const entry = s.entries.find((a) => a.id === id);
@@ -162,6 +173,7 @@ export function entryNeedsHydration(
   id: string,
 ): boolean {
   void s.bodyCacheNonce; // 订阅依赖：记录写入 bump nonce，useLazyHydrate 的订阅才能重算
+  if (s.entries.some((entry) => entry.id === id && entry.unavailable)) return false;
   const rec = getBodyEntry(id);
   if (rec) return rec.state === 'cleared' && rec.content === '';
   return s.entries.some((a) => a.id === id);
@@ -171,11 +183,10 @@ export function entryNeedsHydration(
     布局不是条目属性，而是「feed 布局绑定 → 分类布局」的动态解析结果，
     修改绑定后条目即时迁移到新布局视图，无需数据搬迁。 */
 export function selectRawEntries(
-  s: Pick<AppState, 'activeContentLayout' | 'entries' | 'feedIndex'>,
+  s: Pick<AppState, 'activeContentLayout' | 'entries' | 'feedIndex' | 'sourceIndex'>,
 ): ArticleEntry[] {
   return s.entries.filter((e) => {
-    const binding = s.feedIndex.get(e.feedId);
-    return binding && resolveFeedLayout(binding.feed, binding.cat.layout) === s.activeContentLayout;
+    return selectArticleSource(s, e.feedId)?.layout === s.activeContentLayout;
   });
 }
 
@@ -183,7 +194,7 @@ export function selectRawEntries(
     "视图"的计数与列表都以同一范围语义联动：选中单个订阅源时，
     全部/今天/未读/收藏的数字反映该订阅源内的条目。 */
 export function selectScopeEntries(
-  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'entries' | 'feedIndex'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'entries' | 'feedIndex' | 'sourceIndex'>,
 ): ArticleEntry[] {
   let list = selectRawEntries(s);
   if (s.activeFeedFilter.startsWith('cat-')) {
@@ -202,7 +213,9 @@ export function selectScopeEntries(
 let visibleEntriesCache: {
   entries: ArticleEntry[];
   feedIndex: Map<string, { feed: FeedItem; cat: CategoryGroup }>;
+  sourceIndex: AppState['sourceIndex'];
   openedReadIds: Record<string, boolean>;
+  session: ReadingSession | null;
   key: string;
   result: ArticleEntry[];
 } | null = null;
@@ -213,10 +226,22 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
     visibleEntriesCache &&
     visibleEntriesCache.entries === s.entries &&
     visibleEntriesCache.feedIndex === s.feedIndex &&
+    visibleEntriesCache.sourceIndex === s.sourceIndex &&
     visibleEntriesCache.openedReadIds === s.openedReadIds &&
+    visibleEntriesCache.session === s.readingSession &&
     visibleEntriesCache.key === key
   ) {
     return visibleEntriesCache.result;
+  }
+
+  const session = s.readingSession;
+  if (session && sameReadingNavigation(session.query, {
+    layout: s.activeContentLayout, scope: s.activeFeedFilter, view: s.activeViewFilter,
+    filter: s.timelineFilter, sort: s.timelineSort,
+  })) {
+    const result = projectReadingMembers(session, s.entries, []);
+    visibleEntriesCache = { entries: s.entries, feedIndex: s.feedIndex, sourceIndex: s.sourceIndex, openedReadIds: s.openedReadIds, session, key, result };
+    return result;
   }
 
   const now = Date.now();
@@ -248,7 +273,7 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
     if (!Number.isFinite(na) || !Number.isFinite(nb)) return 0;
     return dir * (na - nb);
   });
-  visibleEntriesCache = { entries: s.entries, feedIndex: s.feedIndex, openedReadIds: s.openedReadIds, key, result: list };
+  visibleEntriesCache = { entries: s.entries, feedIndex: s.feedIndex, sourceIndex: s.sourceIndex, openedReadIds: s.openedReadIds, session, key, result: list };
   return list;
 }
 
@@ -257,16 +282,10 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
     （timelineFilter）影响：显示全部时 = 全部文章数，显示未读时 = 未读数；
     其余 view filter（今天/未读/收藏）各自独立计数。 */
 export function selectViewCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'sourceIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
 ) {
-  /* OPT-008B R1：smartDedup 开启且快照**布局与开关都匹配**时，聚合 scope 的
-     角标直接取 scope_counts 快照（该 scope 显示集合的精确计数，与列表同一
-     谓词族）。快照带 layout/dedup 来源：旧布局或旧开关口径的快照一律不消费
-     （R2/N3 偏差 B 下旧口径快照必须失效）；快照缺失（开关关闭 / mock / 旧
-     后端 / 取数失败）回退既有「按源求和」口径。
-     feedCounts 始终是与布局无关的按源计数（不得被单布局快照覆盖）。 */
-  const snap = s.scopeCounts;
-  if (snap && snap.layout === s.activeContentLayout && snap.dedup === s.settings.smartDedup) {
+  /* 精确范围计数带布局身份；来源计数不受分页限制，并覆盖退订收藏。 */  const snap = s.scopeCounts;
+  if (snap && snap.layout === s.activeContentLayout) {
     const key = s.activeFeedFilter;
     const exact = key === 'all' ? snap.all : key.startsWith('cat-') ? snap.folders.get(key) : null;
     if (exact) {
@@ -278,10 +297,11 @@ export function selectViewCounts(
   // 截断，会导致「全部/未读数字不准确」。遍历 feedIndex，按「当前布局 × 订阅范围」
   // 累加各 feed 的 total/unread/starred/today。
   let total = 0, today = 0, unread = 0, starred = 0;
-  for (const [feedId, binding] of s.feedIndex) {
-    if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
+  for (const feedId of new Set([...s.feedIndex.keys(), ...s.sourceIndex.keys()])) {
+    const binding = selectArticleSource(s, feedId);
+    if (!binding || binding.layout !== s.activeContentLayout) continue;
     // 订阅范围过滤：'cat-xxx' 只算该分类，单个 feed 只算该 feed
-    if (s.activeFeedFilter.startsWith('cat-') && binding.cat.id !== s.activeFeedFilter) continue;
+    if (s.activeFeedFilter.startsWith('cat-') && binding.folderId !== s.activeFeedFilter) continue;
     if (s.activeFeedFilter !== 'all' && !s.activeFeedFilter.startsWith('cat-') && feedId !== s.activeFeedFilter) continue;
     /* L2（有意为之的保守设计，保持不改）：feedCounts 缺该源时直接跳过，不退回
        按 entries 计数。原因：entries 是「当前分页快照」（列表最多 500 条/页），
@@ -311,7 +331,7 @@ export function selectViewCounts(
 export { numericId } from './scopeId';
 
 export function selectTreeCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'sourceIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
 ): Map<string, number> {
   // 订阅树角标：数字 = 该行在「当前布局 × 当前视图 × 显示: 全部/未读」筛选下的
   // 条目数。用后端精确计数聚合（feedCounts），不受文章列表分页 limit 影响。
@@ -332,7 +352,7 @@ export function selectTreeCounts(
      过滤 feedIndex）；分类与「全部」角标在 **scopeCounts 快照布局匹配**时直接取
      该 scope 的显示集合计数（层级去重的总数不可由子集数字相加重建），否则回退
      按成员求和。旧布局快照不得按新布局显示（快照 layout 与当前不等即忽略）。 */
-  const snap = s.scopeCounts && s.scopeCounts.layout === s.activeContentLayout && s.scopeCounts.dedup === s.settings.smartDedup ? s.scopeCounts : null;
+  const snap = s.scopeCounts && s.scopeCounts.layout === s.activeContentLayout ? s.scopeCounts : null;
   let fallbackAll = 0;
   for (const [feedId, binding] of s.feedIndex) {
     if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
@@ -348,6 +368,11 @@ export function selectTreeCounts(
     for (const [key, c] of snap.folders) bump(key, viewOf(c));
     bump('all', viewOf(snap.all));
   } else {
+    for (const [feedId, source] of s.sourceIndex) {
+      if (s.feedIndex.has(feedId) || source.layout !== s.activeContentLayout) continue;
+      const count = s.feedCounts.get(feedId);
+      if (count) fallbackAll += viewOf(count);
+    }
     // 回退：分类 = 成员求和（按 feedIndex 归属逐源累加）；全部 = 全部成员求和
     for (const [feedId, binding] of s.feedIndex) {
       if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
@@ -360,34 +385,26 @@ export function selectTreeCounts(
   return counts;
 }
 
-/** 订阅源 → AI 配置解析（唯一 resolver，OPT-011）：
-    - 真值 = 源的三态 mode（旧行/旧 mock 缺 mode 时按旧 bool 映射，见 types.ts）；
-    - 'inherit' → 跟随所属分类的布尔默认；'on'/'off' → 源的显式选择
-      （显式关闭压过分类开启——不以 OR 合并，保证可关闭）；
-    - 旧 bool 字段（feed.autoSummary/autoTranslate）只作为缺 mode 的映射输入，
-      不再是有效真值：任何组件都不得绕过本函数直读源上的旧 bool。
-    绑定缺失即无配置（false）。返回 mode 供设置页三态控件回显。
-    Note: 三态真值、bool 兼容输入与单一 resolver 的取舍 — 见
-    .agents/notes/implemented/architecture/2026-10-08-AI配置继承与派生索引单点.md */
-export function selectFeedConfig(s: Pick<AppState, 'feedIndex'>, feedId: string) {
+/** 唯一AI策略：对象实际布局默认→组三态→源三态→布局能力。
+    源显式off压过上层on；退订收藏同样解析sourceIndex，未知来源拒绝生成。
+    Note: .agents/notes/implemented/architecture/2026-11-09-三层AI策略与阅读触发.md */
+export function selectFeedConfig(s: Pick<AppState, 'feedIndex' | 'sourceIndex' | 'categories' | 'settings'>, feedId: string) {
   const binding = s.feedIndex.get(feedId);
-  if (!binding) {
+  const source = selectArticleSource(s, feedId);
+  if (!source) {
     return {
+      layout: undefined,
+      canSummarize: false,
+      canTranslate: false,
       autoSummary: false,
       autoTranslate: false,
       summaryMode: 'off' as FeedAiMode,
       translateMode: 'off' as FeedAiMode,
     };
   }
-  const { feed, cat } = binding;
-  const summaryMode = normalizeFeedAiMode(feed.summaryMode, feed.autoSummary);
-  const translateMode = normalizeFeedAiMode(feed.translateMode, feed.autoTranslate);
-  return {
-    autoSummary: resolveFeedAiMode(summaryMode, cat.autoSummary),
-    autoTranslate: resolveFeedAiMode(translateMode, cat.autoTranslate),
-    summaryMode,
-    translateMode,
-  };
+  // 退订收藏仍有sourceIndex；分组已删除时继承实际布局默认，不制造错误分组。
+  const cat = binding?.cat ?? s.categories.find((c) => c.id === source.folderId);
+  return resolveAiPolicy(s.settings, source.layout, cat, source.feed);
 }
 
 /* ============================================================

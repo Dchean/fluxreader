@@ -101,7 +101,8 @@ pub fn create_manual_backup(conn: &Connection) -> AppResult<BackupInfo> {
 }
 
 /// 迁移前快照：由数据库当前版本升向目标版本时调用。
-pub(crate) fn create_migration_backup(
+#[cfg(test)]
+fn create_migration_backup(
     conn: &Connection,
     db_path: &Path,
     from_version: i64,
@@ -352,12 +353,6 @@ pub(crate) fn take_startup_backup_warning(conn: &Connection) -> AppResult<Option
         params![STARTUP_BACKUP_WARNING_KEY],
     )?;
     Ok(Some(raw))
-}
-
-pub(crate) fn record_startup_backup_warning(conn: &Connection, message: &str) {
-    if let Err(e) = super::settings::set_setting(conn, STARTUP_BACKUP_WARNING_KEY, message) {
-        log::error!("backup: 记录启动备份警告失败: {e}");
-    }
 }
 
 /// 错误文案落库/日志前去掉应用数据目录（通常含用户名）。

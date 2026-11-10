@@ -455,7 +455,7 @@ componentTest('文案精简：布局、全部折叠与正文翻译成功态不�
 
     const feeds = await mount(createElement(FeedsTab));
     await flush(2);
-    const trigger = feeds.container.querySelector('.group-mgr-controls .flux-dropdown-trigger');
+    const trigger = feeds.container.querySelector('.group-mgr-layout-control .flux-dropdown-trigger');
     assert.ok(trigger, '分类布局下拉存在');
     await act(async () => { trigger.click(); });
     await flush(2);

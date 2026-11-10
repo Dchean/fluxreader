@@ -42,8 +42,7 @@ R5 机制收敛：**基线 + 每笔已校验 patch** 生成载荷，意图按序
   回 prev），不残留「永远成功」的乐观值。
 - 发送前若 base 未知：一次**有界校准读取**，成功即以原文为底；失败→本笔不发送
   （可见失败、不改库、该笔键回显），持续失败由下一次成功读取/重试恢复。
-- 写入串行（后写永不先发，A 网络在途时后发请求排队）；成功推进 base 并按本笔
-  patch 是否含 smartDedup 触发 reload；失败如实 toast（每笔一次）。
+- 写入串行（后写永不先发，A 网络在途时后发请求排队）；成功推进 base；失败如实 toast（每笔一次）。
 - 应用边界（runAppSettingsApplyBoundary）：窗口内点击请求排在应用+回读之后
   （乐观落地不受影响）；回读落地=新 base，窗口内点击键由投影自然保留（无需
   专门保留集合）；上传只等发起时前沿（awaitAppSettingsWriteFrontier），不设门。
@@ -335,7 +334,11 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
     listWidth: 320,
     showReadTime: true,
     defaultOpenMode: 'rss',
-    smartDedup: false,
+    articleAutoSummary: false,
+    articleAutoTranslate: false,
+    socialAutoTranslate: false,
+    notificationAutoSummary: false,
+    notificationAutoTranslate: false,
     closeToTray: true,
     closePromptShown: false,
     notifyOnNewArticles: false,
@@ -364,7 +367,6 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
     const serial = ++appSettingsWriteSerial;
     const intent: SettingsWriteIntent = { seq: serial, patch: accepted as Record<string, unknown>, prev };
     pendingIntents.push(intent);
-    const dedupChanged = 'smartDedup' in accepted;
     appSettingsWriteChain = appSettingsWriteChain
       .then(async () => {
         if (gateAtIssue) {
@@ -398,11 +400,6 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
         appSettingsBaseKnown = true;
         confirmedAtWriteSerial = serial;
         projectSettings();
-        /* 本笔含 smartDedup 变更 → 按新口径重取（不被后续非 dedup 写吞掉）。
-           reload 自身失败已有可见提示，这里再兜 catch 避免未处理拒绝。 */
-        if (dedupChanged) {
-          void get().reloadFromBackend().catch(() => { /* 失败可见性由 reload 内部负责 */ });
-        }
       })
       .catch((e: unknown) => {
         /* 失败：该笔键回投到 base（无 base 键回 prev），如实 toast——每笔失败

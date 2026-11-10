@@ -88,11 +88,16 @@ export interface FolderRow {
   layout: string;
   auto_summary: boolean;
   auto_translate: boolean;
+  summary_mode: FeedAiMode;
+  translate_mode: FeedAiMode;
   collapsed: boolean;
 }
 
 export interface FeedRow {
   id: number;
+  sync_id: string;
+  subscription_state: 'active' | 'retained';
+  effective_layout: FeedItem['layout'];
   folder_id: number;
   feed_url: string;
   site_url: string | null;
@@ -102,7 +107,7 @@ export interface FeedRow {
   /** 旧兼容列（不再是有效真值；仅作为缺 summary_mode 时的映射输入） */
   auto_summary: boolean;
   auto_translate: boolean;
-  /** OPT-011：AI 开关三态真值（旧后端行/schema1 可缺 → 按 bool 映射） */
+  /** OPT-011：AI 开关三态真值（缺省inherit；旧bool不参与解析） */
   summary_mode?: string | null;
   translate_mode?: string | null;
   fetch_failed: boolean;
@@ -117,6 +122,11 @@ export interface ArticleListItemRow {
   author: string | null;
   snippet: string;
   image_url: string | null;
+  gallery_first_image_url: string | null;
+  image_count: number;
+  media_revision: number;
+  retained: boolean;
+  body_missing: boolean;
   enclosure_url: string | null;
   enclosure_mime: string | null;
   duration_sec: number | null;
@@ -146,6 +156,7 @@ export interface ArticleListItemRow {
 }
 
 export interface ArticleDetailRow extends ArticleListItemRow {
+  images: string[];
   url: string | null;
   content_html: string | null;
   translated_content: string | null;
@@ -415,6 +426,9 @@ export interface ArticleListArgs {
   only_unread?: boolean;
   only_starred?: boolean;
   only_today?: boolean;
+  /** 当前阅读会话捕获的本地日界：[since_ms, until_ms)。 */
+  since_ms?: number;
+  until_ms?: number;
   newest_first?: boolean;
   limit?: number;
   offset?: number;
@@ -447,7 +461,7 @@ export interface FeedCountsRow {
   today: number;
 }
 
-/** OPT-008B：显示集合（smartDedup）的 scope 精确计数行。 */
+/** 与源内等价条目列表同口径的范围精确计数。 */
 export interface ScopeCountsRow {
   scope_id: number;
   total: number;
@@ -488,6 +502,18 @@ export const api = {
   async listFeeds(): Promise<FeedRow[] | null> {
     const inv = await getInvoke();
     return inv ? (await inv('list_feeds') as FeedRow[]) : null;
+  },
+  async listArticleSources(): Promise<FeedRow[] | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('list_article_sources') as FeedRow[]) : null;
+  },
+  async listArticleMemberIds(args: ArticleListArgs): Promise<number[] | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('list_article_member_ids', { args }) as number[]) : null;
+  },
+  async getArticleUpdates(ids: number[]): Promise<{ items: ArticleListItemRow[]; missing_ids: number[] } | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('get_article_updates', { ids }) as { items: ArticleListItemRow[]; missing_ids: number[] }) : null;
   },
   /* OPT-017F：feedCounts / scopeCounts 两个分项读取包装已删（全仓零调用方；
      OPT-008B R2 起计数统一走下方 countsSnapshot 组合快照）。对应 IPC 命令
@@ -666,15 +692,14 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('set_folder_collapsed', { id, collapsed }) as null) : null;
   },
-  /** OPT-011：分类 AI 默认单字段 patch——undefined 的字段不发送（只写被改字段）。
-   * 旧 full 调用（两字段都给）语义不变；两字段独立落库，并发乱序不互相覆盖。 */
-  async setFolderAiFlags(id: number, autoSummary?: boolean, autoTranslate?: boolean): Promise<null> {
+  /** OPT-011：分组三态单字段 patch——undefined不发送，只写被改字段；两字段独立落库。 */
+  async setFolderAiModes(id: number, summary?: FeedAiMode, translate?: FeedAiMode): Promise<null> {
     const inv = await getInvoke();
     if (!inv) return null;
     const args: Record<string, unknown> = { id };
-    if (autoSummary !== undefined) args.summary = autoSummary;
-    if (autoTranslate !== undefined) args.translate = autoTranslate;
-    return (await inv('set_folder_ai_flags', args) as null);
+    if (summary !== undefined) args.summary = summary;
+    if (translate !== undefined) args.translate = translate;
+    return (await inv('set_folder_ai_modes', args) as null);
   },
   /* OPT-017F：旧 bool 双字段包装 setFeedAiFlags 已删（全仓零调用方；OPT-011
      起的唯一真值入口是下方三态 setFeedAiModes）。对应 IPC 命令
@@ -726,6 +751,7 @@ export const api = {
     onDelta: (text: string) => void,
     onDone: () => void,
     onError: (msg: string) => void,
+    canStart?: () => boolean,
   ): Promise<string | null> {
     const inv = await getInvoke();
     if (!inv) return null;
@@ -737,6 +763,7 @@ export const api = {
       else if (m.type === 'done') onDone();
       else if (m.type === 'error') onError(String(m.data ?? 'AI 错误')); // 防御性兜底，见上方说明
     };
+    if (canStart && !canStart()) return null;
     return (await inv('ai_summarize', { articleId, onChannel: channel })) as string;
   },
   async aiTranslate(
@@ -744,6 +771,7 @@ export const api = {
     onDelta: (text: string) => void,
     onDone: () => void,
     onError: (msg: string) => void,
+    canStart?: () => boolean,
   ): Promise<string | null> {
     const inv = await getInvoke();
     if (!inv) return null;
@@ -755,6 +783,7 @@ export const api = {
       else if (m.type === 'done') onDone();
       else if (m.type === 'error') onError(String(m.data ?? 'AI 错误'));
     };
+    if (canStart && !canStart()) return null;
     return (await inv('ai_translate', { articleId, onChannel: channel })) as string;
   },
 
@@ -1111,6 +1140,9 @@ export function parseTs(iso: string | null): number {
 export function feedRowToItem(row: FeedRow): FeedItem {
   return {
     id: String(row.id),
+    syncId: row.sync_id,
+    subscriptionState: row.subscription_state,
+    effectiveLayout: row.effective_layout === 'inherit' ? undefined : row.effective_layout,
     name: row.title,
     url: row.feed_url,
     favicon: row.favicon_url ?? '',
@@ -1118,10 +1150,9 @@ export function feedRowToItem(row: FeedRow): FeedItem {
     layout: row.layout as FeedItem['layout'],
     autoSummary: row.auto_summary,
     autoTranslate: row.auto_translate,
-    /* OPT-011：mode 为真值；旧行/旧 mock 缺 mode（schema1/旧后端）时按旧 bool
-       映射显式 on/off——升级不把原本关闭的源推向付费 AI。 */
-    summaryMode: normalizeFeedAiMode(row.summary_mode, row.auto_summary),
-    translateMode: normalizeFeedAiMode(row.translate_mode, row.auto_translate),
+    /* mode是唯一真值；未指定时继承，布局默认关闭，不消费旧bool。 */
+    summaryMode: normalizeFeedAiMode(row.summary_mode),
+    translateMode: normalizeFeedAiMode(row.translate_mode),
     fetchFailed: row.fetch_failed,
   };
 }
@@ -1137,6 +1168,8 @@ export function folderRowsToCategories(folders: FolderRow[], feeds: FeedRow[]): 
       layout: f.layout as CategoryGroup['layout'],
       autoSummary: f.auto_summary,
       autoTranslate: f.auto_translate,
+      summaryMode: normalizeFeedAiMode(f.summary_mode),
+      translateMode: normalizeFeedAiMode(f.translate_mode),
       feeds: own.map(feedRowToItem),
     };
   });
@@ -1152,12 +1185,16 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     publishedAtSource: row.published_at_source ?? 'legacy_unknown',
     isRead: row.is_read,
     isStarred: row.is_starred,
+    retained: row.retained,
+    bodyMissing: row.body_missing,
+    imageCount: row.image_count,
+    mediaRevision: row.media_revision,
     tags: [],
     source: row.source as ArticleEntry['source'],
     snippet: row.snippet,
     author: row.author ?? '',
     cover: row.image_url ?? undefined,
-    imageUrl: row.image_url ?? undefined,
+    imageUrl: row.gallery_first_image_url ?? undefined,
     audioUrl: row.enclosure_url ?? undefined,
     enclosureUrl: row.enclosure_url ?? undefined,
     durationSec: row.duration_sec ?? undefined,

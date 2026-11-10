@@ -42,6 +42,8 @@ const STORE_ALIAS = new Map([
   [`${SRC_DIR}store.ts`, 'dist-test/store.js'],
   // API 的成功保存失效通知必须与 store 装配同实例，不能在组件端另建无监听副本。
   [`${SRC_DIR}lib${process.platform === 'win32' ? '\\' : '/'}api.ts`, 'dist-test/lib/api.js'],
+  // 阅读锚是store窗口准备与Timeline共享的唯一状态，不能因源码/编译路径各建一份。
+  [`${SRC_DIR}lib${process.platform === 'win32' ? '\\' : '/'}readingPosition.ts`, 'dist-test/lib/readingPosition.js'],
 ]);
 
 let rolldownPromise = null;

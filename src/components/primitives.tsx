@@ -264,6 +264,8 @@ interface AiModeSelectProps {
   mode: FeedAiMode;
   /** 所属分类的布尔默认（仅用于「继承（开/关）」标签回显） */
   categoryOn: boolean;
+  /** 组可能包含不同布局，继承提示不能伪造统一的开/关结果。 */
+  inheritLabel?: string;
   onChange: (mode: FeedAiMode) => void;
   /** 悬停说明（如「关闭只阻止尚未发起的自动请求」） */
   title?: string;
@@ -271,7 +273,7 @@ interface AiModeSelectProps {
   ariaLabel?: string;
 }
 
-export function AiModeSelect({ mode, categoryOn, onChange, title, width = 96, ariaLabel }: AiModeSelectProps) {
+export function AiModeSelect({ mode, categoryOn, inheritLabel, onChange, title, width = 96, ariaLabel }: AiModeSelectProps) {
   return (
     <span className="ai-mode-select" title={title}>
       <FluxDropdown
@@ -280,7 +282,7 @@ export function AiModeSelect({ mode, categoryOn, onChange, title, width = 96, ar
         ariaLabel={ariaLabel}
         onChange={(v) => onChange(v as FeedAiMode)}
         options={[
-          { value: 'inherit', label: `继承（${categoryOn ? '开' : '关'}）` },
+          { value: 'inherit', label: inheritLabel ?? `继承（${categoryOn ? '开' : '关'}）` },
           { value: 'on', label: '开启' },
           { value: 'off', label: '关闭' },
         ]}

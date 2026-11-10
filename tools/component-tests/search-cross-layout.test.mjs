@@ -33,7 +33,7 @@ for (const [layout, feedId, card] of [['article', 10, '.article-card'], ['image'
       installBackend(); resetPlan(); resetStore();
       const rows = [mkRow({ id: 801, feed_id: feedId, title: '搜索动作目标', image_url: 'https://image.example/a.png', content_html: '<p>目标正文</p>' })];
       seedFromRows(rows, { layout: 'article' });
-      setPlan({ search_articles: () => Promise.resolve(rows), article_index: () => Promise.resolve(0) });
+      setPlan({ search_articles: () => Promise.resolve(rows) });
       const { createElement, act } = await import('react');
       const { default: App } = await import('../../src/App.tsx');
       try {
@@ -87,13 +87,11 @@ function rowsForLayoutSorted(rows, layout) {
 }
 
 /** 按后端真实口径 mock article_index：目标行不在该布局的显示集合内 → null。 */
-function planLayoutAwareArticleIndex(rows) {
+function planLayoutMembership(rows) {
   setPlan({
-    article_index: (a) => {
-      const layout = a?.args?.layout;
-      const list = rowsForLayoutSorted(rows, layout);
-      const idx = list.findIndex((r) => Number(r.id) === Number(a?.articleId));
-      return Promise.resolve(idx >= 0 ? idx : null);
+    list_article_member_ids: (a) => {
+      const list = rowsForLayoutSorted(rows, a?.args?.layout);
+      return Promise.resolve(list.map(row => row.id));
     },
   });
 }
@@ -122,7 +120,7 @@ componentTest('OPT-008B 搜索跨布局结果：真实搜索面板点击打开�
       }),
     ];
     seedFromRows(rows, { layout: 'article' });
-    planLayoutAwareArticleIndex(rows);
+    planLayoutMembership(rows);
     setPlan({ search_articles: () => Promise.resolve(rows.filter((r) => r.id === 201)) });
 
     const { createElement, act } = await import('react');
@@ -192,7 +190,7 @@ componentTest('OPT-008B 搜索跨布局结果：真实搜索面板点击打开�
 用例 2：跨布局注入期间，自动续页的在途响应照常落地并推进游标；
 注入行不污染游标/可见集合（deepEqual 精确不变量）。
 ============================================================ */
-componentTest('OPT-008B 跨布局注入与在途续页：注入行动游标为零；首次响应被代际丢弃、自动重试落地推进（不污染查询窗口）', { timeout: 40000 }, async () => {
+componentTest('ReadingSession 跨布局注入与在途续页：注入不改成员，已发ID页正常落地且保留Reader', { timeout: 40000 }, async () => {
   try {
     installBackend();
     clearInvokeCalls();
@@ -224,21 +222,18 @@ componentTest('OPT-008B 跨布局注入与在途续页：注入行动游标为�
        （jsdom 无布局：Timeline 的 filledViewport 恒 false，装载后会真实触发
        自动续拉——这正是生产路径的再一档消费。） */
     const firstPage2 = deferred();
-    const retryPage2 = deferred();
+
     let keysetCalls = 0;
     setPlan({
-      list_articles: (a) => {
-        const la = a?.args ?? {};
-        if (la.last_id != null && la.last_published != null) {
+      get_article_updates: ({ ids }) => {
+        if (ids.length === 1 && ids[0] === 101) {
           keysetCalls += 1;
-          return keysetCalls === 1 ? firstPage2.promise : retryPage2.promise;
+          return firstPage2.promise;
         }
-        const list = rowsForLayoutSorted(rows, la.layout);
-        const from = typeof la.offset === 'number' ? la.offset : 0;
-        return Promise.resolve(list.slice(from, from + (la.limit ?? list.length)));
+        return Promise.resolve({ items: rows.filter(row => ids.includes(row.id)), missing_ids: [] });
       },
     });
-    planLayoutAwareArticleIndex(rows);
+    planLayoutMembership(rows);
 
     seedFromRows(rows, { layout: 'article' });
     const { createElement, act } = await import('react');
@@ -253,8 +248,8 @@ componentTest('OPT-008B 跨布局注入与在途续页：注入行动游标为�
     const cursorBeforeOpen = useAppStore.getState().articlesCursor['article|all'];
     assert.deepEqual(
       { lastId: cursorBeforeOpen?.lastId, loaded: cursorBeforeOpen?.loaded },
-      { lastId: 102, loaded: 500 },
-      '首屏游标应为第 500 行（id=102）',
+      { lastId: null, loaded: 500 },
+      '首屏只消费500个会话成员，属性回读不以时间游标续筛',
     );
 
     // ---- 续页在途期间：跨布局打开（与搜索结果项同一 action）注入行 ----
@@ -270,34 +265,23 @@ componentTest('OPT-008B 跨布局注入与在途续页：注入行动游标为�
       '注入行不进入当前布局的可见集合（布局过滤不变量）');
     assert.equal(entry.container.querySelector('.reader-article-title')?.textContent, '跨布局社交卡 Z',
       'Reader 在真实挂载树上渲染注入行（同用例 1 的 DOM 取证）');
-    assert.equal(keysetCalls, 1, '首次自动续页必须携带 keyset 锚（真实分页形态）');
+    assert.equal(keysetCalls, 1, '固定成员查询未改变，搜索注入不重复发续页');
 
     /* ---- 放行**首次**续页响应：锚定推进了该键首屏代次 → 响应属于旧查询实例，
        被代际守卫丢弃（不动游标、不接入行）。机制依据：anchorToArticle 入口
        beginGlobalQuery；落地判据 currentFirstPageSerial(queryKey) !== firstPageGen。 */
     const page2Rows = rowsForLayoutSorted(rows, 'article').slice(500); // [id=101]
     assert.equal(page2Rows.length, 1, '续页恰 1 行（前置）');
-    await act(async () => { firstPage2.resolve(page2Rows); });
+    await act(async () => { firstPage2.resolve({ items: page2Rows, missing_ids: [] }); });
     await flush(3);
-    st = useAppStore.getState();
-    assert.deepEqual(st.articlesCursor['article|all'], cursorBeforeOpen,
-      '首次响应被代际丢弃：游标保持原锚（不动）');
-    assert.ok(!st.entries.some((e) => e.id === '101'),
-      '首次响应被代际丢弃：续页行未被接入（不是「原响应照常落地」）');
-
-    // ---- 丢弃后 articlesLoading 复位 → Timeline 自动重试（第二次 keyset 请求）→ 落地。
-    await waitFor(() => keysetCalls === 2, { label: '自动重试续页发起（第二次 keyset 请求）', timeout: 8000 });
-    await act(async () => { retryPage2.resolve(page2Rows); });
-    await flush(4);
     st = useAppStore.getState();
     const cursorAfter = st.articlesCursor['article|all'];
     assert.deepEqual(
       { lastId: cursorAfter?.lastId, loaded: cursorAfter?.loaded },
-      { lastId: 101, loaded: 501 },
+      { lastId: null, loaded: 501 },
       '自动重试的续页响应落地并推进游标到新页末行（id=101, loaded=501）——注入行未被当作锚',
     );
-    assert.equal(cursorAfter?.lastPublished, rows.find((r) => r.id === 101).published_at,
-      'keyset 锚应为续页真实末行的 published_at 原文');
+    assert.equal(useAppStore.getState().readingSession.memberIds[500], '101', '续页进度对应捕获的最后成员');
     assert.ok(st.entries.some((e) => e.id === '101'), '续页行真实追加进 entries');
     assert.equal(st.entries.length, 502, 'entries = 500 + 注入 1 + 续页 1');
     const visible = selectVisibleEntries(st).map((e) => e.id);

@@ -119,7 +119,9 @@ async fn merge_content_chunk(
     let mut unbound_feeds = BTreeSet::new();
     for e in entries {
         if let Some(feed_id) = item_feed_remote_id(e) {
-            if !maps.feed_mf_to_id.contains_key(&feed_id) {
+            if !maps.feed_mf_to_id.contains_key(&feed_id)
+                && !maps.excluded_feed_ids.contains(&feed_id)
+            {
                 unbound_feeds.insert(feed_id);
             }
         }
@@ -128,7 +130,7 @@ async fn merge_content_chunk(
         *binding_failures += 1;
         report.binding_incomplete = true;
         report.errors.push(format!(
-            "条目所属远端 feed 尚无本地绑定，本轮保留游标并继续有限兼容合并: {:?}",
+            "条目所属远端 feed 尚无本地绑定，本轮保留游标并跳过这些条目: {:?}",
             unbound_feeds
         ));
     }
@@ -515,7 +517,7 @@ pub(super) async fn pull_entries_greader(
                 None
             }
         };
-        // Note: 两个完整集合都补缺身份/正文，保持 read-wins、pending/版本守卫 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+        // Note: 两个完整集合都补缺身份/正文，保持 pending/版本守卫 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
         if let Some(ids) = curr_unread.as_ref() {
             if !backfill_authority_collection(db, session, client, "unread", ids, &mut maps, report)
                 .await?
@@ -541,6 +543,38 @@ pub(super) async fn pull_entries_greader(
         }
         // read 差分复用回补后的映射，集合不完整或回补失败时本字段不落差分。
         if let Some(curr_unread_ids) = curr_unread.as_ref() {
+            let unread_apply_result = {
+                let conn = db.lock().await;
+                session.ensure_current(&conn)?;
+                (|| -> AppResult<()> {
+                    for remote_id in curr_unread_ids {
+                        let Some(&aid) = maps.mf_id_to_article.get(remote_id) else {
+                            continue;
+                        };
+                        if !maps.article_source_is_current(&conn, aid)? {
+                            continue;
+                        }
+                        let version = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0)).0;
+                        let rows = conflict_policy::apply_read_by_policy(
+                            &conn,
+                            conflict_policy::GR_READ_DIRECTION,
+                            false,
+                            aid,
+                            version,
+                            maps.pending_read_ids.contains(&aid),
+                        )?;
+                        report.entries_data_changed |= rows > 0;
+                        report.merged_states += rows;
+                    }
+                    Ok(())
+                })()
+            };
+            if let Err(e) = unread_apply_result {
+                authority_cursor_failures += 1;
+                report.errors.push(format!(
+                    "unread 状态对账中断：本地写入失败（{e}），下一轮重放"
+                ));
+            }
             let candidates =
                 collect_unread_diff_candidates(db, session, curr_unread_ids, &maps).await?;
             let confirmed = probe_unread_diff_candidates(client, &candidates, report).await;
@@ -551,6 +585,7 @@ pub(super) async fn pull_entries_greader(
                 if let Err(e) =
                     apply_unread_diff_marks(&conn, &confirmed, &candidates, &maps, report)
                 {
+                    authority_cursor_failures += 1;
                     report.errors.push(format!(
                         "read 差分落地中断：本地写入失败（{e}），下一轮重放"
                     ));
@@ -564,6 +599,7 @@ pub(super) async fn pull_entries_greader(
             session.ensure_current(&conn)?;
             if let Some(ids) = starred_for_reconcile.as_deref() {
                 if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
+                    authority_cursor_failures += 1;
                     report.errors.push(format!(
                         "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
                     ));
@@ -579,7 +615,11 @@ pub(super) async fn pull_entries_greader(
     // TASK-097：推进值写「id 列举开始前取的起点候选」（论证见函数头部），
     // 不再取结束墙钟；failures > 0 时候选被丢弃、游标保持旧值，语义不变。
     // OPT-006：推进前在同一次持锁内复核代际——旧会话不得把游标推过账号边界。
-    let failures = id_failures + chunk_failures + binding_failures + authority_cursor_failures;
+    let failures = id_failures
+        + chunk_failures
+        + binding_failures
+        + authority_cursor_failures
+        + usize::from(report.binding_incomplete);
     if failures == 0 {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
@@ -606,7 +646,7 @@ pub(super) async fn pull_entries_greader(
 ///
 /// 只补集合内缺身份或正文的 id，
 /// 绝不额外列举；合并走 [`merge_pulled_entry`] 既有四分支匹配链（远端 feed
-/// 未绑定的条目按有限兼容分支记账 + 已读广播，与主列举分块同口径）。
+/// 未绑定源的条目跳过并保留游标；其他已知源仍继续处理）。
 /// 成功后保存本代际遍历位置；失败保留遍历位置及主列举游标。
 async fn backfill_authority_collection(
     db: &Arc<Mutex<Connection>>,
@@ -672,12 +712,13 @@ async fn backfill_authority_collection(
                     entries
                 }
             };
-            // 远端 feed 未绑定的条目按有限兼容合并（镜像主列举分块的既有口径）：
-            // 记 binding_incomplete 并继续，不算本侧软失败。
+            // 未绑定的源只跳过其条目，继续处理同块中已绑定的尾部；保留游标。
             let mut unbound_feeds = BTreeSet::new();
             for e in &entries {
                 if let Some(feed_id) = item_feed_remote_id(e) {
-                    if !maps.feed_mf_to_id.contains_key(&feed_id) {
+                    if !maps.feed_mf_to_id.contains_key(&feed_id)
+                        && !maps.excluded_feed_ids.contains(&feed_id)
+                    {
                         unbound_feeds.insert(feed_id);
                     }
                 }
@@ -685,7 +726,7 @@ async fn backfill_authority_collection(
             if !unbound_feeds.is_empty() {
                 report.binding_incomplete = true;
                 report.errors.push(format!(
-                    "GR {collection} 回补条目所属远端 feed 尚无本地绑定，按有限兼容合并: {:?}",
+                    "GR {collection} 回补条目所属远端 feed 尚无本地绑定，跳过这些条目并保留游标: {:?}",
                     unbound_feeds
                 ));
             }
@@ -904,6 +945,9 @@ fn apply_unread_diff_marks(
 ) -> AppResult<()> {
     let confirmed_set: HashSet<i64> = confirmed.iter().copied().collect();
     for (remote_id, aid) in candidates {
+        if !maps.article_source_is_current(conn, *aid)? {
+            continue;
+        }
         if !confirmed_set.contains(remote_id) {
             continue;
         }
@@ -956,6 +1000,9 @@ fn reconcile_reader_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
+        if !maps.article_source_is_current(conn, aid)? {
+            continue;
+        }
         // OPT-007：字段版本快照（pull 起点）+ 字段 pending 交给政策守卫；
         // 快照缺失（理论不可达）按 (0,0) 保守处理——与旧行版本一致。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
@@ -1060,11 +1107,10 @@ mod tests {
     /// 字段版本快照）。`pending=true` 表示**读/藏两字段都有**未推送意图（逐字段
     /// 判定的旧口径对照）；版本快照取 (0,0) = 与夹具行（raw SQL 写入、版本 0）
     /// 相等，即「拉取期间无本地写入」的默认起点。
-    fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
+    fn maps_for(conn: &Connection, remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
-            url_to_id: Default::default(),
-            feed_url_to_id: Default::default(),
-            url_norm_to_ids: Default::default(),
+            source_versions: db::sync_match_maps(conn).unwrap().source_versions,
+            excluded_feed_ids: Default::default(),
             id_to_mf_id: Default::default(),
             id_to_feed_mf: Default::default(),
             pending_ids: if pending {
@@ -1082,7 +1128,6 @@ mod tests {
             } else {
                 Default::default()
             },
-            explicit_read_ids: Default::default(),
             id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
@@ -1110,7 +1155,7 @@ mod tests {
     /// GR 单向格锁定：远端「未读」（read 集合未命中）不得复活本地已读。
     /// 政策被翻成双向时本用例红（sync_mark_unread_if_read 会把 is_read 打回 0）。
     #[test]
-    fn gr_reconcile_remote_unread_does_not_revive_local_read() {
+    fn gr_reconcile_remote_unread_restores_local_unread() {
         let conn = conn();
         let aid = seed_bound(&conn, 101);
         conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid])
@@ -1123,19 +1168,13 @@ mod tests {
             &conn,
             Some(&[]),
             Some(&[]),
-            &maps_for(101, aid, false),
+            &maps_for(&conn, 101, aid, false),
             &mut report,
         )
         .unwrap();
 
-        assert!(
-            is_read(&conn, aid),
-            "GR 政策（单向 read-wins）：远端未读不得复活本地已读"
-        );
-        assert_eq!(
-            report.merged_states, 0,
-            "单向格：远端未读不应产生任何状态写入"
-        );
+        assert!(!is_read(&conn, aid), "GR 双向：远端未读必须返回本地");
+        assert_eq!(report.merged_states, 1, "双向：远端未读产生一次状态写入");
     }
 
     /// GR 单向格命中侧：远端已读 → 本地已读（read-wins 收敛路径）。
@@ -1149,7 +1188,7 @@ mod tests {
             &conn,
             Some(&[102]),
             Some(&[]),
-            &maps_for(102, aid, false),
+            &maps_for(&conn, 102, aid, false),
             &mut report,
         )
         .unwrap();
@@ -1175,7 +1214,7 @@ mod tests {
         // starred_ids 只含 104：103 未命中（远端已取消收藏），104 命中。
         let maps = db::SyncMatchMaps {
             mf_id_to_article: [(103, starred), (104, unstarred)].into_iter().collect(),
-            ..maps_for(103, starred, false)
+            ..maps_for(&conn, 103, starred, false)
         };
         reconcile_reader_state(&conn, Some(&[]), Some(&[104]), &maps, &mut report).unwrap();
 
@@ -1206,7 +1245,7 @@ mod tests {
             &conn,
             Some(&[105]),
             Some(&[]),
-            &maps_for(105, aid, true),
+            &maps_for(&conn, 105, aid, true),
             &mut report,
         )
         .unwrap();
@@ -1233,7 +1272,7 @@ mod tests {
         let conn = conn();
         let aid = seed_bound(&conn, 106);
         db::set_starred(&conn, aid, true).unwrap(); // 本地收藏：star_version 0→1
-        let mut maps = maps_for(106, aid, false);
+        let mut maps = maps_for(&conn, 106, aid, false);
         maps.id_to_versions.insert(aid, (0, 0)); // pull 起点快照早于该本地写入
 
         let mut report = SyncReport::default();
@@ -1252,5 +1291,44 @@ mod tests {
             report.merged_states, 1,
             "仅读字段一次写入——收藏被字段版本守卫跳过，不牵连读"
         );
+    }
+    #[test]
+    fn authority_rejects_retired_and_reactivated_source_snapshots() {
+        for reactivate in [false, true] {
+            let conn = conn();
+            let aid = seed_bound(&conn, 907);
+            db::set_starred(&conn, aid, true).unwrap();
+            let maps = db::sync_match_maps(&conn).unwrap();
+            let (feed, folder): (i64, i64) = conn.query_row(
+                "SELECT f.id,f.folder_id FROM feeds f JOIN articles a ON a.feed_id=f.id WHERE a.id=?1",
+                [aid], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+            db::delete_feed(&conn, feed).unwrap();
+            if reactivate {
+                assert_eq!(
+                    db::insert_feed(
+                        &conn,
+                        "https://f.example/907.rss",
+                        None,
+                        "F",
+                        None,
+                        folder,
+                        "inherit",
+                        false,
+                        false
+                    )
+                    .unwrap(),
+                    feed
+                );
+            }
+            let mut rebuilt = db::sync_match_maps(&conn).unwrap();
+            // Preserve the old entry map too, exercising both commit rejection and snapshot rebuild.
+            rebuilt.mf_id_to_article = maps.mf_id_to_article.clone();
+            rebuilt.keep_field_versions_from(&maps);
+            let mut report = SyncReport::default();
+            reconcile_reader_state(&conn, Some(&[907]), Some(&[]), &rebuilt, &mut report).unwrap();
+            assert!(is_starred(&conn, aid));
+            assert!(!is_read(&conn, aid));
+            assert_eq!(report.merged_states, 0);
+        }
     }
 }

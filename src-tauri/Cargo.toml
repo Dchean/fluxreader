@@ -32,6 +32,8 @@ rusqlite_migration = "1"
 # ---- 直连抓取（M2 P1）----
 feed-rs = "2"
 reqwest = { version = "0.12", default-features = false, features = ["gzip", "brotli", "rustls-tls", "json"] }
+# DAV response namespaces must be parsed, not matched with string fragments.
+quick-xml = "0.41.0"
 # 响应体按 Content-Type charset 解码（与 reqwest::text() 同语义）；
 # 全文提取/favicon 走 read_body_capped 收字节后需手动解码
 encoding_rs = "0.8"

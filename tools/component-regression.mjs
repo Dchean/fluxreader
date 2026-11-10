@@ -38,9 +38,12 @@ await import('./component-tests/layouts.test.mjs');
 /* OPT-017C：画廊有界渲染——5000 项挂载数上界/键盘焦点/灯箱返回/加载更多/列分配。 */
 await import('./component-tests/gallery-virtual.test.mjs');
 await import('./component-tests/gallery-controls-startup.test.mjs');
+await import('./component-tests/gallery-media.test.mjs');
 await import('./component-tests/close-ask.test.mjs');
 await import('./component-tests/modifier-shortcuts.test.mjs');
 await import('./component-tests/entry-actions.test.mjs');
+await import('./component-tests/reading-session.test.mjs');
+await import('./component-tests/reading-session-audit.test.mjs');
 /* 2026-11-04：设置关闭守卫——GitHub 授权中 X/Esc/Ctrl+,/遮罩统一拦截。 */
 await import('./component-tests/settings-close-guard.test.mjs');
 /* 审计卡2（前端交互正确性与感知体验）：IME Escape 守卫、Reader 正文三态、
@@ -77,6 +80,8 @@ await import('./component-tests/sync-data-events.test.mjs');
 await import('./component-tests/sync-indicator.test.mjs');
 /* OPT-011（F13）：AI 开关三态——Reader 自动请求订阅有效配置 + FeedsTab 三态控件。 */
 await import('./component-tests/ai-settings.test.mjs');
+await import('./component-tests/ai-policy.test.mjs');
+await import('./component-tests/ai-lifecycle.test.mjs');
 /* OPT-013 B1：AI 产物缓存签名——「未标记版本」标记、未命中不短路（真实点击发
    起生成）、命中不重复计费、同键在途只发一次。 */
 await import('./component-tests/ai-cache-signature.test.mjs');

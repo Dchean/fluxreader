@@ -20,6 +20,8 @@ pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod sync;
+mod sync_http;
+pub mod webdav_transport;
 
 // 冷启动窗口恢复（OPT-015）：仅本 crate 使用，不进集成测试公共面
 mod window_startup;
@@ -160,9 +162,15 @@ pub fn run() {
             if diagnostics::install(&app_dir.join("diagnostics")).is_err() {
                 log::warn!("无法创建同步诊断目录");
             }
-            let db_path = app_dir.join("fluxreader.db");
+            // The new format has its own data space. Never rewrite or delete the old DB,
+            // including its WAL/SHM files, just because legacy migration is unsupported.
+            let db_path = app_dir.join("fluxreader-v2.db");
+            let announce_new_space = !db_path.exists() && app_dir.join("fluxreader.db").exists();
             let conn = db::open(&db_path)
                 .map_err(|e| format!("打开数据库失败（{}）：{e}", db_path.display()))?;
+            if announce_new_space {
+                db::set_setting(&conn, "startup_data_notice", "已启用新版数据空间。旧版订阅和文章未导入，原 fluxreader.db 及其附属文件完整保留在应用数据目录；可继续在新版添加订阅或恢复新版备份。")?;
+            }
             let initial_sync_mode = db::app_settings_str(&conn, "syncMode", "direct");
             let http = ingestion::build_client(30);
             // SMTC 媒体控制线程（失败降级为 inactive，不影响播放）
@@ -318,8 +326,10 @@ pub fn run() {
             commands::update_folder_layout,
             commands::set_folder_collapsed,
             commands::set_folder_ai_flags,
+            commands::set_folder_ai_modes,
             // 订阅源
             commands::list_feeds,
+            commands::list_article_sources,
             commands::add_feed,
             commands::delete_feed,
             commands::update_feed,
@@ -332,6 +342,8 @@ pub fn run() {
             commands::article_index,
             commands::get_article,
             commands::get_articles,
+            commands::get_article_updates,
+            commands::list_article_member_ids,
             commands::report_broken_cover,
             commands::search_articles,
             commands::set_read,

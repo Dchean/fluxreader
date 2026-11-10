@@ -1,5 +1,5 @@
 //! 配置同步（GitHub Gist / WebDAV）：手动上传/下载客户端配置。
-//! 同步范围（白名单原则）：分类（名称/布局/AI标志/位置 + schema2 起携带
+//! 同步范围（白名单原则）：分类（名称/布局/AI三态与独立旧标志/位置 + schema2 起携带
 //! 稳定 sync_id）+ 订阅源（URL/标题/归属/布局/AI标志/site_url/favicon_url）+
 //! app_settings（排除 autoStart/closePromptShown）+ 非敏感连接配置
 //! （sync_protocol/greader_endpoint/greader_username）。
@@ -30,7 +30,9 @@ pub use plan::{
     apply_payload_checked, plan_payload, snapshot_hash, ApplyMode, PlanItem, PlanPreview,
 };
 
-const SCHEMA_VERSION: u32 = 2;
+// Note: 三层 AI 的分组模式是独立真值，schema3 必须显式携带且只接受当前格式 —
+// 见 .agents/notes/implemented/architecture/2026-10-15-配置快照镜像应用.md
+const SCHEMA_VERSION: u32 = 3;
 const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
 
 /* ============================================================
@@ -46,6 +48,41 @@ pub struct SyncPayload {
     pub app_settings: Option<String>,
     /// 非敏感连接配置（协议、服务器地址、用户名）
     pub connection_config: Option<ConnectionConfig>,
+}
+
+fn validate_schema(schema: u32) -> AppResult<()> {
+    if schema > SCHEMA_VERSION {
+        return Err(AppError::new(
+            "validate",
+            format!(
+                "远端配置版本 v{} 高于本客户端支持的 v{}，请升级客户端",
+                schema, SCHEMA_VERSION
+            ),
+        ));
+    }
+    if schema < SCHEMA_VERSION {
+        return Err(AppError::new(
+            "validate",
+            format!(
+                "配置快照 v{} 不受支持：本客户端只接受 v{}，请从当前版本重新导出",
+                schema, SCHEMA_VERSION
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 所有 wire 入口先检查真实版本头，再严格解析当前结构。
+/// 旧格式没有分组 mode，不能先让缺字段错误遮住明确的版本拒绝提示。
+fn parse_payload(raw: &str) -> AppResult<SyncPayload> {
+    #[derive(Deserialize)]
+    struct SchemaHeader {
+        schema: u32,
+    }
+
+    let header: SchemaHeader = serde_json::from_str(raw)?;
+    validate_schema(header.schema)?;
+    Ok(serde_json::from_str(raw)?)
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
@@ -171,9 +208,12 @@ pub struct FolderSpec {
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
+    /// schema3：分类 AI 三态必须显式给出；缺字段或非法值拒绝，不从旧 bool 推断。
+    pub summary_mode: String,
+    pub translate_mode: String,
     pub position: i64,
     /// OPT-010（schema2）：分类的稳定身份（跨设备匹配键）。
-    /// schema1 快照没有本字段（None）→ 导入端按名称保守匹配并采用本地身份。
+    /// 无身份（None）仍按名称保守匹配并采用本地身份；不代表接受旧 schema。
     #[serde(default)]
     pub sync_id: Option<String>,
 }
@@ -183,22 +223,34 @@ pub struct FeedSpec {
     pub url: String,
     pub title: String,
     pub folder: String,
-    /// 新快照按稳定身份引用分类，旧快照缺字段时才按精确名称保守解析。
-    /// 保留 schema2：旧 serde 消费者忽略未知字段，但不能因此修复其重名归属。
+    /// 分类引用优先使用稳定身份，缺引用字段时按精确名称保守解析。
+    /// schema2 引入本字段；schema3 保留同样的身份引用语义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_sync_id: Option<String>,
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
     /// OPT-011：源级 AI 开关三态（'inherit' | 'on' | 'off'）。
-    /// 旧 schema1 快照没有本字段（None）→ 导入时由旧 bool 映射显式 on/off
-    /// （保守兼容：旧快照里关着的源绝不因导入突然开启）。非法值拒绝整包导入。
+    /// 源级字段保留既有可选输入契约：缺字段（None）时由旧 bool 映射显式 on/off，
+    /// 不因缺失源模式而突然开启。格式版本由统一入口校验；非法模式拒绝整包导入。
     #[serde(default)]
     pub summary_mode: Option<String>,
     #[serde(default)]
     pub translate_mode: Option<String>,
     pub site_url: Option<String>,
     pub favicon_url: Option<String>,
+}
+
+fn resolve_folder_spec_modes(f: &FolderSpec) -> AppResult<(db::FeedAiMode, db::FeedAiMode)> {
+    let parse = |raw: &str| {
+        db::FeedAiMode::parse(raw).map_err(|e| {
+            AppError::new(
+                "validate",
+                format!("快照中的分类 {} AI 模式非法：{}", f.name, e.message),
+            )
+        })
+    };
+    Ok((parse(&f.summary_mode)?, parse(&f.translate_mode)?))
 }
 
 /// OPT-011：把快照的 AI 开关输入归一为三态真值——mode 优先（非法拒绝，
@@ -235,6 +287,8 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             layout: f.layout.clone(),
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
+            summary_mode: f.summary_mode.clone(),
+            translate_mode: f.translate_mode.clone(),
             position: f.position,
             // OPT-010：schema2 携带稳定身份（v26 起每行必有；None 只在损坏库出现）。
             sync_id: f.sync_id.clone().filter(|s| !s.trim().is_empty()),
@@ -253,7 +307,7 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
                 .and_then(|folder| folder.sync_id.clone())
                 .filter(|uid| !uid.trim().is_empty()),
             layout: f.layout.clone(),
-            // 旧 bool 字段照旧导出（旧客户端读同一快照时的兼容输入），
+            // 保留源旧 bool 字段作为独立序列化输入；格式版本仍必须匹配，
             // 新真值 mode 同时携带（新客户端以 mode 为准）。
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
@@ -805,7 +859,7 @@ pub async fn config_sync_download(state: State<'_, AppState>) -> AppResult<Strin
         other => return Err(AppError::internal(format!("未知同步后端：{other}"))),
     };
     // 校验是合法 payload（应用前先让前端确认）
-    let _p: SyncPayload = serde_json::from_str(&json)?;
+    parse_payload(&json)?;
     Ok(json)
 }
 
@@ -820,7 +874,7 @@ pub async fn config_sync_plan(
     payload: String,
     mode: Option<String>,
 ) -> AppResult<serde_json::Value> {
-    let p: SyncPayload = serde_json::from_str(&payload)?;
+    let p = parse_payload(&payload)?;
     let mode = match mode.as_deref() {
         None => ApplyMode::Merge,
         Some(raw) => ApplyMode::parse(raw)?,
@@ -918,7 +972,7 @@ pub async fn config_sync_apply(
     expected_version: String,
     expected_backup_path: Option<String>,
 ) -> AppResult<serde_json::Value> {
-    let p: SyncPayload = serde_json::from_str(&payload)?;
+    let p = parse_payload(&payload)?;
     let mode = ApplyMode::parse(&mode)?;
     let conn = state.db.lock().await;
     let (outcome, backup) = apply_with_mirror_backup(
@@ -1033,7 +1087,7 @@ mod tray_mode_tests {
         crate::scheduler::set_tray_text_writer_for_test(Some(capture_tray_text));
 
         let payload: SyncPayload = serde_json::from_value(serde_json::json!({
-            "schema": 2,
+            "schema": 3,
             "uploaded_at": "2026-11-04T00:00:00Z",
             "folders": [],
             "feeds": [],
@@ -1100,7 +1154,7 @@ mod mirror_backup_tests {
 
     fn empty_remote_payload() -> SyncPayload {
         serde_json::from_value(serde_json::json!({
-            "schema": 2,
+            "schema": 3,
             "uploaded_at": "2026-11-04T00:00:00Z",
             "folders": [],
             "feeds": [],

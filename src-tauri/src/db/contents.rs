@@ -293,16 +293,21 @@ pub fn ensure_content(
                 candidate = format!("{base}|c{}", candidate.len());
             }
             None => {
+                let images = crate::sanitize::ordered_images(input_html(input).unwrap_or(""));
+                let images_json = serde_json::to_string(&images)
+                    .map_err(|error| crate::error::AppError::internal(error.to_string()))?;
                 conn.execute(
-                    "INSERT INTO contents(identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO contents(identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted, images_json, image_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         candidate,
                         input.url_norm,
                         input.content_html,
                         input.body_text,
                         input.extraction_source,
-                        input.fulltext_extracted as i64
+                        input.fulltext_extracted as i64,
+                        images_json,
+                        images.len() as i64
                     ],
                 )?;
                 return Ok((conn.last_insert_rowid(), 1, true));
@@ -312,21 +317,4 @@ pub fn ensure_content(
     Err(crate::error::AppError::internal(format!(
         "内容身份冲突无法收敛（{base}）：拒绝写入以避免误并"
     )))
-}
-
-/// FTS 全量重建（派生索引，可从 articles×contents 无损重算）。
-///
-/// **仅被不可改的历史迁移 v22 的钩子消费**（OPT-017B 前 `articles_fts` 的
-/// 回填入口；升级链中 v22 先建、v29 再删）。生产搜索/维护路径不消费本函数；
-/// 函数体保持历史字节，避免历史迁移语义漂移。
-pub fn rebuild_fts(conn: &Connection) -> AppResult<usize> {
-    conn.execute("DELETE FROM articles_fts", [])?;
-    let n = conn.execute(
-        "INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
-         SELECT a.id, a.title, COALESCE(c.body_text, ''), COALESCE(a.author, ''),
-                COALESCE(a.ai_summary, ''), COALESCE(a.translated_content, '')
-         FROM articles a LEFT JOIN contents c ON c.id = a.content_id",
-        [],
-    )?;
-    Ok(n)
 }

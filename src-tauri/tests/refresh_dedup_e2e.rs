@@ -123,7 +123,7 @@ fn all_scope_len(conn: &rusqlite::Connection) -> usize {
 }
 
 #[tokio::test]
-async fn manual_refresh_all_keeps_identity_and_display_dedup_collapses() {
+async fn manual_refresh_all_keeps_cross_source_identity_and_display_independent() {
     let port = start_feed_server();
     let (db, tmp) = setup_db(port);
     let client = app_lib::ingestion::build_client(30);
@@ -140,8 +140,8 @@ async fn manual_refresh_all_keeps_identity_and_display_dedup_collapses() {
         let conn = db.lock().await;
         assert_eq!(
             all_scope_len(&conn),
-            1,
-            "显示层聚合：全部视图折叠为 1（开关的可见效果）"
+            2,
+            "不同源始终独立显示，旧去重开关不能跨源折叠"
         );
     }
 

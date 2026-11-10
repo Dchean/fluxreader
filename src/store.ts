@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { AppState } from './store/types';
 import { bindAppStore } from './store/internals';
-import { bindBodyCacheNotify } from './store/bodyCache';
+import { bindBodyCacheNotify, getBodyEntry } from './store/bodyCache';
 import { createNavSlice } from './store/slices/nav';
 import { createReaderSlice } from './store/slices/reader';
 import { createAiSlice } from './store/slices/ai';
@@ -73,13 +73,35 @@ bindAiCacheInvalidationHandler(() => useAppStore.setState((s) => ({ aiStatusRevi
    AppState.bodyCacheNonce，使经 useAppStore 订阅 entryNeedsHydration /
    selectArticleBody 的组件在记录变化时重算 selector（机制见 bodyCache.ts
    「写入通知」节）。 */
-bindBodyCacheNotify(() => useAppStore.setState((s) => ({ bodyCacheNonce: s.bodyCacheNonce + 1 })));
+bindBodyCacheNotify((changedId, safeTranslation) => useAppStore.setState((s) => {
+  // 按本次变动的实体投影草稿归属：安全水合解除raw，未水合行的raw回退
+  // 进缓存时仍须保持raw。只写store、不回写bodyCache，无通知递归；摘要不改翻译owner。
+  const raw = { ...s.rawTranslatedIds };
+  let entries = s.entries;
+  let changed = false;
+  for (const id of changedId ? [changedId] : Object.keys(raw)) {
+    const body = getBodyEntry(id);
+    // 只有曾持草稿的行保留过渡镜像；缓存接管为安全产物后同时转交值/签名/归属，
+    // 防后续LRU/释放回退到旧未消毒文本。普通已水合行不复制正文/产物。
+    if (safeTranslation && body && body.translationDraftOwner === undefined && entries.some((e) => e.id === id && e.translationDraftOwner)) {
+      entries = entries.map((e) => e.id === id && e.translationDraftOwner
+        ? { ...e, translatedContent: body.translatedContent, translatedSig: body.translatedSig, translationDraftOwner: undefined }
+        : e);
+    }
+    const draft = body ? body.translationDraftOwner : s.entries.find((e) => e.id === id)?.translationDraftOwner;
+    if (draft && !raw[id]) { raw[id] = true; changed = true; }
+    else if (!draft && raw[id]) { delete raw[id]; changed = true; }
+  }
+  return { bodyCacheNonce: s.bodyCacheNonce + 1, ...(changed ? { rawTranslatedIds: raw } : {}),
+    ...(entries !== s.entries ? { entries } : {}),
+  };
+}));
 
 export * from './store/selectors';
 
 /* OPT-013 B3：AI 五态单点真值——判定与生成入口/在途表同一 slice，Reader 与卡片
    一律经本导出消费（不在组件内复制判定逻辑）。 */
-export { selectAiProductState, selectAiStatusInput, selectAiCacheStatus } from './store/slices/ai';
+export { selectAiProductState, selectAiStatusInput, selectAiCacheStatus, selectAiGenerationInput, sameAiGenerationInput } from './store/slices/ai';
 export type { AiProductState } from './store/slices/ai';
 
 export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage, AppErrorEntry } from './store/types';

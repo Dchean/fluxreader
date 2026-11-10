@@ -15,6 +15,14 @@ import type {
   SyncStatusInfo,
   TranslationSegmentPlan,
 } from '../lib/api';
+import type { ReadingSession } from './readingSession';
+import type { GalleryLightboxState } from '../lib/galleryMedia';
+
+export interface ArticleSource {
+  feed: FeedItem;
+  folderId: string | null;
+  layout: ContentLayoutType;
+}
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -98,8 +106,11 @@ export interface SettingsState {
   listWidth: number;
   showReadTime: boolean;
   defaultOpenMode: 'rss' | 'fulltext';
-  /** 智能去重：同 URL 文章跨源只保留首个（入库层拦截） */
-  smartDedup: boolean;
+  articleAutoSummary: boolean;
+  articleAutoTranslate: boolean;
+  socialAutoTranslate: boolean;
+  notificationAutoSummary: boolean;
+  notificationAutoTranslate: boolean;
   /** 关闭按钮 → 最小化到托盘（默认开；托盘「退出」才是真退出） */
   closeToTray: boolean;
   /** 首次关闭询问已展示（true 后关窗直接按 closeToTray 走，不再问） */
@@ -195,13 +206,9 @@ export interface AiCacheStatus {
   translationSegments: TranslationSegmentPlan;
 }
 
-/** OPT-008B R1：scope_counts 的 store 快照（带来源元数据）。
-    布局是快照的一部分：选择器只在该 layout 与当前 activeContentLayout 相等时
-    消费（旧布局快照不得按新布局显示）；`dedup` 记录产生快照时的开关值（口径
-    标签）。分类分组计数在 `folders`（键 'cat-N'）。 */
+/** scope_counts 精确计数带布局身份；旧布局响应不按新布局显示。分类键为 cat-N。 */
 export interface ScopeCountsSnapshot {
   layout: ContentLayoutType;
-  dedup: boolean;
   all: CountsRow;
   folders: Map<string, CountsRow>;
 }
@@ -234,10 +241,11 @@ export interface AppState {
 
   /* ---------- 数据（Tauri 环境 = SQLite 快照；浏览器环境 = 演示数据） ---------- */
   categories: CategoryGroup[];
-  /** 当前视图下应展示的条目完整集合。「全部」视图 = 分页快照（最新 N 篇 +
-      滚动加载）；收藏/未读/今天视图 = 切换时按后端筛选拉取完整列表替换。
-      条目的内容布局由「订阅源布局绑定 → 分类布局」在查询时动态解析。 */
+  /** 已加载的轻量行属性，另可含搜索注入的Reader目标；列表成员与排序只由readingSession拥有。 */
   entries: ArticleEntry[];
+  readingSession: ReadingSession | null;
+  /** 完整来源索引包含退订收藏；categories/feedIndex 只承载活动订阅导航。 */
+  sourceIndex: Map<string, ArticleSource>;
 
   /** feedId → feed 引用的解析表（派生 selector 的公共底座） */
   feedIndex: Map<string, { feed: FeedItem; cat: CategoryGroup }>;
@@ -249,11 +257,7 @@ export interface AppState {
       过滤求和——聚合角标回退路径的底座。 */
   feedCounts: Map<string, { total: number; unread: number; starred: number; today: number }>;
 
-  /** OPT-008B R1：smartDedup 显示集合的 **scope 精确计数快照**
-      （scope_counts：全部 / 每分类 / 每源，按 snapshot.layout 布局过滤）。
-      仅开关开启且取到数据时非空——选择器只在 `layout === activeContentLayout`
-      时消费（旧布局快照不得按新布局显示）；缺快照回退按源求和。
-      独立于 feedCounts：feedCounts 是布局无关的源计数，不得被单布局快照覆盖。 */
+  /** 当前分区的范围精确计数。缺快照回退来源计数；跨源不聚合、同源等价组由后端统一计数。 */
   scopeCounts: ScopeCountsSnapshot | null;
 
   /* ---------- 播客播放器 ---------- */
@@ -269,6 +273,8 @@ export interface AppState {
   lightboxUrl: string | null;
   /** 灯箱图片所属文章条目 id（封面失效上报用；正文图等非封面场景为 null） */
   lightboxEntryId: string | null;
+  /** 画廊按条目的有序图片集合；单图调用保持 null。 */
+  lightboxGallery: GalleryLightboxState | null;
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
   addFeedTargetCatId: string;
@@ -381,13 +387,7 @@ export interface AppState {
       TASK-117：仅作 loaded 计数镜像（供 mock 兜底与调试观察），分页续拉不再
       消费它——续拉游标见 articlesCursor。 */
   articlesLimit: number;
-  /** per-scope 分页游标表：scopeKey（'all' | feedId | 'cat-N'）→ keyset 游标。
-      TASK-117（审计 P1-1）：从「已加载条数（OFFSET）」改为 keyset 锚
-      （ArticlesCursorState）——可变筛选集合（WHERE is_read=0 / is_starred=1）上
-      OFFSET 不等价于已看条数（读 500 标读后集合收缩，下一页仍 OFFSET 500 会跳过
-      500 篇并假 exhausted）；keyset 以已加载窗口最后一行的 (published_at 原文, id)
-      为锚，与集合增删无关地指向「已看过的最后一篇」。
-      详见 internals.scopePageKey 的取舍说明与 ArticlesCursorState 契约注释。 */
+  /** 既有视图缓存的进度镜像；新会话续页只消费 readingSession 的固定成员与 loadedCount。 */
   articlesCursor: Record<string, ArticlesCursorState>;
   /** 正在加载下一批文章（列表底部加载动画） */
   articlesLoading: boolean;
@@ -398,33 +398,29 @@ export interface AppState {
   backendReloadsInFlight: number;
   /** 已加载完所有文章（列表底部显示「到底了」） */
   articlesExhausted: boolean;
-  /** TASK-111②：后台刷新保位信号（nonce）。内容刷新路径（feeds-updated /
-      手动同步 / 单源刷新）的 reload 落地时 bump；导航路径不 bump。Timeline
-      订阅它，变化时消费顶条锚（timelineAnchor）做程序性回位。 */
+  /** 后台属性刷新或同上下文显式重筛落地的保位信号。Timeline消费
+      lib/readingPosition的当前活锚；真正切换返回不走这个通道。 */
   positionRestoreNonce: number;
-  /** TASK-115①：切换返回恢复信号（nonce）。nav 三路径（selectLayout /
-      selectView / selectFeed）**缓存命中**同步恢复 entries 时 bump；cache-miss
-      （重拉新语境）与切排序不 bump。Timeline 订阅它，变化时消费 per-filterKey
-      锚存档（timelineAnchor.peekReturnAnchor）做一次性定位。
+  /** 切换返回恢复信号（nonce）。新会话已准备覆盖真实存档锚的窗口并落地后bump；
+      cache-miss与切排序不bump，同上下文重筛也不消费旧存档。Timeline消费per-filterKey
+      锚存档（readingPosition.peekReturnAnchor）做一次性定位。
       与 positionRestoreNonce（TASK-111 刷新保位）是两个独立信号：切换返回是
       「一次性定位」，刷新保位是「持续跟踪」——触发源/消费路径/锚来源（存档 vs
       活锚）完全分离，互不发出、互不消费对方信号（不叠加保证，见
-      timelineAnchor.ts 头注规则表）。 */
+      readingPosition.ts 头注规则表）。 */
   switchRestoreNonce: number;
   /** TASK-115②：阅读器关闭信号（nonce，不透明计数器）。clearReaderSelection
       关闭阅读器（App.tsx 唯一关闭路径）时 bump。原选中卡 id 不经 store 传递：
       由 Timeline 在 activeArticleId 跟随 effect 里用 ref 记账（关闭 commit 时
       该 ref 保留关闭前值），Timeline 的 readerClose effect 消费本信号把焦点
       归还原选中卡（原卡不在当前列表 → 归零回落）。选型与消费细节见
-      Timeline.tsx readerClose effect 注释与 timelineAnchor.ts 头注 X2 节；
+      Timeline.tsx readerClose effect 注释与 readingPosition.ts 头注 X2 节；
       nonce 而非布尔/id 字段：连续两次开关同一篇文章也要每次触发归还
       （id 字段值不变无法重触发 effect）。 */
   readerCloseNonce: number;
   /** 滚动到底部时按需拉取下一批文章（追加到 entries）。 */
   loadMoreArticles: () => Promise<void>;
-  /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表并替换 entries。
-      这些视图需要完整数据，而「全部」视图的 entries 是分页快照。
-      TASK-111②：opts.keepReadingPosition 仅由后台刷新透传（保位信号）。 */
+  /** 旧调用入口统一到当前会话刷新；成员重建由显式导航失效决定。 */
   reloadFilteredEntries: (view: ViewFilterType, opts?: { keepReadingPosition?: boolean }) => Promise<void>;
   /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
       （而非从头拉 500 篇），并选中该文章。解决「搜索结果是很老的文章时，
@@ -467,6 +463,8 @@ export interface AppState {
   triggerReaderSummary: (opts?: { silent?: boolean }) => void;
   /** 列表卡片就地摘要（通知布局）：按文章 id 流式生成，不依赖阅读器选中态 */
   summarizeEntry: (id: string, opts?: { silent?: boolean }) => void;
+  /** 组件提供仍在阅读的资格函数，验签后/收费请求前再检查；不自动重试失败。 */
+  startAutomaticAi: (id: string, kind: AiProductKind, isCurrent: () => boolean) => void;
   /** 滚动触发的批量已读（滚出列表/正文到底）：静默、只标未读项 */
   markEntriesReadBulk: (ids: string[]) => void;
   /** 卡片级翻译（社交/通知卡）：按 id 流式生成该条目译文，不依赖 Reader 选中态（P1-7） */
@@ -547,6 +545,9 @@ export interface AppState {
   /** 取消首次关闭询问：只隐藏弹窗，不提交 resolve_close，也不写记住选择。 */
   dismissCloseAsk: () => void;
   openLightbox: (url: string, entryId?: string) => void;
+  openGalleryLightbox: (entryId: string) => void;
+  refreshGalleryLightbox: () => void;
+  stepGalleryLightbox: (delta: -1 | 1) => void;
   closeLightbox: () => void;
   openNewCategoryModal: () => void;
   openAddFeedModal: (catId: string) => void;
@@ -634,8 +635,8 @@ export interface AppState {
   refreshOneFeed: (feedId: string) => void;
   updateCatLayout: (catId: string, layout: ContentLayoutType) => void;
   updateFeedLayout: (catId: string, feedId: string, layout: string) => void;
-  toggleCatSummary: (catId: string, val: boolean) => void;
-  toggleCatTranslate: (catId: string, val: boolean) => void;
+  toggleCatSummary: (catId: string, mode: FeedAiMode) => void;
+  toggleCatTranslate: (catId: string, mode: FeedAiMode) => void;
   /** OPT-011：源级三态开关（'inherit' | 'on' | 'off'）——显式关闭压过分类开启 */
   toggleFeedSummary: (catId: string, feedId: string, mode: FeedAiMode) => void;
   toggleFeedTranslate: (catId: string, feedId: string, mode: FeedAiMode) => void;

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../../store';
+import { useAppStore, resolveFeedLayout } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { deleteRemoteLine } from '../../lib/syncPill';
 import { Icons } from '../icons';
-import { FluxDropdown, SwitchInline, ConfirmDialog, AiModeSelect } from '../primitives';
+import { FluxDropdown, ConfirmDialog, AiModeSelect } from '../primitives';
 import { normalizeFeedAiMode } from '../../types';
+import { aiCapabilities, categoryAiDefaults, layoutAiDefaults } from '../../store/aiPolicy';
 import type { ContentLayoutType } from '../../types';
 import { LAYOUT_OPTIONS } from './layoutOptions';
 import { LAYOUT_NO_AI, type PendingDelete } from './shared';
@@ -20,6 +21,7 @@ import { unknownDeleteImpactWarning } from '../../lib/copyPolicy';
 
 export function FeedsTab() {
   const categories = useAppStore((s) => s.categories);
+  const settings = useAppStore((s) => s.settings);
   const openNewCategoryModal = useAppStore((s) => s.openNewCategoryModal);
   const openAddFeedModal = useAppStore((s) => s.openAddFeedModal);
   const openEditFeedModal = useAppStore((s) => s.openEditFeedModal);
@@ -135,6 +137,11 @@ export function FeedsTab() {
       )}
 
       {categories.map((cat) => {
+        // 组布局不限制源的显式布局；有任何支持能力的成员就必须能在组层关闭。
+        const groupSummary = aiCapabilities(cat.layout).summary
+          || cat.feeds.some((feed) => aiCapabilities(resolveFeedLayout(feed, cat.layout)).summary);
+        const groupTranslate = aiCapabilities(cat.layout).translation
+          || cat.feeds.some((feed) => aiCapabilities(resolveFeedLayout(feed, cat.layout)).translation);
         return (
           <div className="feed-group-mgr-box" key={cat.id}>
             <div className="group-mgr-header">
@@ -166,26 +173,28 @@ export function FeedsTab() {
 
                 <label
                   className="mgr-checkbox-label"
-                  title="分类默认：自动生成 AI 摘要（仅对其下「继承」的源生效；源显式关闭优先）"
-                  style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
+                  title="分类默认：自动生成 AI 摘要（继承布局默认；源显式选择优先）"
+                  style={!groupSummary ? { display: 'none' } : undefined}
                 >
-                  <SwitchInline
-                    compact
+                  <AiModeSelect
                     ariaLabel={`${cat.name}默认自动摘要`}
-                    checked={cat.autoSummary}
+                    mode={normalizeFeedAiMode(cat.summaryMode)}
+                    inheritLabel="继承布局"
+                    categoryOn={layoutAiDefaults(settings, cat.layout).autoSummary}
                     onChange={(v) => toggleCatSummary(cat.id, v)}
                   />
                   摘要
                 </label>
                 <label
                   className="mgr-checkbox-label"
-                  title="分类默认：自动翻译正文（仅对其下「继承」的源生效；源显式关闭优先）"
-                  style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
+                  title="分类默认：自动翻译正文（继承布局默认；源显式选择优先）"
+                  style={!groupTranslate ? { display: 'none' } : undefined}
                 >
-                  <SwitchInline
-                    compact
+                  <AiModeSelect
                     ariaLabel={`${cat.name}默认自动翻译`}
-                    checked={cat.autoTranslate}
+                    mode={normalizeFeedAiMode(cat.translateMode)}
+                    inheritLabel="继承布局"
+                    categoryOn={layoutAiDefaults(settings, cat.layout).autoTranslate}
                     onChange={(v) => toggleCatTranslate(cat.id, v)}
                   />
                   翻译
@@ -248,16 +257,15 @@ export function FeedsTab() {
                   </div>
                   <div className="group-mgr-feed-controls">
                     {/* OPT-011：源级 AI 开关是三态（继承分类 / 开启 / 关闭）——
-                        显式关闭压过分类开启；显示值取 mode 真值（旧 bool 只作
-                        缺 mode 时的映射输入）。关闭的生效边界：只阻止尚未发起的
+                        显式关闭压过分类开启；显示值只取 mode 真值。关闭的生效边界：只阻止尚未发起的
                         自动请求，已发送的请求不会撤销（不声称可撤销已发送内容）。 */}
                     <span
                       className="mgr-ai-mode-label"
-                      style={noAi ? { display: 'none' } : undefined}
+                      style={noAi || effLayout === 'social' ? { display: 'none' } : undefined}
                     >
                       <AiModeSelect
-                        mode={normalizeFeedAiMode(f.summaryMode, f.autoSummary)}
-                        categoryOn={cat.autoSummary}
+                        mode={normalizeFeedAiMode(f.summaryMode)}
+                        categoryOn={categoryAiDefaults(settings, effLayout, cat).autoSummary}
                         onChange={(m) => toggleFeedSummary(cat.id, f.id, m)}
                         title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                         ariaLabel={`${f.name}自动摘要`}
@@ -269,8 +277,8 @@ export function FeedsTab() {
                       style={noAi ? { display: 'none' } : undefined}
                     >
                       <AiModeSelect
-                        mode={normalizeFeedAiMode(f.translateMode, f.autoTranslate)}
-                        categoryOn={cat.autoTranslate}
+                        mode={normalizeFeedAiMode(f.translateMode)}
+                        categoryOn={categoryAiDefaults(settings, effLayout, cat).autoTranslate}
                         onChange={(m) => toggleFeedTranslate(cat.id, f.id, m)}
                         title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                         ariaLabel={`${f.name}自动翻译`}

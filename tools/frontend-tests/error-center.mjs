@@ -322,8 +322,9 @@ export async function run(ctx) {
   }
   checkNew('(e9) 迁移完整性：全部重试调用点的动作对象窗口（到下一个 label 或 240 字符）内含显式 key（漏 key 即回落文案去重——新重试点必须带 key）',
     retrySites > 0 && missingKey.length === 0, missingKey.join('；'));
-  checkNew('(e9) 迁移清单钉死：src 下恰 29 个 `label: \'重试\'` 调用点（含后台同步失败入口；任何新增/删除重试点必须同步本守卫）',
-    retrySites === 29);
+  // 旧29增加ReadingSession忙页重试入口；AiTab初读用内联按钮，不属于toast清单。
+  checkNew('(e9) toast重试入口清单30处（新增ReadingSession忙页重试），新增入口必须复核key',
+    retrySites === 30);
   checkNew('(e9) key 形态守卫：各操作实体族 key 以「key: \'…\' / key: `…`」字面出现在 src（域:操作:实体；注释里的示例提及不算）',
     ['feed:refresh:', 'feed:add:', 'ai:summary:', 'ai:translate:', 'reader:fulltext:', 'reader:content:', 'list:load-more', 'mark:all-read', 'sync:manual', 'sync:save-and-sync', 'sync:instant-push', 'sync:local-feeds']
       .every((k) => allSrc.includes(`'${k}`) || allSrc.includes(`\`${k}`)));

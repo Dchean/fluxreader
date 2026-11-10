@@ -28,21 +28,9 @@ feed_by_remote_id / set_folder_remote_id），生产零调用。
 
 /// Pull 合并所需的全部匹配映射（一次批量预取）。
 pub struct SyncMatchMaps {
-    /// 规范化 URL（url_norm）→ article id（全局最小 id）。
-    /// OPT-008B 起仅服务「远端 feed 未绑定」的有限兼容路径（跨源副本记账 +
-    /// 已读广播）；**同源匹配不再消费它**——条目的精确身份是 remote_id 与
-    /// （同 feed, url_norm）对，见 [`Self::feed_url_to_id`]。
-    pub url_to_id: HashMap<String, i64>,
-    /// (feed id, 规范化 URL) → article id（同 feed 最小 id）。
-    /// OPT-008B 第一阶段：URL 兜底只在**同一订阅源内**选行；跨源同 URL 各自
-    /// 独立成条目，不得再被全局 URL 映射吞并（旧 `url_to_id` 先于 remote_id
-    /// 匹配的根因）。
-    pub feed_url_to_id: HashMap<(i64, String), i64>,
-    /// 规范化 URL → 该 URL 的全部 article id（升序）。
-    /// 已读广播的同文副本选择集：本地标读一条 → 推送广播到这些行的 remote_id；
-    /// 远端任一副本已读 → 拉取合并广播到其余行。「同文」判定为 url_norm 相等
-    /// （008A 保守规范化；内容等价的安全依据留待第二阶段 contents）。
-    pub url_norm_to_ids: HashMap<String, Vec<i64>>,
+    /// Active source identity/lifecycle captured before HTTP, never refreshed mid-pull.
+    pub source_versions: HashMap<i64, (String, i64)>,
+    pub excluded_feed_ids: HashSet<i64>,
     /// article id → remote_id（None 表示未绑定）
     pub id_to_mf_id: HashMap<i64, Option<i64>>,
     /// article id → 其所属 feed 的 remote_id（None 表示 feed 未绑定）。
@@ -55,15 +43,6 @@ pub struct SyncMatchMaps {
     pub pending_read_ids: HashSet<i64>,
     /// 有「已入队未推送」star/unstar 变更的 article id 集合（字段粒度）
     pub pending_star_ids: HashSet<i64>,
-    /// 本轮拉取中**已落定「已读」**的 article id 集合（own 远端已读或兄弟已读
-    /// 广播，任一先落定即入集合）。顺序确定性政策（OPT-008B R1，单点）：
-    /// 「读到哪算读」——同轮内任何已读信号优先于 own 行的远端 unread；
-    /// own unread 只在「本轮从未有过已读信号」时才翻转该行。
-    /// 由此「A 已读 / B 未读」无论本页处理顺序如何都收敛到同一结果（B 读），
-    /// 与「标读广播同内容副本」的被接受政策一致；unread 永不广播。
-    /// 跨轮无影响：已读信号每轮随 own entry 重新产生，远端保持未读的行若同组
-    /// 再无已读副本，own unread 照常生效（unread 只认绑定同源 entry 的边界仍立）。
-    pub explicit_read_ids: HashSet<i64>,
     /// article id → (read_version, star_version)：**pull 起点**的字段版本快照。
     /// OPT-007 字段版本持久守卫：远端合并按「快照版本 == 当前 DB 版本 且 该字段
     /// 无 pending」接受该字段；不符则跳过（本地在拉取期间写过的字段不得被旧
@@ -91,48 +70,46 @@ impl SyncMatchMaps {
     /// 与 upsert_remote_entry 的补记口径一致；该行若确有本地写入（版本 > 0）
     /// 会被守卫拒绝，宁可跳过远端合并也不冒回滚风险。
     ///
-    /// R1 起同时**携带本轮已落定的已读集合**（explicit_read_ids）：重建发生在
-    /// 同一轮中途（失败分块之后），已学到的「该行本轮已读」必须继续对后续分块
-    /// 的 own unread 合并生效，否则顺序确定性会在重建点断裂。
     pub fn keep_field_versions_from(&mut self, previous: &SyncMatchMaps) {
+        self.source_versions.clone_from(&previous.source_versions);
         for (aid, version) in self.id_to_versions.iter_mut() {
             *version = previous.id_to_versions.get(aid).copied().unwrap_or((0, 0));
         }
-        for aid in previous.explicit_read_ids.iter() {
-            self.explicit_read_ids.insert(*aid);
+    }
+
+    pub fn feed_source_is_current(&self, conn: &Connection, feed_id: i64) -> AppResult<bool> {
+        let Some((source_id, version)) = self.source_versions.get(&feed_id) else {
+            return Ok(false);
+        };
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM feeds WHERE id=?1 AND active=1 AND sync_id=?2 AND lifecycle_version=?3)",
+            params![feed_id, source_id, version], |r| r.get(0),
+        )?)
+    }
+
+    pub fn article_source_is_current(&self, conn: &Connection, article_id: i64) -> AppResult<bool> {
+        let feed_id: Option<i64> = conn
+            .query_row(
+                "SELECT feed_id FROM articles WHERE id=?1",
+                [article_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match feed_id {
+            Some(feed_id) => self.feed_source_is_current(conn, feed_id),
+            None => Ok(false),
         }
     }
 }
 
 /// 一次批量查询构建 Pull 合并所需的全部匹配映射。
 pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
-    // 1. URL 映射族（全局最小 id / 同 feed 最小 id / 全量行集）
-    let mut url_to_id = HashMap::new();
-    let mut feed_url_to_id = HashMap::new();
-    let mut url_norm_to_ids: HashMap<String, Vec<i64>> = HashMap::new();
-    {
-        // ORDER BY id：同 URL 多篇时「最小 id」口径（or_insert 保留首见，
-        // 首见即最小 id）；全量行集按 id 升序天然有序。
-        let mut stmt = conn.prepare(
-            "SELECT feed_id, url_norm, id FROM articles WHERE url_norm IS NOT NULL ORDER BY id",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (feed_id, url_norm, id) = row?;
-            url_to_id.entry(url_norm.clone()).or_insert(id);
-            feed_url_to_id
-                .entry((feed_id, url_norm.clone()))
-                .or_insert(id);
-            url_norm_to_ids.entry(url_norm).or_default().push(id);
-        }
-    }
-
+    let source_versions = {
+        let mut stmt =
+            conn.prepare("SELECT id,sync_id,lifecycle_version FROM feeds WHERE active=1")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+        rows.collect::<Result<HashMap<_, _>, _>>()?
+    };
     // 2. id → remote_id（含 None 的也要，用 Option 区分「未绑定」与「不存在」）
     let mut id_to_mf_id: HashMap<i64, Option<i64>> = HashMap::new();
     // 3. id → 所属 feed 的 remote_id（信任复核用，见字段注释）
@@ -144,7 +121,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     {
         let mut stmt = conn.prepare(
             "SELECT a.id, a.remote_id, f.remote_id, a.read_version, a.star_version FROM articles a
-             JOIN feeds f ON f.id = a.feed_id",
+             JOIN feeds f ON f.id = a.feed_id WHERE f.active = 1",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -192,8 +169,9 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     // 5. feed mf_id → feed id
     let mut feed_mf_to_id = HashMap::new();
     {
-        let mut stmt =
-            conn.prepare("SELECT remote_id, id FROM feeds WHERE remote_id IS NOT NULL")?;
+        let mut stmt = conn.prepare(
+            "SELECT remote_id, id FROM feeds WHERE remote_id IS NOT NULL AND active = 1",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (mf_id, id) = row?;
@@ -201,16 +179,19 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
         }
     }
 
+    let mut excluded_stmt =
+        conn.prepare("SELECT remote_id FROM feeds WHERE active = 0 AND remote_id IS NOT NULL")?;
+    let excluded_feed_ids = excluded_stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
     Ok(SyncMatchMaps {
-        url_to_id,
-        feed_url_to_id,
-        url_norm_to_ids,
+        source_versions,
+        excluded_feed_ids,
         id_to_mf_id,
         id_to_feed_mf,
         pending_ids,
         pending_read_ids,
         pending_star_ids,
-        explicit_read_ids: HashSet::new(),
         id_to_versions,
         feed_mf_to_id,
         mf_id_to_article,
@@ -230,91 +211,6 @@ pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppR
         params![remote_id, id],
     )?;
     Ok(n > 0)
-}
-
-/// 记账服务端同文副本 entry（跨源同 URL 的另一条 entry）。
-/// 幂等：已在列表中不重复；上限 16 个防脏数据撑爆字段。
-pub fn add_article_dup_entry(conn: &Connection, id: i64, dup_entry_id: i64) -> AppResult<()> {
-    if dup_entry_id <= 0 {
-        return Ok(());
-    }
-    let cur: String = conn
-        .query_row(
-            "SELECT COALESCE(remote_dup_ids, '') FROM articles WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_default();
-    let ids: Vec<i64> = cur
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    if ids.contains(&dup_entry_id) || ids.len() >= 16 {
-        return Ok(());
-    }
-    let mut next = ids;
-    next.push(dup_entry_id);
-    let joined = next
-        .iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    conn.execute(
-        "UPDATE articles SET remote_dup_ids = ?1 WHERE id = ?2",
-        params![joined, id],
-    )?;
-    Ok(())
-}
-
-/// 读某文章的副本 entry 列表（广播已读/收藏用）
-pub fn article_dup_entries(conn: &Connection, id: i64) -> AppResult<Vec<i64>> {
-    let cur: Option<String> = conn
-        .query_row(
-            "SELECT remote_dup_ids FROM articles WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(cur
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect())
-}
-
-/// 已读广播的推送目标集（OPT-008B 第一阶段消费点：push::plan_push 的 read 分支）。
-///
-/// 组成（选择规则显式化，不依赖“入库被吞”）：
-/// - **同文兄弟条目**：`url_norm` 相等的其它文章行、已绑定 remote_id 的——
-///   跨源同 URL 的副本现在是各自独立的持久条目（各源可达、收藏独立），标读的
-///   跨源传播由本集合承载；不区分布局（布局是呈现维度，与本政策无关）。
-/// - **旧 CSV 记账**（remote_dup_ids，有限兼容）：远端 feed 未绑定、无法成行的
-///   历史副本 entry id 仍覆盖；full 重拉按真实 feed 补行后自然走兄弟集合。
-///
-/// 返回自身之外的 remote_id 去重集合（调用方另行放入自身的 remote_id）。
-pub fn read_broadcast_targets(conn: &Connection, article_id: i64) -> AppResult<Vec<i64>> {
-    let mut out: Vec<i64> = Vec::new();
-    let url_norm: Option<String> = conn
-        .query_row(
-            "SELECT url_norm FROM articles WHERE id = ?1",
-            params![article_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    if let Some(norm) = url_norm {
-        let mut stmt = conn.prepare(
-            "SELECT remote_id FROM articles
-             WHERE url_norm = ?1 AND id != ?2 AND remote_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![norm, article_id], |r| r.get::<_, i64>(0))?;
-        out.extend(rows.collect::<Result<Vec<_>, _>>()?);
-    }
-    out.extend(article_dup_entries(conn, article_id)?);
-    out.sort_unstable();
-    out.dedup();
-    Ok(out)
 }
 
 /* ============================================================
@@ -536,12 +432,23 @@ pub fn match_remote_feed(
         tx.commit()?;
         return Ok(None);
     };
-    set_feed_remote_id(&tx, local_id, remote_id)?;
-    let before: (String, String, Option<String>) = tx.query_row(
-        "SELECT feed_url,title,site_url FROM feeds WHERE id = ?1",
+    let before: (String, String, Option<String>, bool) = tx.query_row(
+        "SELECT feed_url,title,site_url,active FROM feeds WHERE id = ?1",
         [local_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
+    // A remote reappearance may revive a remotely removed source, never a local tombstone.
+    if !before.3 && (feed_url_tombstoned(&tx, &before.0)? || feed_url_tombstoned(&tx, feed_url)?) {
+        tx.commit()?;
+        return Ok(Some((local_id, false)));
+    }
+    set_feed_remote_id(&tx, local_id, remote_id)?;
+    if !before.3 {
+        tx.execute(
+            "UPDATE feeds SET active=1,lifecycle_version=lifecycle_version+1 WHERE id=?1",
+            [local_id],
+        )?;
+    }
     // 先按旧 URL 判断占位标题；URL 更新不能令旧占位标题失去回填资格。
     update_feed_title_if_empty(&tx, local_id, title, site_url)?;
     tx.execute(
@@ -550,10 +457,10 @@ pub fn match_remote_feed(
             AND (feed_url IS NOT ?1 OR site_url IS NOT COALESCE(?2, site_url))",
         params![feed_url, site_url, local_id],
     )?;
-    let after: (String, String, Option<String>) = tx.query_row(
-        "SELECT feed_url,title,site_url FROM feeds WHERE id = ?1",
+    let after: (String, String, Option<String>, bool) = tx.query_row(
+        "SELECT feed_url,title,site_url,active FROM feeds WHERE id = ?1",
         [local_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     tx.commit()?;
     Ok(Some((local_id, before != after)))
@@ -574,7 +481,7 @@ pub fn feed_id_by_url(conn: &Connection, feed_url: &str) -> AppResult<Option<i64
 /// 按 URL 检查 feed 是否存在（OPML 导入去重用）
 pub fn feed_exists_by_url(conn: &Connection, feed_url: &str) -> AppResult<bool> {
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url = ?1 AND active = 1)",
         params![feed_url],
         |r| r.get(0),
     )?;
@@ -708,7 +615,7 @@ pub fn update_article_image_if_empty(
     image_url: &str,
 ) -> AppResult<()> {
     conn.execute(
-        "UPDATE articles SET image_url = COALESCE(image_url, ?1) WHERE id = ?2",
+        "UPDATE articles SET image_url = ?1, image_source='page' WHERE id = ?2 AND NULLIF(trim(image_url),'') IS NULL",
         params![image_url, article_id],
     )?;
     Ok(())
@@ -721,6 +628,7 @@ pub fn export_feeds_with_folders(
     let mut stmt = conn.prepare(
         "SELECT f.title, f.feed_url, fo.name
          FROM feeds f LEFT JOIN folders fo ON f.folder_id = fo.id
+         WHERE f.active = 1
          ORDER BY fo.name, f.title",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -736,7 +644,7 @@ pub fn export_feeds_with_folders(
 /// 统计未绑定的本地源数量（sync_save 首连判定用）
 pub fn count_unbound_local_feeds(conn: &Connection) -> AppResult<i64> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
+        "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL AND active = 1",
         [],
         |r| r.get(0),
     )?;
@@ -747,7 +655,7 @@ pub fn count_unbound_local_feeds(conn: &Connection) -> AppResult<i64> {
 pub fn list_unbound_local_feeds(conn: &Connection) -> AppResult<Vec<(i64, String, Option<i64>)>> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
-         WHERE f.origin = 'local' AND f.remote_id IS NULL",
+         WHERE f.origin = 'local' AND f.remote_id IS NULL AND f.active = 1",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1093,7 +1001,8 @@ fn fill_visible(
     Ok(row)
 }
 
-/// 同步专用：回填文章内容字段（本地为空才补，Pull 段正文兜底用）。
+/// 兼容回填入口：本地为空才补；image_url 参数是独立补充封面，标 page。
+/// 正常协议正文/派生图修订走 NewArticle 与 refresh_bound_remote_article，明确标 rss。
 ///
 /// F07：补全的 HTML 必须与首次入库走同一净化边界——此前原始 HTML 直接补入空
 /// content_html，绕过了 sanitizer 并一路抵达 dangerouslySetInnerHTML。
@@ -1171,14 +1080,14 @@ pub fn backfill_article_content(
                     super::contents::ensure_content(conn, &input, Some(article_id))?;
                 if Some(content_id) != before.content_id {
                     conn.execute(
-                        "UPDATE articles SET content_id = ?1 WHERE id = ?2",
+                        "UPDATE articles SET content_id = ?1, rss_content_id = COALESCE(rss_content_id,?1) WHERE id = ?2",
                         params![content_id, article_id],
                     )?;
                     // 重指后旧行若无引用：回收（最后引用才回收；触发器只在条目删除时兜底）
                     if let Some(old_id) = before.content_id {
                         conn.execute(
                             "DELETE FROM contents WHERE id = ?1
-                             AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1)",
+                             AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)",
                             params![old_id],
                         )?;
                     }
@@ -1189,7 +1098,8 @@ pub fn backfill_article_content(
     }
     conn.execute(
         "UPDATE articles SET
-            image_url = COALESCE(image_url, ?1),
+            image_source = CASE WHEN NULLIF(trim(image_url),'') IS NULL AND ?1 IS NOT NULL THEN 'page' ELSE image_source END,
+            image_url = COALESCE(NULLIF(trim(image_url),''), ?1),
             enclosure_url = COALESCE(enclosure_url, ?2),
             enclosure_mime = COALESCE(enclosure_mime, ?3)
          WHERE id = ?4",

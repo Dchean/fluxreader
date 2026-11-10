@@ -1,7 +1,7 @@
 // Note: 查询范围单点派生、keyset 游标与代际守卫 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
 import type { StoreApi } from 'zustand';
-import { api, extractError } from '../lib/api';
-import type { ArticleListItemRow } from '../lib/api';
+import { api, extractError, feedRowToItem } from '../lib/api';
+import type { ArticleListItemRow, FeedRow } from '../lib/api';
 import type {
   ArticleEntry,
   CategoryGroup,
@@ -15,7 +15,7 @@ import type { BodyRowFact } from './bodyCache';
 /* OPT-017F：id 解析单点——原模块内私有同名副本（避免 internals ↔ selectors
    循环依赖）已收敛到共享叶模块，两个层级都只依赖 ./scopeId。 */
 import { numericId } from './scopeId';
-import type { AppState, ArticlesCursorState, ScopeCountsSnapshot } from './types';
+import type { AppState, ArticleSource, ArticlesCursorState, ScopeCountsSnapshot } from './types';
 
 /* ============================================================
    跨 slice 共享的模块级基础设施。
@@ -29,9 +29,14 @@ import type { AppState, ArticlesCursorState, ScopeCountsSnapshot } from './types
 
 /** store 句柄：由 store.ts 在 create() 后注入（模块求值期不调用任何 helper） */
 let appStoreRef: StoreApi<AppState> | undefined;
+let releaseFlagHistorySubscription: (() => void) | undefined;
 
 export function bindAppStore(api: StoreApi<AppState>): void {
+  releaseFlagHistorySubscription?.();
   appStoreRef = api;
+  releaseFlagHistorySubscription = api.subscribe((state, previous) => {
+    if (state.readingSession !== previous.readingSession || state.entries !== previous.entries) scheduleFlagHistoryPrune();
+  });
 }
 
 /** store 句柄读取：未注入即显式抛错。
@@ -81,6 +86,7 @@ export interface ViewEntriesSnapshot {
   entries: ArticleEntry[];
   cursor: ArticlesCursorState;
   exhausted: boolean;
+  windowStart?: number;
 }
 
 class LRUMap<V> extends Map<string, V> {
@@ -109,8 +115,17 @@ class LRUMap<V> extends Map<string, V> {
       if (oldest === undefined) break;
       super.delete(oldest);
     }
+    scheduleFlagHistoryPrune();
     return this;
   }
+
+  delete(key: string): boolean {
+    const deleted = super.delete(key);
+    if (deleted) scheduleFlagHistoryPrune();
+    return deleted;
+  }
+
+  clear(): void { super.clear(); scheduleFlagHistoryPrune(); }
 }
 
 export const viewEntriesCache: Map<string, ViewEntriesSnapshot> = new LRUMap<ViewEntriesSnapshot>(VIEW_ENTRIES_CACHE_MAX);
@@ -123,9 +138,9 @@ export const viewEntriesCache: Map<string, ViewEntriesSnapshot> = new LRUMap<Vie
     窗口）；mock 模式无游标（articlesCursor 空表），调用方以
     emptyArticlesCursor(articlesLimit) 兜底，让恢复游标退回「快照长度」——与
     预算引入前的恢复行为逐字一致。 */
-export function setViewEntriesSnapshot(key: string, entries: ArticleEntry[], cursor: ArticlesCursorState, exhausted: boolean): void {
+export function setViewEntriesSnapshot(key: string, entries: ArticleEntry[], cursor: ArticlesCursorState, exhausted: boolean, windowStart = 0): void {
   const trimmed = entries.length > VIEW_ENTRIES_CACHE_ENTRY_BUDGET ? entries.slice(0, VIEW_ENTRIES_CACHE_ENTRY_BUDGET) : entries;
-  viewEntriesCache.set(key, { entries: trimmed, cursor: { ...cursor, loaded: Math.max(cursor.loaded, trimmed.length) }, exhausted });
+  viewEntriesCache.set(key, { entries: trimmed, cursor: { ...cursor, loaded: Math.max(cursor.loaded, trimmed.length) }, exhausted, windowStart });
 }
 
 /** 视图缓存 key：布局 × 视图 × 订阅范围（scope）。
@@ -307,14 +322,36 @@ export function buildFeedIndex(categories: CategoryGroup[]) {
   return map;
 }
 
+/** 导航只含活动源；文章来源另保留退订源自身身份及冻结分区。 */
+export function buildSourceIndex(categories: CategoryGroup[], rows: readonly FeedRow[] = []): Map<string, ArticleSource> {
+  const sources = new Map<string, ArticleSource>();
+  for (const row of rows) {
+    const feed = feedRowToItem(row);
+    const category = categories.find((cat) => cat.id === `cat-${row.folder_id}`);
+    sources.set(feed.id, {
+      feed,
+      folderId: feed.subscriptionState === 'retained' ? null : category?.id ?? null,
+      layout: feed.effectiveLayout ?? (feed.layout === 'inherit' ? category?.layout ?? 'article' : feed.layout),
+    });
+  }
+  for (const cat of categories) {
+    for (const feed of cat.feeds) sources.set(feed.id, {
+      feed, folderId: cat.id, layout: feed.layout === 'inherit' ? cat.layout : feed.layout,
+    });
+  }
+  return sources;
+}
+
 /** categories 变更后统一收口：重建解析表 + 级联清理已无归属的条目 */
 export function reconcileCategories(
-  s: Pick<AppState, 'categories' | 'entries'>,
+  s: Pick<AppState, 'categories' | 'entries'> & Partial<Pick<AppState, 'sourceIndex' | 'readingSession'>>,
   nextCategories: CategoryGroup[],
-): Pick<AppState, 'categories' | 'feedIndex' | 'entries'> {
+): Pick<AppState, 'categories' | 'feedIndex' | 'sourceIndex' | 'entries'> {
   const index = buildFeedIndex(nextCategories);
-  const entries = s.entries.filter((e) => index.has(e.feedId));
-  return { categories: nextCategories, feedIndex: index, entries };
+  const sourceIndex = new Map(s.sourceIndex);
+  for (const [id, source] of buildSourceIndex(nextCategories)) sourceIndex.set(id, source);
+  const entries = s.readingSession ? s.entries : s.entries.filter((e) => index.has(e.feedId) || sourceIndex.get(e.feedId)?.feed.subscriptionState === 'retained');
+  return { categories: nextCategories, feedIndex: index, sourceIndex, entries };
 }
 
 /** TASK-103（REQ-001）→ TASK-122（审计 P2-3）架构重构：快照替换共用实现——
@@ -378,30 +415,42 @@ export function mergeSnapshotEntries(
   const translatingIds = appStore().getState().translatingIds;
   const entries = nextEntries.map((a) => {
     const prev = prevById.get(a.id);
-    /* 无旧条目 → 原样返回 */
-    if (!prev) return a;
     let merged = a;
     const generating = !!(generatingIds[a.id] || translatingIds[a.id]);
     /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值）。
        OPT-013 B1：签名与被保留的产物成对——行清空但保留了 prev 的产物时，
        签名也必须取 prev 的（否则「旧产物 + 新签名为空」会误现 stale「已过期」）。 */
-    if (generating && (prev.aiSummary || prev.translatedContent)) {
+    if (prev && generating && (prev.aiSummary || prev.translatedContent)) {
       merged = {
         ...merged,
         aiSummary: merged.aiSummary || prev.aiSummary,
         translatedContent: merged.translatedContent || prev.translatedContent,
         aiSummarySig: merged.aiSummary ? merged.aiSummarySig : prev.aiSummarySig,
         translatedSig: merged.translatedContent ? merged.translatedSig : prev.translatedSig,
+        translationDraftOwner: merged.translatedContent ? merged.translationDraftOwner : prev.translationDraftOwner,
       };
-    } else if (prev.url && !a.url) {
+    } else if (prev?.url && !a.url) {
       /* 轻字段继承：仅 url（详情行字段）——其余列一律本次行真值 */
       merged = { ...merged, url: prev.url };
     }
     /* R3/R4（P2-2）：读取发起后被本地写过/仍在途的字段保留本地值——旧快照
        不得把已提交的点读/藏或未落定的乐观意图翻回；字段独立判定（读被写不
        牵连藏，反之亦然）。 */
-    if (isProtectedField(a.id, 'isRead')) merged = { ...merged, isRead: prev.isRead };
-    if (isProtectedField(a.id, 'isStarred')) merged = { ...merged, isStarred: prev.isStarred };
+    for (const field of ['isRead', 'isStarred'] as const) {
+      const key = entryVersionKey(a.id, field);
+      const chain = flagWrites.get(key);
+      // 未驻留成员先前无可猜的基线；首次真实属性给失败回滚提供原值。
+      if (chain) {
+        if (chain.baseline === undefined) chain.baseline = a[field];
+        // 首次出现前没有对这个身份扣过乐观计数，计数基线仍是快照原值，
+        // 不能把被pending遮盖后的可见true当作已经扣减，再在失败时多加1。
+        chain.projected ??= { feedId: a.feedId, value: chain.baseline };
+      }
+      if (isProtectedField(a.id, field)) {
+        const value = entryFieldValues.get(key)?.value ?? prev?.[field];
+        if (value !== undefined) merged = { ...merged, [field]: value };
+      }
+    }
     return merged;
   });
   if (fromBackend) {
@@ -471,6 +520,11 @@ export function mergeSnapshotEntries(
       if (!isProtectedField(a.id, 'isStarred') || (src !== undefined && src.isStarred === a.isStarred)) {
         bumpEntryVersion(a.id, 'isStarred');
       }
+      // 新鲜后端读取可接管本地影子；更早的在途读取仍需保留最新已接受值。
+      for (const field of ['isRead', 'isStarred'] as const) {
+        const value = entryFieldValues.get(entryVersionKey(a.id, field));
+        if (value && !isProtectedField(a.id, field)) value.value = a[field];
+      }
       facts.set(a.id, { aiSummary: a.aiSummary, translatedContent: a.translatedContent, aiSummarySig: a.aiSummarySig ?? null, translatedSig: a.translatedSig ?? null, snippet: a.snippet });
     }
     for (const p of prevEntries) prevSnippets.set(p.id, p.snippet);
@@ -495,6 +549,7 @@ export function syncCurrentViewCache(entries: ArticleEntry[]) {
     entries,
     cursor,
     s.articlesExhausted,
+    s.readingSession?.windowStart ?? 0,
   );
 }
 
@@ -504,8 +559,8 @@ export function syncCurrentViewCache(entries: ArticleEntry[]) {
    toggle 停在与乐观写入相同的值（其自身 set_read 已落库），迟到的回滚会把
    UI 踩回旧值而 DB 是新值（审查探针 C3 实测）。规则：任何真实的条目标志写入
    （flipEntryFlag / markEntriesRead / 快照替换 mergeSnapshotEntries）都必须
-   bump 对应字段版本，回滚方以「版本未变」为恢复前提。Map 随会话内被写过的
-   条目增长（与 entries 同量级，键为 条目×字段 至多两倍），无需清理。
+   bump 对应字段版本，回滚方以「版本未变」为恢复前提。完整成员动作也给未驻留
+   ID签发版本；版本、序号和值影子随当前成员/驻留缓存/在途读写统一回收。
    TASK-118（审计 P1-2）：版本键从「文章级共享」升级为 articleId × field——
    isRead / isStarred 各自独立单调。修前两字段共用同一文章版本：全部已读在途
    时用户收藏该文，收藏（flipEntryFlag isStarred）bump 使读状态的迟到回滚被
@@ -542,10 +597,66 @@ R3（P2-1/P2-2）：读/藏字段的本地写入序号（按 行×字段）。
 
 序号复用 localFlagWriteSerial 的单调全局序（每次真实本地读/藏写入推进，
 含回执应用与失败回滚恢复）：比较「写入序号 > 读取/请求发起序号」即「写入
-晚于发起」。Map 随会话内被写过的 行×字段 增长（与 entryMutationVersion
-同量级），无需清理。
+晚于发起」。Map与entryMutationVersion、轻字段值按同一生命周期回收；旧读取或
+旧组回执仍在途时保留比较前沿，不能提前回收造成ABA或较新unread被翻回。
 ============================================================ */
 const entryFieldWriteSerial = new Map<string, number>();
+
+/** 完整成员写可能没有行对象。仅保存实际写过字段的值，不创建实体/缓存成员。
+ * 生命周期：当前成员、驻留/有界缓存、在途写、仍可能返回旧值的读取；离开后可回收。
+ * Note: 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md */
+const entryFieldValues = new Map<string, { value: boolean | undefined }>();
+let entrySnapshotReadId = 0;
+const entrySnapshotReadFrontiers = new Map<number, { serial: number; inFlight: ReadonlySet<string> | null }>();
+let flagHistoryPruneQueued = false;
+
+function scheduleFlagHistoryPrune(): void {
+  if (flagHistoryPruneQueued) return;
+  flagHistoryPruneQueued = true;
+  queueMicrotask(() => { flagHistoryPruneQueued = false; pruneFlagHistory(); });
+}
+
+function pruneFlagHistory(): void {
+  if (!appStoreRef) return;
+  // 旧组回执尚未返回时可能涉及未知兄弟，保留它发起后各字段接管前沿。
+  if (localFlagWritesInFlight > 0) return;
+  const state = appStoreRef.getState();
+  const retained = new Set(state.readingSession?.memberIds ?? []);
+  for (const row of state.entries) retained.add(row.id);
+  for (const snapshot of viewEntriesCache.values()) for (const row of snapshot.entries) retained.add(row.id);
+  let oldestRead = Number.POSITIVE_INFINITY;
+  const protectedAtReadStart = new Set<string>();
+  for (const read of entrySnapshotReadFrontiers.values()) {
+    oldestRead = Math.min(oldestRead, read.serial);
+    for (const key of read.inFlight ?? []) protectedAtReadStart.add(key);
+  }
+  for (const key of entryMutationVersion.keys()) {
+    const id = key.slice(0, key.lastIndexOf('|'));
+    if (retained.has(id) || entryFieldInFlight.has(key) || flagWrites.has(key) || protectedAtReadStart.has(key)
+      || (entryFieldWriteSerial.get(key) ?? -1) >= oldestRead) continue;
+    entryMutationVersion.delete(key);
+    entryFieldWriteSerial.delete(key);
+    entryFieldValues.delete(key);
+  }
+}
+
+/** 属性读取持有前沿租约；完成/过时/失败都释放，防止无限保留已离开会话的影子。 */
+export function beginEntrySnapshotRead() {
+  const id = ++entrySnapshotReadId;
+  const writtenAfterSerial = currentLocalFlagWriteSerial();
+  const inFlightAtStart = entryInFlightFieldKeys();
+  entrySnapshotReadFrontiers.set(id, { serial: writtenAfterSerial, inFlight: inFlightAtStart });
+  return {
+    rowsFetchedAt: Date.now(), writtenAfterSerial, inFlightAtStart,
+    release: () => {
+      if (!entrySnapshotReadFrontiers.delete(id)) return;
+      scheduleFlagHistoryPrune();
+    },
+  };
+}
+
+/** 诊断存量，不修改状态；门禁验证离开成员/缓存且无在途后能回收。 */
+export function entryFlagHistorySize(): number { return entryFieldValues.size; }
 
 /** 记录一次真实本地字段写入（调用点与 bumpEntryVersion/bumpLocalFlagWrite 同点）。 */
 function recordEntryFieldWrite(id: string, field: 'isRead' | 'isStarred'): void {
@@ -577,6 +688,7 @@ export function endEntryFieldWrite(id: string, field: 'isRead' | 'isStarred'): v
   const n = (entryFieldInFlight.get(key) ?? 0) - 1;
   if (n > 0) entryFieldInFlight.set(key, n);
   else entryFieldInFlight.delete(key);
+  scheduleFlagHistoryPrune();
 }
 
 /** 读取发起时捕获在途写键集合（空集返回 null——调用方省略 opts 保持轻量）。 */
@@ -600,10 +712,9 @@ export function entryInFlightFieldKeys(): Set<string> | null {
    - rollbackEntryClaims：失败回滚（TASK-118 统一助手，乐观 toggle /
      markEntriesReadBulk / selectArticle·anchorToArticle 打开即标读的回滚路径）
      ——实际恢复时。
-   markCurrentViewAllRead 经 markEntriesRead（乐观段）覆盖，不单独 bump；其失败
-   回滚是 nav 内联恢复（不经 rollbackEntryClaims），但只恢复**自身乐观段已翻转**
-   的条目（changed 早退两侧对称）——回滚发生 ⇒ 同一操作的乐观段必已 bump，在途
-   对账已因该 bump 过期，无需为回滚单独 bump。mergeSnapshotEntries 是后端真值
+   markCurrentViewAllRead经beginCapturedReadWrite为完整成员登记字段意图，包含
+   未驻留和已经已读的成员；失败沿同一trackEntryFlagWrite/rollbackEntryClaims
+   链恢复，未知原值由首次真实属性提供，不能猜一个false。mergeSnapshotEntries 是后端真值
    落地、非本地未确认写，不 bump（其伴随的 reload 自带同源计数，不存在对账窗口）。
    序号只单调不清理：与会话内旗标写入同量级，消费方只做相等比较，无溢出顾虑。
    ============================================================ */
@@ -675,6 +786,7 @@ export function beginLocalFlagWrite(): void {
 export function endLocalFlagWrite(): void {
   localFlagWritesInFlight = Math.max(0, localFlagWritesInFlight - 1);
   localFlagWriteSettleSerial += 1;
+  scheduleFlagHistoryPrune();
   if (localFlagWritesInFlight === 0 && countsReconcileAfterWrites) {
     countsReconcileAfterWrites = false;
     scheduleCountsReconcile({ force: true });
@@ -702,7 +814,6 @@ export function localFlagWritesPending(): number {
 export function buildScopeCountsSnapshot(
   detail: { all?: unknown; folders?: unknown } | null,
   layout: ContentLayoutType,
-  dedup: boolean,
 ): ScopeCountsSnapshot | null {
   if (!detail || typeof detail !== 'object') return null;
   const d = detail as {
@@ -722,7 +833,6 @@ export function buildScopeCountsSnapshot(
   }
   return {
     layout,
-    dedup,
     all: {
       total: Number(d.all.total ?? 0),
       unread: Number(d.all.unread ?? 0),
@@ -754,12 +864,11 @@ export type CountsReconcileOutcome = 'applied' | 'stale' | 'failed' | 'skipped';
 
 /** 有序计数对账（fire-and-forget 语义由 [`scheduleCountsReconcile`] 承载）：
     单次 counts_snapshot 读取 → 通过全部守卫后整体替换 feedCounts 与
-    scopeCounts（开关开启且布局未变时）；否则 'stale'（更新者优先）或
+    scopeCounts（布局未变时）；否则 'stale'（更新者优先）或
     'failed'（读取失败，保留现值）。 */
 export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> {
   const s0 = appStore().getState();
   const layout = s0.activeContentLayout;
-  const dedup = s0.settings.smartDedup;
   const flagSerial = currentLocalFlagWriteSerial();
   const settleSerial = currentFlagWriteSettleSerial();
   const token = beginCountsFetch();
@@ -774,19 +883,16 @@ export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> 
   if (currentLocalFlagWriteSerial() !== flagSerial) return 'stale';
   if (!canLandCounts(token)) return 'stale';
   if (currentFlagWriteSettleSerial() !== settleSerial) {
-    /* B3：取数窗口内发生过写结算（快照可能不含该写，服务端锁序不定向）——
-       拒落并安排权威对账：该结算自身的 scheduleCountsReconcile 在 dedup 关闭时
-       是 no-op，必须在此兜底；再拒落只由新的结算事件触发，必然收敛。 */
+    /* 取数窗口内发生过写结算，快照可能不含该写；拒落并安排权威对账。 */
     scheduleCountsReconcile({ force: true });
     return 'stale';
   }
-  if (s1.settings.smartDedup !== dedup) return 'stale';
   const feedCounts = feedCountsFromRows(snap.feeds);
   if (!feedCounts) return 'skipped';
   if (s1.activeContentLayout === layout) {
     appStore().setState({
       feedCounts,
-      scopeCounts: dedup ? buildScopeCountsSnapshot(snap.scope, layout, dedup) : null,
+      scopeCounts: buildScopeCountsSnapshot(snap.scope, layout),
     });
   } else {
     // 布局已切换：feedCounts 布局无关可落；scope 快照丢弃（选择器按布局校验）
@@ -795,16 +901,7 @@ export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> 
   return 'applied';
 }
 
-/** 变更后对账（fire-and-forget；结果与错误都不上抛——失败保守保留现值，
-    下次 reload / 对账自愈）。
-    默认仅在 **smartDedup 开启**时发起：折叠组的非线性只存在于显示聚合开启时；
-    关闭时读闭包的真实翻转行由 [`applyReadReceipt`] 按回执行精确收敛（源键
-    逐行可数，无折叠），无需额外 IPC。
-    `force: true` = 失败路径的**权威修复**：乐观计数已按 ±1 计入而回滚被版本
-    守卫跳过（快照/接管写改了该字段）时，线性复原不可判定——必须取一次真实
-    计数（不受 dedup 门控；dedup 关闭时对账只落 feedCounts，语义同口径）。 */
-export function scheduleCountsReconcile(opts?: { force?: boolean }): void {
-  if (!opts?.force && !appStore().getState().settings.smartDedup) return;
+/** 同源等价组的精确计数由后端对账；读取仍受写入/结算前沿保护。失败保留现值。 */export function scheduleCountsReconcile(opts?: { force?: boolean }): void {
   if (opts?.force && localFlagWritesInFlight > 0) {
     countsReconcileAfterWrites = true;
     return;
@@ -817,20 +914,10 @@ export function scheduleCountsReconcile(opts?: { force?: boolean }): void {
   }).catch(() => { /* 保守：保留现值 */ });
 }
 
-/** 读写入回执的本地收敛（R2/N1 建立，R3/P2-1 逐行凭据化）：把**真实翻转行**
-    （读闭包可能含同 URL 副本）应用到本地条目/视图缓存与按源计数。
-    - `skipIds` = 调用方已乐观翻转的行（其计数已按 ±1 计入，回执不重复扣减）；
-    - **逐行凭据**：回执行承载的是后端**请求时刻**已提交的翻转，不等于当前状态
-      ——仅当该行读字段自请求发起以来没有被更新的本地写接管时才应用。判据是
-      行×字段写序号（`entryFieldWrittenAfter`），不再用「期间有任意一次全局写」
-      把整批回执行一刀切：无关 URL 组/无关行的写不再让本行回执失效；
-    - **计数随实际应用的行扣减**：已被较新 unread 接管的行、当前已是已读的行
-      都不扣（欠计/双计两侧都堵住）；窗口外的兄弟行无本地写时照常扣（源键按
-      后端提交事实逐行收敛）；
-    - 应用的翻转按字段版本 bump，使更早的失败回滚声明失效；本地状态变化后
-      bump 全局写前沿，使在途计数对账/后续回执据此判过期。
-    未提供前沿（undefined）时退化为保守形态：只按「当前未读」应用，不做逐行
-    接管判定（现有调用方均提供）。 */
+/** 按实体字段前沿应用真实提交回执；较新本机 unread 不被旧回执翻回。
+ * 回执项是后端原始身份，显示计数是同源等价组，二者数量不等。
+ * 这里只更新实体/现存缓存的 flags；当前显示行的乐观计数与操作后的权威对账负责计数。
+ * skipIds 已由发起者乐观更新；字段版本仍使更早失败声明失效。 */
 export function applyReadReceipt(
   receipts: ReadonlyArray<{ id: number | string; feed_id: number | string }> | null | undefined,
   skipIds?: ReadonlySet<string>,
@@ -846,7 +933,8 @@ export function applyReadReceipt(
     }
     applied.push({ id, field: 'isRead', value: true, fallback: { feedId: String(r.feed_id), value: false } });
   }
-  projectEntryFlags(applied);
+  // 回执数是底层身份数，同源等价组可能有多个身份；不能把它当显示组数逐行扣计数。
+  projectEntryFlags(applied, { countChanges: false, recordIntent: true });
 }
 
 /** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
@@ -909,7 +997,7 @@ export interface EntryRollbackClaim {
   id: string;
   field: 'isRead' | 'isStarred';
   /** 乐观写入前的值（回滚目标） */
-  prev: boolean;
+  prev: boolean | undefined;
   /** 乐观写入 bump 完成后快照的字段版本 */
   version: number;
 }
@@ -926,7 +1014,17 @@ export interface RollbackOutcome {
 }
 
 export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): RollbackOutcome {
-  return projectEntryFlags(claims.map((claim) => ({ id: claim.id, field: claim.field, value: claim.prev, version: claim.version })), { bumpVersion: false });
+  const known: EntryFlagProjection[] = [];
+  let takenOver = false;
+  for (const claim of claims) {
+    if (claim.prev !== undefined) known.push({ id: claim.id, field: claim.field, value: claim.prev, version: claim.version });
+    else if (getEntryVersion(claim.id, claim.field) === claim.version) {
+      // 没有任何行属性到达且写失败：撤销未知基线上的意图，绝不猜未读或已读。
+      entryFieldValues.delete(entryVersionKey(claim.id, claim.field));
+    } else takenOver = true;
+  }
+  const outcome = projectEntryFlags(known, { bumpVersion: false });
+  return { ...outcome, takenOver: outcome.takenOver || takenOver };
 }
 
 interface EntryFlagProjection {
@@ -944,7 +1042,7 @@ interface EntryFlagProjection {
     Note: 责任边界见 .agents/notes/implemented/architecture/2026-10-05-乐观写入的版本守卫.md */
 export function projectEntryFlags(
   projections: readonly EntryFlagProjection[],
-  options: { bumpVersion?: boolean; countChanges?: boolean } = {},
+  options: { bumpVersion?: boolean; countChanges?: boolean; recordIntent?: boolean } = {},
 ): RollbackOutcome {
   if (projections.length === 0) return { restored: false, takenOver: false };
   const s = appStore().getState();
@@ -975,6 +1073,7 @@ export function projectEntryFlags(
     const representative = active ?? cachedById.get(projection.id);
     const baseline = active ? { value: active[projection.field], feedId: active.feedId }
       : tracked?.projected ?? (representative ? { value: representative[projection.field], feedId: representative.feedId } : projection.fallback);
+    const counted = tracked?.projected ?? baseline;
     accepted.set(key, projection);
     // 离屏源归属不能仅凭旧缓存推断：立即做已知投影差，同时最后结算后权威校准。
     if (!active && tracked) needsCounts = true;
@@ -982,15 +1081,17 @@ export function projectEntryFlags(
       || (active && tracked?.projected && active.feedId !== tracked.projected.feedId)
       || (representative && projection.fallback && representative.feedId !== projection.fallback.feedId);
     if (sourceChanged) needsCounts = true;
-    if (baseline && baseline.value !== projection.value) {
-      changedFields.push(projection);
+    const previousValue = entryFieldValues.get(key)?.value;
+    if (options.recordIntent || (baseline && baseline.value !== projection.value)
+      || (previousValue !== undefined && previousValue !== projection.value)) changedFields.push(projection);
+    if (counted && counted.value !== projection.value) {
       if (options.countChanges !== false && !sourceChanged) {
-        const counts = feedCounts.get(baseline.feedId);
+        const counts = feedCounts.get(counted.feedId);
         if (counts) {
           const field = projection.field === 'isRead' ? 'unread' : 'starred';
           const delta = projection.field === 'isRead' ? (projection.value ? -1 : 1) : (projection.value ? 1 : -1);
           if (feedCounts === s.feedCounts) feedCounts = new Map(feedCounts);
-          feedCounts.set(baseline.feedId, { ...counts, [field]: Math.max(0, counts[field] + delta) });
+          feedCounts.set(counted.feedId, { ...counts, [field]: Math.max(0, counts[field] + delta) });
         } else needsCounts = true;
       }
     }
@@ -1023,12 +1124,14 @@ export function projectEntryFlags(
     for (const { id, field } of changedFields) {
       if (options.bumpVersion !== false) bumpEntryVersion(id, field);
       recordEntryFieldWrite(id, field);
+      entryFieldValues.set(entryVersionKey(id, field), { value: accepted.get(entryVersionKey(id, field))?.value });
     }
   }
   // 乐观写可建立当前快照；回滚绝不重建已淘汰缓存，也不插入已离开窗口的成员。
   if (entries !== s.entries && options.bumpVersion !== false) syncCurrentViewCache(entries);
   if (entries !== s.entries || feedCounts !== s.feedCounts) appStore().setState({ entries, feedCounts });
   if (needsCounts) scheduleCountsReconcile({ force: true });
+  scheduleFlagHistoryPrune();
   return { restored: changedFields.length > 0 || cachedChanged, takenOver };
 }
 
@@ -1044,9 +1147,10 @@ export function projectEntryFlags(
       onSuccess 在**落库成功后**出现——与 P1-5「去假成功」同口径，不得提前乐观弹。 */
 type FlagIntent = { value: boolean; pending: boolean; failed: boolean };
 interface FlagWriteChain {
-  baseline: boolean;
+  baseline: boolean | undefined;
   version: number;
   intents: FlagIntent[];
+  /** 源计数实际已反映的字段值；首次出现的pending行可见值可能与它不同。 */
   projected?: { feedId: string; value: boolean };
 }
 const flagWrites = new Map<string, FlagWriteChain>();
@@ -1054,15 +1158,23 @@ const flagWrites = new Map<string, FlagWriteChain>();
 /** 乐观字段真实翻转后登记：单条、批量和打开标读共享失败基线。
     每个调用点在同步翻转后立即签发 claim（该次翻转恰推进一次字段版本）。
     外部快照/其它真实写入推进版本时不续接旧链；结算仍经统一版本回滚助手。 */
-export function trackEntryFlagWrite(claim: EntryRollbackClaim, target: boolean): (failed: boolean) => RollbackOutcome {
+export function trackEntryFlagWrite(
+  claim: EntryRollbackClaim,
+  target: boolean,
+  countedProjection?: { feedId: string; value: boolean } | null,
+): (failed: boolean) => RollbackOutcome {
   const key = entryVersionKey(claim.id, claim.field);
   const existing = flagWrites.get(key);
   const writes: FlagWriteChain = existing?.version === claim.version - 1
     ? existing
     : { baseline: claim.prev, version: claim.version, intents: [] };
   writes.version = claim.version;
-  const entry = appStore().getState().entries.find((row) => row.id === claim.id);
-  if (entry) writes.projected = { feedId: entry.feedId, value: target };
+  if (countedProjection !== undefined) {
+    if (countedProjection) writes.projected = countedProjection;
+  } else {
+    const entry = appStore().getState().entries.find((row) => row.id === claim.id);
+    if (entry) writes.projected = { feedId: entry.feedId, value: target };
+  }
   const intent: FlagIntent = { value: target, pending: true, failed: false };
   writes.intents.push(intent);
   flagWrites.set(key, writes);
@@ -1075,7 +1187,42 @@ export function trackEntryFlagWrite(claim: EntryRollbackClaim, target: boolean):
       ? rollbackEntryClaims([{ ...claim, prev: value, version: writes.version }])
       : { restored: false, takenOver: false };
     if (!writes.intents.some((item) => item.pending) && flagWrites.get(key) === writes) flagWrites.delete(key);
+    scheduleFlagHistoryPrune();
     return outcome;
+  };
+}
+
+/** 捕获成员全读：已驻留和未驻留同一字段声明/前沿，只有已知行参与乐观计数。
+ * 未驻留基线由后续真实属性补足；失败先撤销未知值，不造一份假文章。
+ * 每个成员都登记，即使已读也代表用户本次意图，较晚unread会有更高版本。 */
+export function beginCapturedReadWrite(memberIds: readonly string[]) {
+  const s = appStore().getState();
+  const known = new Map<string, ArticleEntry>();
+  for (const snapshot of viewEntriesCache.values()) for (const row of snapshot.entries) known.set(row.id, row);
+  for (const row of s.entries) known.set(row.id, row);
+  const ids = [...new Set(memberIds)];
+  const previous = new Map(ids.map((id) => [id, known.get(id)?.isRead ?? entryFieldValues.get(entryVersionKey(id, 'isRead'))?.value]));
+  beginLocalFlagWrite();
+  for (const id of ids) beginEntryFieldWrite(id, 'isRead');
+  projectEntryFlags(ids.map((id) => ({ id, field: 'isRead', value: true })), { recordIntent: true });
+  const claims = ids.map((id): EntryRollbackClaim => ({ id, field: 'isRead', prev: previous.get(id), version: getEntryVersion(id, 'isRead') }));
+  const settlements = claims.map((claim) => {
+    const row = known.get(claim.id);
+    return trackEntryFlagWrite(claim, true, row ? { feedId: row.feedId, value: true } : null);
+  });
+  const serial = currentLocalFlagWriteSerial();
+  let finished = false;
+  return {
+    serial,
+    finish: (failed: boolean) => {
+      if (finished) return { takenOver: false };
+      finished = true;
+      const outcomes = settlements.map((settle) => settle(failed));
+      if (!failed) projectEntryFlags(claims.map((claim) => ({ id: claim.id, field: 'isRead', value: true, version: claim.version })), { countChanges: false });
+      for (const id of ids) endEntryFieldWrite(id, 'isRead');
+      endLocalFlagWrite();
+      return { takenOver: outcomes.some((outcome) => outcome.takenOver) };
+    },
   };
 }
 
@@ -1144,7 +1291,7 @@ export function asReadReceipts(
    - 分类 AI 布尔此前不参与任何有效值解析（源只读自己的 bool）——分类开关是
      死的：打开分类后其下「继承」源并不跟随（F13 的根因）。
 
-   applyFeedAiModePatch / applyCategoryAiFlagPatch 经 reconcileCategories 在
+   applyFeedAiModePatch / applyCategoryAiModePatch 经 reconcileCategories 在
    **同一 setState** 里更新 categories 与 feedIndex——任何消费者当帧看到同一配置。
    写入 × 快照对账协议（待写意图 / 确认态 / 读取凭据、同键串行与失败恢复）
    收口在 store/aiConfigWrites.ts（OPT-011 R4，见《AI配置写入与快照对账》）。
@@ -1173,11 +1320,11 @@ export function applyFeedAiModePatch(
   appStore().setState(reconcileCategories(s, nextCategories));
 }
 
-/** OPT-011：分类布尔 AI 默认的原子写入（categories + feedIndex 同一 setState）。 */
-export function applyCategoryAiFlagPatch(
+/** OPT-011：分类三态 AI 默认的原子写入（categories + feedIndex 同一 setState）。 */
+export function applyCategoryAiModePatch(
   catId: string,
-  field: 'autoSummary' | 'autoTranslate',
-  value: boolean,
+  field: 'summaryMode' | 'translateMode',
+  value: FeedAiMode,
 ): void {
   const s = appStore().getState();
   const nextCategories = s.categories.map((c) => (c.id === catId ? { ...c, [field]: value } : c));

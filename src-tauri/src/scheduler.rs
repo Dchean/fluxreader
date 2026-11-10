@@ -25,6 +25,7 @@ pub const MAX_CONCURRENCY: usize = 16;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RefreshBatchReport {
     new_articles: usize,
+    data_changed: bool,
     failed_feeds: usize,
     refreshed_feed_urls: Vec<String>,
 }
@@ -547,8 +548,10 @@ async fn absorb_refresh_worker(
         Ok(Ok((feed_id, outcome))) => match outcome {
             crate::ingestion::FeedRefreshOutcome::Applied {
                 new_articles,
+                data_changed,
                 feed_url,
             } => {
+                report.data_changed |= data_changed;
                 report.new_articles += new_articles;
                 report
                     .refreshed_feed_urls
@@ -574,6 +577,19 @@ async fn absorb_refresh_worker(
 
 /// 启动后台调度循环。启动后等 8s 再跑第一轮（避开启动期的 UI 抢锁）。
 pub fn spawn_scheduler(app: AppHandle) {
+    let state_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let db = state_app.state::<AppState>().db.clone();
+        let http = state_app.state::<AppState>().http.clone();
+        let runtime = crate::sync::runtime::for_db(&db);
+        loop {
+            tokio::select! {
+                _=runtime.wait_for_stop()=>return,
+                _=tokio::time::sleep(Duration::from_secs(30))=>{},
+            }
+            auto_sync_backend(&db, &http, &state_app).await;
+        }
+    });
     tauri::async_runtime::spawn(async move {
         // 只 clone Send 的部件（Arc<Mutex> + Client），不跨 await 持有 tauri State
         let db = app.state::<AppState>().db.clone();
@@ -590,7 +606,7 @@ pub fn spawn_scheduler(app: AppHandle) {
             let (enabled, _interval, _dedup, _concurrency) = read_refresh_config(&db).await;
             if enabled {
                 match refresh_due_feeds(&db, &http).await {
-                    Ok(report) if report.new_articles > 0 || report.failed_feeds > 0 => {
+                    Ok(report) if report.data_changed || report.failed_feeds > 0 => {
                         let _ = app.emit(
                             "feeds-updated",
                             serde_json::json!({
@@ -614,9 +630,7 @@ pub fn spawn_scheduler(app: AppHandle) {
                     }
                 }
             }
-            // 后端后台自动同步（autoSync 开关，默认开）：
-            // 到期才跑轻量同步（push 队列 + changed_after 增量 pull）
-            auto_sync_backend(&db, &http, &app).await;
+
             tokio::select! {
                 _ = runtime.wait_for_stop() => return,
                 _ = tokio::time::sleep(TICK) => {},
@@ -625,8 +639,7 @@ pub fn spawn_scheduler(app: AppHandle) {
     });
 }
 
-/// 后端自动同步：读 autoSync（默认开）与刷新间隔，
-/// 到期（now - last_sync ≥ refreshInterval 分钟）时跑轻量同步。
+/// 后端状态轮独立于内容刷新：autoSync开启时30秒唤醒，普通轮按至多1分钟间隔。
 /// 失败经同步活动终态上报；下个 tick 仍会因 last_sync 未推进而重试。
 /// 状态被拉平后发 feeds-updated——前端列表/未读计数与 DB 不再脱节
 /// （pull 改变了 is_read 但用户无感知的"静默漂移"问题）。
@@ -702,8 +715,8 @@ async fn backend_sync_plan(
     if !on || !connected {
         return Ok(None);
     }
-    let normal_due =
-        focus || (has_binding && backend_sync_due(now, interval_min, true, last_sync, false));
+    let normal_due = focus
+        || (has_binding && backend_sync_due(now, interval_min.min(1), true, last_sync, false));
     if !normal_due && !discovery_due && !outbox_pending {
         return Ok(None);
     }
@@ -1405,7 +1418,7 @@ async fn fill_cover(
     let mut filled = 0;
     for aid in aids {
         match conn.execute(
-            "UPDATE articles SET image_url = ?1 WHERE id = ?2 AND url = ?3 AND (image_url IS NULL OR image_url = '')",
+            "UPDATE articles SET image_url = ?1, image_source = 'page' WHERE id = ?2 AND url = ?3 AND (image_url IS NULL OR image_url = '')",
             rusqlite::params![image, aid, url],
         ) {
             Ok(n) => filled += n,
@@ -1634,6 +1647,7 @@ mod refresh_worker_tests {
                 7,
                 FeedRefreshOutcome::Applied {
                     new_articles: 2,
+                    data_changed: true,
                     feed_url: raw_url.into(),
                 },
             ))

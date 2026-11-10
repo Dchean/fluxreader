@@ -1,4 +1,10 @@
-// Note: 返回位置全场景规则表（无法可靠恢复时明确归零，不猜） — 见 .agents/notes/implemented/feature/2026-10-07-返回位置与列表保位.md
+// Note: 阅读位置由此纯模块唯一拥有，store准备窗口与Timeline消费同一活锚/存档 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
+/* 当前会话契约（2026-11-09）：成员与属性分开；下面保留原锚/信号选择的历史理由。
+ * 后台回读固定成员，不再重筛插头。显式同上下文重筛消费当前活锚，跨上下文返回
+ * 才消费此处的真实存档。bootstrap先准备包含存档锚的有界轻属性窗口，Timeline
+ * 再消费同一id/像素偏移；缓存首项消失不代表存档锚消失。真缺锚仍返回null，不猜邻居。
+ * 模块由components移至lib，让窗口准备与DOM消费依赖同一纯状态；无provider或第二份档案。
+ */
 /* ============================================================
    返回位置统一规则（TASK-111② 后台刷新保位 + TASK-115 切换返回恢复 /
    阅读器焦点归还）——本模块是全部「回位/归还」机制的单一记账点与规则文档点。
@@ -110,8 +116,8 @@
    已切换（原卡不在 items）→ 归零回落不聚焦。关闭前的原选中卡 id 由 Timeline
    在 activeArticleId 跟随 effect 里捕获（组件内 ref）——关闭时刻该 ref 必然
    持有阅读器正在显示的文章 id。选型理由（Timeline 消费关闭信号 vs store
-   action 关闭前记录原 id）：store 不反向依赖 components 层（本模块在
-   components/ 下，store→components 是倒挂方向，会开循环依赖的口子）；且
+   action 关闭前记录原 id）：共享锚已归lib层供store准备窗口，DOM焦点仍由组件
+   消费关闭信号；store不依赖components；且
    「只有原 id 字段无法区分连续两次开关同一篇」（值不变不触发 effect），
    计数器才是可靠的重触发信号。焦点归还决策收口在纯函数
    readerFocusReturnIndex（回归网直接断言）。
@@ -199,6 +205,13 @@ export const RETURN_ANCHOR_ARCHIVE_MAX = 8;
     存档/消费都不该触发重渲染，消费侧只订阅恢复信号 nonce（store 字段
     switchRestoreNonce）——与活锚「载荷留模块、信号入 store」同一分工。 */
 const returnAnchorArchive = new Map<string, TopAnchor>();
+
+/** 仅供测试生命周期复位模块状态；生产导航必须保留用户的返回存档与节流基准。 */
+export function resetReadingPositionForTests(): void {
+  anchor = null;
+  lastRecordAt = 0;
+  returnAnchorArchive.clear();
+}
 
 /** LRU 语义写入：先摘除再插入保证新鲜度，超限删最旧（Map 迭代序 = 插入序）。 */
 function archiveSet(key: string, value: TopAnchor): void {

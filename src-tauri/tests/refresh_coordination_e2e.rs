@@ -522,7 +522,9 @@ async fn footprint_uses_normalized_url_not_reusable_sqlite_id() {
 
     let new_id = {
         let conn = db.lock().await;
-        db::delete_feed(&conn, old_id).unwrap();
+        // Intentional physical rowid reuse probe; ordinary unsubscribe now archives identity.
+        conn.execute("DELETE FROM feeds WHERE id=?1", [old_id])
+            .unwrap();
         insert_feed(&conn, &server.url("new"), "New", "local")
     };
     assert_eq!(
@@ -565,7 +567,9 @@ async fn reused_rowid_while_old_url_inflight_refreshes_new_source() {
     let new_url = server.url("new");
     let new_id = {
         let conn = db.lock().await;
-        db::delete_feed(&conn, old_id).unwrap();
+        // Intentional physical rowid reuse probe; ordinary unsubscribe now archives identity.
+        conn.execute("DELETE FROM feeds WHERE id=?1", [old_id])
+            .unwrap();
         insert_feed(&conn, &new_url, "New", "local")
     };
     assert_eq!(
@@ -584,6 +588,7 @@ async fn reused_rowid_while_old_url_inflight_refreshes_new_source() {
         new_outcome,
         ingestion::FeedRefreshOutcome::Applied {
             new_articles: 1,
+            data_changed: true,
             feed_url: new_url.clone(),
         },
         "在途键必须按 URL 区分，不能让新 URL 被旧 rowid 误跳过"
@@ -1016,4 +1021,108 @@ fn setup_sync(name: &str) -> (common::TempDbGuard, StdMutex<rusqlite::Connection
     let conn = db::open(&path).unwrap();
     db::create_folder(&conn, "测试", "article").unwrap();
     (guard, StdMutex::new(conn))
+}
+
+#[tokio::test]
+async fn zero_new_refresh_reports_body_media_and_error_recovery_but_not_unchanged_304() {
+    let server = common::LocalFeedServer::start_with_feed(|port| {
+        format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Current</title>
+        <item><title>stable</title><guid>stable</guid><link>http://127.0.0.1:{port}/article</link>
+        <description><![CDATA[<p>current body</p>]]></description>
+        <enclosure url="http://127.0.0.1:{port}/audio.mp3" type="audio/mpeg" length="42"/>
+        </item></channel></rss>"#
+        )
+    })
+    .await
+    .unwrap();
+    let (_guard, database) = setup("refresh_zero_new_changes").await;
+    let (fid, aid) = {
+        let conn = database.lock().await;
+        let fid = insert_feed(&conn, &server.url("/local_feed.xml"), "Current", "local");
+        let mut old = direct_article("stable", "stable");
+        old.url = Some(server.url("/article"));
+        old.content_html = Some("<p>previous body</p>".into());
+        old.body_text = "previous body".into();
+        let aid = db::upsert_article_with_feed(&conn, fid, &old, false)
+            .unwrap()
+            .0;
+        (fid, aid)
+    };
+    let client = ingestion::build_client(3);
+    let refresh = ingestion::refresh_feed_staged(&database, &client, fid, false)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            refresh,
+            ingestion::FeedRefreshOutcome::Applied {
+                new_articles: 0,
+                data_changed: true,
+                ..
+            }
+        ),
+        "same GUID body replacement is an observable change: {refresh:?}"
+    );
+    let unchanged = ingestion::refresh_feed_staged(&database, &client, fid, false)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            unchanged,
+            ingestion::FeedRefreshOutcome::Applied {
+                new_articles: 0,
+                data_changed: false,
+                ..
+            }
+        ),
+        "healthy unchanged 304 must not emit false data changes: {unchanged:?}"
+    );
+    {
+        let conn = database.lock().await;
+        conn.execute(
+            "UPDATE feeds SET fetch_failed=1,fetch_error='temporary' WHERE id=?1",
+            [fid],
+        )
+        .unwrap();
+    }
+    let recovered = ingestion::refresh_feed_staged(&database, &client, fid, false)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            recovered,
+            ingestion::FeedRefreshOutcome::Applied {
+                new_articles: 0,
+                data_changed: true,
+                ..
+            }
+        ),
+        "304 recovery clears visible failure even without new content: {recovered:?}"
+    );
+    {
+        let conn = database.lock().await;
+        conn.execute("UPDATE articles SET enclosure_url='https://old.invalid/previous.mp3',enclosure_mime='audio/ogg' WHERE id=?1", [aid]).unwrap();
+        db::set_feed_fetch_state(&conn, fid, false, None, None, None).unwrap();
+    }
+    let media = ingestion::refresh_feed_staged(&database, &client, fid, false)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            media,
+            ingestion::FeedRefreshOutcome::Applied {
+                new_articles: 0,
+                data_changed: true,
+                ..
+            }
+        ),
+        "media-only metadata change must reach scheduler event routing: {media:?}"
+    );
+    let row = db::get_article(&*database.lock().await, aid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.enclosure_mime.as_deref(), Some("audio/mpeg"));
+    assert_eq!(row.content_html.as_deref(), Some("<p>current body</p>"));
+    server.stop().await;
 }

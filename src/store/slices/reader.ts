@@ -163,7 +163,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
      仅在 clearReaderSelection bump——本 action 只发信号，不携带载荷：原选中卡
      id 由 Timeline 在 activeArticleId 跟随 effect 用 ref 记账（关闭 commit 时
      该 ref 保留关闭前值），Timeline 的 readerClose effect 消费本信号归还焦点。
-     选型理由见下方 clearReaderSelection 长注释与 timelineAnchor.ts 头注 X2 节。 */
+     选型理由见下方 clearReaderSelection 长注释与 readingPosition.ts 头注 X2 节。 */
   readerCloseNonce: 0,
 
   /* ================= 阅读器 ================= */
@@ -171,7 +171,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
   markEntryOpened: (id) => {
     const { entries, settings, dataMode } = get();
     const art = entries.find((a) => a.id === id);
-    if (!art) return;
+    if (!art || art.unavailable) return;
     const shouldMarkRead = dataMode === 'tauri' && settings.markReadOnOpen && !art.isRead;
     if (shouldMarkRead) {
       /* 后端模式：已读落库（不重载快照，本地同步置位即可） */
@@ -248,6 +248,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const { dataMode, entries } = get();
     if (dataMode !== 'tauri') return;
     const art = entries.find((a) => a.id === id);
+    if (art?.unavailable) return;
     if (!art && !opts?.allowDetached) return;
     if (opts?.extractFulltext) {
       /* 打开文章：需要完整详情（含 url/fulltext_extracted）+ 智能全文判定。
@@ -280,6 +281,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         const accepted = applyBodyRow(id, row, stamp, {
           aiSummary: generating ? (cur?.aiSummary || '') : (rec?.aiSummary ?? cur?.aiSummary ?? ''),
           translatedContent: generating ? (cur?.translatedContent || '') : (rec?.translatedContent ?? cur?.translatedContent ?? ''),
+          translationDraftOwner: generating ? cur?.translationDraftOwner : rec ? rec.translationDraftOwner : cur?.translationDraftOwner,
         });
         if (!accepted || !cur) return;
         /* 视图行轻字段照旧同步：snippet/url（列表行可能缺 url）；无变化不 set
@@ -416,6 +418,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         const accepted = applyBodyRow(id, row, stamps.get(id) ?? 0, {
           aiSummary: generating ? (entry?.aiSummary || '') : (rec.aiSummary || entry?.aiSummary || ''),
           translatedContent: generating ? (entry?.translatedContent || '') : (rec.translatedContent || entry?.translatedContent || ''),
+          translationDraftOwner: generating ? entry?.translationDraftOwner : rec.translatedContent ? rec.translationDraftOwner : entry?.translationDraftOwner,
         });
         if (accepted) acceptedIds.add(id);
       }
@@ -452,8 +455,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
      选型（Timeline 消费关闭信号 vs 本 action 记录原 id）：选前者——本 action
      只 bump 不透明计数器，原选中卡由 Timeline 在 activeArticleId 跟随 effect
      里记录（关闭时刻它必然持有最后选中的文章 id）。理由：store 不反向依赖
-     components 层（timelineAnchor 在 components/ 下，store→components 是
-     倒挂方向，会开循环依赖的口子）；且「只有原 id 字段无法区分连续两次开关
+     components 层；共享位置虽归lib/readingPosition，DOM焦点仍由Timeline消费。
+     且「只有原 id 字段无法区分连续两次开关
      同一篇」（值不变不触发 effect），nonce 计数器才是可靠的重触发信号。 */
   clearReaderSelection: () =>
     set((s) => ({

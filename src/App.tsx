@@ -14,6 +14,7 @@ import { anyOverlayOpen, isInteractiveSpaceTarget, shouldYieldToOverlay } from '
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
 import type { SyncQueueStats } from './lib/api';
 import type { BackendSyncActivityEvent } from './store/types';
+import { localDayBounds } from './store/readingSession';
 /* ============================================================
    Application Shell
 
@@ -61,6 +62,32 @@ export default function App() {
   const dataLoading = useAppStore((s) => s.dataLoading);
   const bootstrapError = useAppStore((s) => s.bootstrapError);
 
+  // 日界刷新只更新当前会话属性/计数；下一次显式导航才捕获新的“今天”成员。
+  useEffect(() => {
+    let day = localDayBounds().dayStartMs;
+    let timer: ReturnType<typeof setTimeout>;
+    const checkDay = () => {
+      const next = localDayBounds();
+      if (next.dayStartMs !== day) {
+        day = next.dayStartMs;
+        const state = useAppStore.getState();
+        if (state.dataMode === 'tauri' && !state.dataLoading) {
+          void state.reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 刷新自身报告失败 */ });
+        }
+      }
+      clearTimeout(timer);
+      timer = setTimeout(checkDay, Math.max(1, next.dayEndMs - Date.now()));
+    };
+    checkDay();
+    window.addEventListener('focus', checkDay);
+    document.addEventListener('visibilitychange', checkDay);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', checkDay);
+      document.removeEventListener('visibilitychange', checkDay);
+    };
+  }, []);
+
   /* PlayerBar 活跃 → body 标记类（toast 层上移避让底栏） */
   useEffect(() => {
     document.body.classList.toggle('has-player', playerActive);
@@ -74,19 +101,7 @@ export default function App() {
 
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {
-    /* 启动装载并行化（审计卡2-5）：原「设置恢复 → 数据装载」串行链的首屏
-       等待是两者之和；现改为同时发起，等待缩为两者较慢者。写集核实：
-       bootstrapSettings 只写 settings 对象与 activeViewFilter/timelineFilter，
-       reloadFromBackend 发起时读的范围快照（activeFeedFilter/
-       activeContentLayout/timelineSort）都不在其写集内——首读无依赖。但
-       **落库有顺序依赖**：数据快照落地时读 settings.smartDedup（scopeCounts
-       快照）、完成时读 activeViewFilter（决定筛选视图补拉），且设置接受必须
-       先于首帧渲染（主题不闪默认值）。故按「首读并行、落库有序」实现：
-       设置恢复由 bootstrapFromBackend 在数据查询发起的同时并行启动，
-       reloadFromBackend 在落地前等待其接受完成（等待后复核查询代际，机制见
-       bootstrap.ts 的启动落库门）。splash 门控不变：仍由数据装载落地关闭
-       dataLoading，设置恢复不参与门控。 */
-    void useAppStore.getState().bootstrapFromBackend();
+    /* 设置恢复与来源/计数元数据并行；完整成员查询等待启动筛选接受，随后原子落地。 */    void useAppStore.getState().bootstrapFromBackend();
     /* GitHub 登录态恢复（设备流 token 持久化在 SQLite，启动即还原账户显示） */
     void bootstrapGithubAuth();
   }, []);

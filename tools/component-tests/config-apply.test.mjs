@@ -116,10 +116,10 @@ componentTest('OPT-011 R5：下载并应用——确认后屏障等全前沿（�
   /* 独立持久态 PF + 冻结读取副本；写提交（改 PF）与回应分开控制。 */
   const PF = { folders: deepCopy(FOLDERS), feeds: deepCopy(FEEDS) };
   const writes = [];            // set_feed_ai_modes 挂起项
-  const catWrites = [];         // set_folder_ai_flags 挂起项
+  const catWrites = [];         // set_folder_ai_modes 挂起项
   const updates = [];           // update_feed（编辑 composite）挂起项
   const applies = [];           // config_sync_apply 挂起项
-  const pendingArticles = [];   // 全量 reload 的 list_articles 挂起（证明确认不依赖 reload 落地）
+  const pendingArticles = [];   // 完整成员读取挂起（证明确认不依赖 reload 落地）
   let resolveStatus = null;     // 受控 config_sync_status（act 内放行，见 enableSection）
   setPlan({
     config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
@@ -127,9 +127,9 @@ componentTest('OPT-011 R5：下载并应用——确认后屏障等全前沿（�
     config_sync_apply: (args) => new Promise((resolve, reject) => applies.push({ args, resolve, reject })),
     list_folders: () => Promise.resolve(deepCopy(PF.folders)),
     list_feeds: () => Promise.resolve(deepCopy(PF.feeds)),
-    list_articles: () => new Promise((resolve) => pendingArticles.push({ resolve })),
+    list_article_member_ids: () => new Promise((resolve) => pendingArticles.push({ resolve })),
     set_feed_ai_modes: (args) => new Promise((resolve, reject) => writes.push({ args, resolve, reject })),
-    set_folder_ai_flags: (args) => new Promise((resolve, reject) => catWrites.push({ args, resolve, reject })),
+    set_folder_ai_modes: (args) => new Promise((resolve, reject) => catWrites.push({ args, resolve, reject })),
     update_feed: (args) => new Promise((resolve, reject) => updates.push({ args, resolve, reject })),
   });
   const { act } = await import('react');
@@ -162,9 +162,9 @@ componentTest('OPT-011 R5：下载并应用——确认后屏障等全前沿（�
     assert.equal(invokeCount('config_sync_apply'), 0, '屏障等待已存在的前沿（开关 + 排队编辑）：apply 尚未发出');
 
     /* 屏障期间新点击（不同键 → 纯门控证明）：乐观当帧可见，请求排在应用之后 */
-    await act(async () => { useAppStore.getState().toggleCatTranslate('cat-1', true); });
+    await act(async () => { useAppStore.getState().toggleCatTranslate('cat-1', 'on'); });
     await flush(2);
-    assert.equal(useAppStore.getState().feedIndex.get('10')?.cat.autoTranslate, true, '应用期间新点击乐观可见');
+    assert.equal(useAppStore.getState().feedIndex.get('10')?.cat.translateMode, 'on', '应用期间新点击乐观可见');
     assert.equal(catWrites.length, 0, '新写被门控：应用完成前不发出');
 
     /* 放行开关写 → 编辑才发出；apply 仍在等编辑落定（前沿覆盖排队编辑） */
@@ -186,7 +186,7 @@ componentTest('OPT-011 R5：下载并应用——确认后屏障等全前沿（�
     await flush(3);
 
     /* 真实回读确认：确认态/可视值 = 后端导入值；不依赖 reload（其 list_articles 仍挂起） */
-    assert.ok(pendingArticles.length >= 1, '前置：全量 reload 仍在途（list_articles 挂起，未被当确认依据）');
+    assert.ok(pendingArticles.length >= 1, '前置：全量 reload 仍在途（成员读取挂起，未被当确认依据）');
     const { selectFeedConfig } = await import('../../dist-test/store/selectors.js');
     assert.equal(selectFeedConfig(useAppStore.getState(), '10').summaryMode, 'on',
       '回读接受导入值 on（本地编辑 off 被应用覆盖、界面与后端一致）');
@@ -196,7 +196,7 @@ componentTest('OPT-011 R5：下载并应用——确认后屏障等全前沿（�
     assert.equal(catWrites.length, 1, '屏障释放后，应用期间的新写发出（乐观意图不被吞）');
     await act(async () => { catWrites[0].resolve(null); });
     await flush(3);
-    assert.equal(useAppStore.getState().feedIndex.get('10')?.cat.autoTranslate, true, '新写成功落定，意图保持');
+    assert.equal(useAppStore.getState().feedIndex.get('10')?.cat.translateMode, 'on', '新写成功落定，意图保持');
     assert.ok(useAppStore.getState().toasts.some((t) => t.text.startsWith('配置已应用')), '应用结果如实提示');
     assert.ok(entry.container.querySelector('.settings-group-title'), '组件挂载树保持');
 
@@ -253,14 +253,14 @@ componentTest('OPT-011 R5：取消不进入屏障不残留；应用失败释放�
     /* 确认应用：屏障期间新点击被门控；应用失败 → 释放 + 错误可见 + 预览作废 */
     await previewAndConfirm(act, entry, previewBtn);
     assert.equal(applies.length, 1, '确认后 apply 发出（无前沿，立即执行）');
-    await act(async () => { useAppStore.getState().toggleCatTranslate('cat-1', true); });
+    await act(async () => { useAppStore.getState().toggleCatTranslate('cat-1', 'on'); });
     await flush(2);
-    assert.equal(invokeCount('set_folder_ai_flags'), 0, '应用在途：新写被门控');
+    assert.equal(invokeCount('set_folder_ai_modes'), 0, '应用在途：新写被门控');
     await act(async () => { applies[0].reject({ message: '注入：应用失败' }); });
     await flush(3);
     assert.ok(useAppStore.getState().toasts.some((t) => t.text === '应用失败：注入：应用失败'), '失败错误可见（不吞；应用阶段不写「下载失败」）');
     assert.equal(planCard(entry), null, '失败后预览作废（要求重新预览）');
-    assert.equal(invokeCount('set_folder_ai_flags'), 1, '失败释放门：门控写随即发出');
+    assert.equal(invokeCount('set_folder_ai_modes'), 1, '失败释放门：门控写随即发出');
   } finally {
     await drainControlled(act, [{ kind: 'reject', items: applies }]);
     await flush(1);
@@ -282,7 +282,7 @@ componentTest('OPT-011 R5：上传等待发起时写前沿；网络往返不阻�
     config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
     config_sync_upload: () => new Promise((resolve, reject) => uploads.push({ resolve, reject })),
     set_feed_ai_modes: (args) => new Promise((resolve, reject) => writes.push({ args, resolve, reject })),
-    set_folder_ai_flags: (args) => new Promise((resolve, reject) => catWrites.push({ args, resolve, reject })),
+    set_folder_ai_modes: (args) => new Promise((resolve, reject) => catWrites.push({ args, resolve, reject })),
   });
   const { act } = await import('react');
   try {
@@ -298,7 +298,7 @@ componentTest('OPT-011 R5：上传等待发起时写前沿；网络往返不阻�
     assert.equal(invokeCount('config_sync_upload'), 0, '上传等待发起时已存在的写前沿：尚未发出');
 
     /* 之后的 AI 点击不被上传（前沿等待/网络往返）阻塞：不同键立即发出 */
-    await act(async () => { useAppStore.getState().toggleCatTranslate('cat-1', true); });
+    await act(async () => { useAppStore.getState().toggleCatTranslate('cat-1', 'on'); });
     await flush(2);
     assert.equal(catWrites.length, 1, '后续 AI 操作照常发出（上传不是全局锁）');
 
@@ -548,7 +548,7 @@ componentTest('OPT-008B R3：下载并应用接入设置边界——新点击排
   const settingsWrites = []; // set_setting 挂起项
   const settingsReads = [];  // get_setting 挂起项（应用回读）
   let failNextSetting = false;
-  const REMOTE_SETTINGS = JSON.stringify({ smartDedup: true, fontSize: 22 });
+  const REMOTE_SETTINGS = JSON.stringify({ notifyOnNewArticles: true, fontSize: 22 });
   let resolveStatus = null;
   setPlan({
     config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
@@ -572,7 +572,7 @@ componentTest('OPT-008B R3：下载并应用接入设置边界——新点击排
     await previewAndConfirm(act, entry, previewBtn);
     await flush(1);
     assert.equal(invokeCount('config_sync_apply'), 1, '应用已发出');
-    assert.equal(useAppStore.getState().settings.smartDedup, false, '前置：应用前本地 dedup=false');
+    assert.equal(useAppStore.getState().settings.notifyOnNewArticles, false, '前置：应用前本地 notifyOnNewArticles=false');
 
     /* 应用在途：新点击乐观可见、请求被门控（排到应用+回读之后） */
     await act(async () => { useAppStore.getState().updateSettings({ fontSize: 18 }); });
@@ -586,15 +586,15 @@ componentTest('OPT-008B R3：下载并应用接入设置边界——新点击排
     assert.equal(settingsReads.length, 1, '应用成功后走真实 app_settings 回读（get_setting）');
     assert.equal(settingsWrites.length, 0, '回读在途：点击请求仍被门控（排到回读之后）');
 
-    /* 放行回读（远端：dedup=true / fontSize=22）→ 点击键保留、其余取远端 */
+    /* 放行回读（远端：notifyOnNewArticles=true / fontSize=22）→ 点击键保留、其余取远端 */
     await act(async () => { settingsReads[0].resolve(REMOTE_SETTINGS); });
     await flush(4);
-    assert.equal(useAppStore.getState().settings.smartDedup, true, '回读生效：远端 dedup=true 落地');
+    assert.equal(useAppStore.getState().settings.notifyOnNewArticles, true, '回读生效：远端 notifyOnNewArticles=true 落地');
     assert.equal(useAppStore.getState().settings.fontSize, 18, '回读保留点击键（fontSize 未被远端 22 覆盖，点击不丢）');
     assert.equal(settingsWrites.length, 1, '门释放后点击请求才发出（排到应用+回读之后）');
     const sent = JSON.parse(settingsWrites[0].args.value);
     assert.equal(sent.fontSize, 18, '点击载荷发送时重建：含点击值');
-    assert.equal(sent.smartDedup, true, '点击载荷发送时重建：含回读后的远端基线（不把远端覆盖打回）');
+    assert.equal(sent.notifyOnNewArticles, true, '点击载荷发送时重建：含回读后的远端基线（不把远端覆盖打回）');
 
     /* 点击落库成功 → 确认基线 = 该载荷；随后一笔失败回滚到它（而非应用前旧值） */
     await act(async () => { settingsWrites[0].resolve(null); });
@@ -603,7 +603,7 @@ componentTest('OPT-008B R3：下载并应用接入设置边界——新点击排
     await act(async () => { useAppStore.getState().updateSettings({ themeMode: 'light' }); });
     await flush(3);
     assert.equal(useAppStore.getState().settings.themeMode, 'dark', '失败回滚到确认基线（themeMode=dark）');
-    assert.equal(useAppStore.getState().settings.smartDedup, true, '确认基线已刷新为回读后的远端值（dedup=true 不被回滚）');
+    assert.equal(useAppStore.getState().settings.notifyOnNewArticles, true, '确认基线已刷新为回读后的远端值（notifyOnNewArticles=true 不被回滚）');
     assert.equal(useAppStore.getState().settings.fontSize, 18, '确认基线含点击值（fontSize=18 保持）');
     assert.ok(useAppStore.getState().toasts.some((t) => t.text.includes('设置保存失败')), '失败如实可见');
     assert.ok(entry.container.querySelector('.settings-group-title'), '组件挂载树保持');

@@ -385,11 +385,11 @@ function readEntityValue(entity: FeedItem | CategoryGroup, st: AiKeyState): unkn
   if (st.kind === 'feed') {
     const f = entity as FeedItem;
     return st.field === 'summary'
-      ? normalizeFeedAiMode(f.summaryMode, f.autoSummary)
-      : normalizeFeedAiMode(f.translateMode, f.autoTranslate);
+      ? normalizeFeedAiMode(f.summaryMode)
+      : normalizeFeedAiMode(f.translateMode);
   }
   const c = entity as CategoryGroup;
-  return st.field === 'summary' ? c.autoSummary : c.autoTranslate;
+  return normalizeFeedAiMode(st.field === 'summary' ? c.summaryMode : c.translateMode);
 }
 
 function writeEntityValue(entity: FeedItem | CategoryGroup, st: AiKeyState, value: unknown): void {
@@ -399,7 +399,7 @@ function writeEntityValue(entity: FeedItem | CategoryGroup, st: AiKeyState, valu
     else f.translateMode = value as FeedAiMode;
   } else {
     const c = entity as CategoryGroup;
-    if (st.field === 'summary') c.autoSummary = value as boolean;
-    else c.autoTranslate = value as boolean;
+    if (st.field === 'summary') c.summaryMode = value as FeedAiMode;
+    else c.translateMode = value as FeedAiMode;
   }
 }

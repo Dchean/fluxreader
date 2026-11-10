@@ -217,27 +217,28 @@ export async function run(ctx) {
        新口径自己的响应照常落地。修前守卫只比 view：切范围后旧响应放行，
        「源A×article」的收藏列表覆盖进源B 视图并持久留存。 */
     await resetStore();
-    store.setState({ activeViewFilter: 'starred', articlesCursor: {} });
-    S.listPlan = { mode: 'defer' };
+    store.setState({ activeViewFilter: 'starred', activeContentLayout: 'social', articlesCursor: {} });
+    S.backendRows = [mkRow({ id: 9001, feed_id: 20, is_starred: true }), mkRow({ id: 9002, feed_id: 11, is_starred: true })];
+    S.memberPlan = { mode: 'defer' };
     const fix4Late = store.getState().reloadFilteredEntries('starred'); // 发起时范围=all
     await nTick(0);
     store.getState().selectFeed('11');  // 期间切到源B：它自己的筛选请求也进 defer 队列
     await nTick(0);
-    checkNew('(fix-4) 竞态场景成立：两个筛选请求都在途（旧口径在前）', S.pendingList.length === 2);
+    checkNew('(fix-4) 竞态场景成立：两个成员筛选请求都在途（旧口径在前）', S.pendingMembers.length === 2);
     const fix4CursorBefore = JSON.stringify(store.getState().articlesCursor);
-    S.pendingList[0].resolve([mkRow({ id: 9001, feed_id: 10, is_starred: true, title: '迟到的旧口径数据' })]);
+    S.pendingMembers[0].resolve([9001]);
     await fix4Late;
     await nTick(20);
     checkNew('(fix-4) 旧 scope 的迟到筛选响应被丢弃：entries 不被覆盖、过期游标不写入（修前只比 view 会放行）',
       !store.getState().entries.some((e) => e.id === '9001')
       && JSON.stringify(store.getState().articlesCursor) === fix4CursorBefore);
     /* 正向对照：新口径自己的响应照常落地（守卫没有锁死正常路径） */
-    S.pendingList[1].resolve([mkRow({ id: 9002, feed_id: 11, is_starred: true, title: '源B 的筛选结果' })]);
+    S.pendingMembers[1].resolve([9002]);
     await nTick(20);
     checkNew('(fix-4) 新口径响应照常落地：源B 的收藏行进列表、游标写在新范围键上',
       store.getState().entries.some((e) => e.id === '9002')
-      && store.getState().articlesCursor['article|11']?.loaded === 1);
-    S.listPlan = null;
+      && store.getState().articlesCursor['social|11']?.loaded === 1);
+    S.memberPlan = null;
 
   /* ============================================================
      OPT-011（F13）：AI 开关三态单点与输入范围一致
@@ -264,12 +265,9 @@ export async function run(ctx) {
     ];
     checkNew('(opt011-matrix) resolveFeedAiMode 三态×分类默认逐格 literal（显式关闭压过分类开启）',
       matrix.every(([mode, cat, expect]) => resolveFeedAiMode(mode, cat) === expect));
-    checkNew('(opt011-matrix) 旧输入归一：缺 mode/非法 mode 按旧 bool 映射显式 on/off（绝不落 inherit）',
-      normalizeFeedAiMode(undefined, true) === 'on'
-      && normalizeFeedAiMode(null, false) === 'off'
-      && normalizeFeedAiMode('bogus', false) === 'off'
-      && normalizeFeedAiMode('bogus', true) === 'on'
-      && normalizeFeedAiMode('inherit', false) === 'inherit');
+    checkNew('(ai-mode-normalization) 仅三态为真值，缺失/非法mode回inherit且不消费旧bool',
+      [undefined, null, 'bogus'].every(raw => normalizeFeedAiMode(raw, true) === 'inherit' && normalizeFeedAiMode(raw, false) === 'inherit')
+      && normalizeFeedAiMode('on') === 'on' && normalizeFeedAiMode('off') === 'off');
 
     /* ---------- (opt011-atomic) 真实 store：旧索引与死分类的两段红测 ---------- */
     await bootFixture();
@@ -278,12 +276,12 @@ export async function run(ctx) {
       /* 前置 A（旧索引红测）：旧行没有 mode 字段（harness 夹具即旧后端行），
          feed10 bool=false → 归一为显式 off；分类默认关 → 有效值 false。 */
       const c0 = selectFeedConfig(store.getState(), '10');
-      checkNew('(opt011-oldrow) 旧行缺 mode 按旧 bool 映射：bool=false → off（升级不开启）',
+      checkNew('(opt011-mode) fixture源显式off：摘要关闭',
         c0.summaryMode === 'off' && c0.autoSummary === false);
 
       /* 前置 B（死分类红测）：分类默认开，但旧行仍是显式 off（旧 bool=false）
          ——旧语义下分类开关对「继承」无意义；此时有效值必须保持 false。 */
-      FOLDERS.find((f) => f.id === 1).auto_summary = true;
+      FOLDERS.find((f) => f.id === 1).summary_mode = 'on';
       await store.getState().reloadFromBackend();
       const c1 = selectFeedConfig(store.getState(), '10');
       checkNew('(opt011-dead-cat) 分类默认开对显式 off 的旧行无效（显式选择优先，不以 OR 合并）',
@@ -314,11 +312,11 @@ export async function run(ctx) {
 
       /* 分类切换同样必须原子重建索引：分类关 → inherit 源有效值当帧转 false */
       store.getState().toggleFeedSummary('cat-1', '10', 'inherit');
-      store.getState().toggleCatSummary('cat-1', false);
+      store.getState().toggleCatSummary('cat-1', 'off');
       const c4 = selectFeedConfig(store.getState(), '10');
       checkNew('(opt011-atomic) 分类默认切换当帧可见：inherit 源有效值随分类关而关（feedIndex.cat 同一份）',
         c4.autoSummary === false
-        && store.getState().feedIndex.get('10')?.cat.autoSummary === false);
+        && store.getState().feedIndex.get('10')?.cat.summaryMode === 'off');
       /* 等上面两笔在途 IPC 落定，再安装受控假后端——否则它们会混进 pending 队列 */
       await nTick(20);
 
@@ -396,22 +394,22 @@ export async function run(ctx) {
       const catPending = [];
       const restoreInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
         S.invokeCalls.push({ cmd, args });
-        if (cmd === 'set_folder_ai_flags') {
+        if (cmd === 'set_folder_ai_modes') {
           return new Promise((resolve, reject) => catPending.push({ args, resolve, reject }));
         }
         return Promise.resolve(null);
       });
       try {
         /* 两字段（不同键）分别切换：各自立即发出单字段 patch（独立队列，互不阻塞） */
-        store.getState().toggleCatSummary('cat-1', true);
+        store.getState().toggleCatSummary('cat-1', 'on');
         await nTick(20);
-        store.getState().toggleCatTranslate('cat-1', true);
+        store.getState().toggleCatTranslate('cat-1', 'on');
         await nTick(20);
         const catCalls = catPending.map((p) => p.args);
         checkNew('(opt011-cat-patch) 分类切换只传当前字段：summary 笔不含 translate、translate 笔不含 summary（不再整对快照）',
           catCalls.length === 2
-          && catCalls[0].summary === true && !('translate' in catCalls[0])
-          && catCalls[1].translate === true && !('summary' in catCalls[1]));
+          && catCalls[0].summary === 'on' && !('translate' in catCalls[0])
+          && catCalls[1].translate === 'on' && !('summary' in catCalls[1]));
         checkNew('(opt011-cat-queue) 两字段独立队列：不同字段的请求互不阻塞（都已在途）', catPending.length === 2);
 
         /* 乱序完成不互相覆盖：先放行更晚发出的 translate，再放行 summary */
@@ -421,27 +419,27 @@ export async function run(ctx) {
         await nTick(20);
         const catAfter = store.getState().feedIndex.get('10')?.cat;
         checkNew('(opt011-cat-queue) 乱序落定后两字段最终值均为各自最新意图（true/true，互不覆盖）',
-          catAfter?.autoSummary === true && catAfter?.autoTranslate === true);
+          catAfter?.summaryMode === 'on' && catAfter?.translateMode === 'on');
 
         /* 同字段串行：summary 在途时再切 summary，第二笔必须等前一笔落定才发出 */
-        store.getState().toggleCatSummary('cat-1', false);
+        store.getState().toggleCatSummary('cat-1', 'off');
         await nTick(20);
         const inFlight = catPending.length;
-        store.getState().toggleCatSummary('cat-1', true);
+        store.getState().toggleCatSummary('cat-1', 'on');
         await nTick(20);
         checkNew('(opt011-cat-queue) 同字段串行：前一笔未落定，后一笔不发出（乐观值已是最后意图）',
           catPending.length === inFlight
-          && store.getState().feedIndex.get('10')?.cat.autoSummary === true);
+          && store.getState().feedIndex.get('10')?.cat.summaryMode === 'on');
         catPending[inFlight - 1].resolve(null);
         await nTick(20);
         checkNew('(opt011-cat-queue) 前一笔落定后，后一笔才发出（单字段 true，不带另一字段）',
           catPending.length === inFlight + 1
-          && catPending.at(-1).args.summary === true && !('translate' in catPending.at(-1).args));
+          && catPending.at(-1).args.summary === 'on' && !('translate' in catPending.at(-1).args));
         /* 失败 latest 守卫保留：最新一笔失败 → 回滚到写入前值（false）并提示 */
         catPending.at(-1).reject({ message: '注入：分类最新失败' });
         await nTick(20);
         checkNew('(opt011-cat-queue) 失败 latest 守卫保留：最新失败回滚到前值并提示已恢复',
-          store.getState().feedIndex.get('10')?.cat.autoSummary === false
+          store.getState().feedIndex.get('10')?.cat.summaryMode === 'off'
           && store.getState().toasts.at(-1)?.text.includes('已恢复原值'));
       } finally {
         restoreInvoke();
@@ -468,7 +466,7 @@ export async function run(ctx) {
       const restoreInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
         /* 只接管两条 AI 写入命令（挂起供受控失败/成功），其余回落主假后端
            （reload/feed_counts 等仍真实执行） */
-        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_flags') {
+        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_modes') {
           S.invokeCalls.push({ cmd, args });
           return new Promise((resolve, reject) => be.pending.push({ cmd, args, resolve, reject }));
         }
@@ -503,20 +501,20 @@ export async function run(ctx) {
         be.pending.length = 0;
 
         /* ---------- A2：分类摘要 false → true → false，两笔均失败 → 回到 false ---------- */
-        store.getState().toggleCatSummary('cat-1', true);
+        store.getState().toggleCatSummary('cat-1', 'on');
         await nTick(20);
-        store.getState().toggleCatSummary('cat-1', false);
+        store.getState().toggleCatSummary('cat-1', 'off');
         await nTick(20);
         checkNew('(opt011-r2) 前置：分类同键第二笔排队（只发出一笔）',
-          be.pending.filter((p) => p.cmd === 'set_folder_ai_flags').length === 1);
+          be.pending.filter((p) => p.cmd === 'set_folder_ai_modes').length === 1);
         be.pending[0].reject({ message: '注入：分类摘要第一笔失败' });
         await nTick(40);
         checkNew('(opt011-r2) 前置：分类第二笔在第一笔失败后发出',
-          be.pending.filter((p) => p.cmd === 'set_folder_ai_flags').length === 2);
+          be.pending.filter((p) => p.cmd === 'set_folder_ai_modes').length === 2);
         be.pending[1].reject({ message: '注入：分类摘要第二笔失败' });
         await nTick(40);
         checkNew('(opt011-r2) 两笔均失败（分类摘要）：回滚到持久化 false——不是第一笔的乐观 true',
-          catFlag()?.autoSummary === false);
+          catFlag()?.summaryMode === 'off');
         be.pending.length = 0;
 
         /* ---------- B：前失败后成功（源翻译）——成功笔值保持 ---------- */
@@ -535,20 +533,20 @@ export async function run(ctx) {
         be.pending.length = 0;
 
         /* ---------- C：前成功后失败（分类翻译）——回滚到成功确认值 ---------- */
-        store.getState().toggleCatTranslate('cat-1', true);
+        store.getState().toggleCatTranslate('cat-1', 'on');
         await nTick(20);
         checkNew('(opt011-r2) 前置：分类翻译第一笔已发出',
-          be.pending.filter((p) => p.cmd === 'set_folder_ai_flags').length === 1);
+          be.pending.filter((p) => p.cmd === 'set_folder_ai_modes').length === 1);
         be.pending[0].resolve(null);
         await nTick(20);
-        store.getState().toggleCatTranslate('cat-1', false);
+        store.getState().toggleCatTranslate('cat-1', 'off');
         await nTick(20);
         checkNew('(opt011-r2) 前置：分类翻译第二笔发出',
-          be.pending.filter((p) => p.cmd === 'set_folder_ai_flags').length === 2);
+          be.pending.filter((p) => p.cmd === 'set_folder_ai_modes').length === 2);
         be.pending[1].reject({ message: '注入：分类翻译第二笔失败' });
         await nTick(40);
         checkNew('(opt011-r2) 前成功后失败（分类翻译）：回滚到第一笔成功确认值 true',
-          catFlag()?.autoTranslate === true);
+          catFlag()?.translateMode === 'on');
         be.pending.length = 0;
 
         /* ---------- D：三笔混合 成功/失败/失败——回滚到成功笔值（R1 会停在中间乐观值） ----------
@@ -574,11 +572,11 @@ export async function run(ctx) {
         be.pending.length = 0;
 
         /* ---------- D2：三笔混合 失败/失败/成功——成功收尾不回滚 ---------- */
-        store.getState().toggleCatSummary('cat-1', true);
+        store.getState().toggleCatSummary('cat-1', 'on');
         await nTick(20);
-        store.getState().toggleCatSummary('cat-1', false);
+        store.getState().toggleCatSummary('cat-1', 'off');
         await nTick(20);
-        store.getState().toggleCatSummary('cat-1', true);
+        store.getState().toggleCatSummary('cat-1', 'on');
         await nTick(20);
         be.pending[0].reject({ message: '注入：混合2-A 失败' });
         await nTick(40);
@@ -587,7 +585,7 @@ export async function run(ctx) {
         be.pending[2].resolve(null);
         await nTick(40);
         checkNew('(opt011-r2) 三笔混合 失败/失败/成功：最终为成功笔 true（旧失败跳过不回滚）',
-          catFlag()?.autoSummary === true);
+          catFlag()?.summaryMode === 'on');
         be.pending.length = 0;
 
         /* ---------- E：跨字段独立——一笔失败回滚不触碰另一字段已成功的值 ---------- */
@@ -619,16 +617,16 @@ export async function run(ctx) {
         be.pending.length = 0;
 
         /* ---------- F：链不跨 reload 存活——外部真值变化后重置基线 ---------- */
-        FOLDERS.find((f) => f.id === 1).auto_summary = true;
+        FOLDERS.find((f) => f.id === 1).summary_mode = 'on';
         await store.getState().reloadFromBackend();
         checkNew('(opt011-r2) 前置：外部 reload 后分类默认 = true（新的可确认值）',
-          catFlag()?.autoSummary === true);
-        store.getState().toggleCatSummary('cat-1', false);
+          catFlag()?.summaryMode === 'on');
+        store.getState().toggleCatSummary('cat-1', 'off');
         await nTick(20);
         be.pending[0].reject({ message: '注入：reload 后失败' });
         await nTick(40);
         checkNew('(opt011-r2) 链未跨 reload 残留：失败回滚到 reload 后的确认值 true（旧基线 false 不复活）',
-          catFlag()?.autoSummary === true);
+          catFlag()?.summaryMode === 'on');
         be.pending.length = 0;
 
         /* ---------- G：实体已删除——在途失败落定不重建实体 ---------- */
@@ -671,7 +669,7 @@ export async function run(ctx) {
       const prevInvoke = globalThis.__INVOKE__;
       const be = { pending: [] };
       const restoreInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_flags') {
+        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_modes') {
           S.invokeCalls.push({ cmd, args });
           return new Promise((resolve, reject) => be.pending.push({ cmd, args, resolve, reject }));
         }
@@ -680,10 +678,10 @@ export async function run(ctx) {
       const feedMode = (id) => selectFeedConfig(store.getState(), id);
       const catFlag = () => store.getState().feedIndex.get('10')?.cat;
       const fsent = () => be.pending.filter((p) => p.cmd === 'set_feed_ai_modes' && p.args.summaryMode !== null);
-      const csent = () => be.pending.filter((p) => p.cmd === 'set_folder_ai_flags');
+      const csent = () => be.pending.filter((p) => p.cmd === 'set_folder_ai_modes');
       try {
         /* ---------- R3-1：源 pending → 真实 bootstrapFromBackend → reject ---------- */
-        FEEDS.find((f) => f.id === 10).auto_summary = true;
+        FEEDS.find((f) => f.id === 10).summary_mode = 'on';
         await store.getState().bootstrapFromBackend();
         checkNew('(opt011-r3) 前置：真实 bootstrap 后源确认为 on',
           feedMode('10').summaryMode === 'on');
@@ -691,7 +689,7 @@ export async function run(ctx) {
         await nTick(20);
         checkNew('(opt011-r3) 前置：写 off 挂起（乐观可见，链基线为 on）',
           fsent().length === 1 && feedMode('10').summaryMode === 'off');
-        FEEDS.find((f) => f.id === 10).auto_summary = false; // 后端真值已持久化为 off
+        FEEDS.find((f) => f.id === 10).summary_mode = 'off'; // 后端真值已持久化为 off
         await store.getState().bootstrapFromBackend();
         checkNew('(opt011-r3) 刷新不清空队列：bootstrap 后旧写仍在途原位（未重发/未并行）',
           fsent().length === 1);
@@ -706,27 +704,27 @@ export async function run(ctx) {
         be.pending.length = 0;
 
         /* ---------- R3-2：分类 pending → 真实 bootstrapFromBackend → reject ---------- */
-        FOLDERS.find((f) => f.id === 1).auto_summary = true;
+        FOLDERS.find((f) => f.id === 1).summary_mode = 'on';
         await store.getState().bootstrapFromBackend();
-        checkNew('(opt011-r3) 前置：真实 bootstrap 后分类确认为 true', catFlag()?.autoSummary === true);
-        store.getState().toggleCatSummary('cat-1', false);
+        checkNew('(opt011-r3) 前置：真实 bootstrap 后分类确认为 true', catFlag()?.summaryMode === 'on');
+        store.getState().toggleCatSummary('cat-1', 'off');
         await nTick(20);
         checkNew('(opt011-r3) 前置：分类写 false 挂起（乐观可见）',
-          csent().length === 1 && catFlag()?.autoSummary === false);
-        FOLDERS.find((f) => f.id === 1).auto_summary = false;
+          csent().length === 1 && catFlag()?.summaryMode === 'off');
+        FOLDERS.find((f) => f.id === 1).summary_mode = 'off';
         await store.getState().bootstrapFromBackend();
         be.pending[0].reject({ message: '注入：分类挂起写在接受后失败' });
         await nTick(40);
         checkNew('(opt011-r3) 分类 pending→bootstrap→reject：保持新确认 false（旧 base true 不得踩回）',
-          catFlag()?.autoSummary === false);
+          catFlag()?.summaryMode === 'off');
         be.pending.length = 0;
 
         /* ---------- R3-3：reload 路径 + 刷新窗口内新点击（守卫不破坏 wire 顺序） ---------- */
-        FEEDS.find((f) => f.id === 10).auto_summary = true;
+        FEEDS.find((f) => f.id === 10).summary_mode = 'on';
         await store.getState().reloadFromBackend();
         store.getState().toggleFeedSummary('cat-1', '10', 'off');   // A：挂起
         await nTick(20);
-        FEEDS.find((f) => f.id === 10).auto_summary = false;
+        FEEDS.find((f) => f.id === 10).summary_mode = 'off';
         await store.getState().reloadFromBackend();                  // 接受新后端 off
         checkNew('(opt011-r3) 前置：reload 接受新后端 off', feedMode('10').summaryMode === 'off');
         store.getState().toggleFeedSummary('cat-1', '10', 'on');     // B：刷新窗口内新点击
@@ -748,7 +746,7 @@ export async function run(ctx) {
         be.pending.length = 0;
 
         /* ---------- R3-4：实体缺失（脱链）→ reject 不重建；重建后旧回调不写回旧值 ---------- */
-        FEEDS.find((f) => f.id === 10).auto_summary = true;
+        FEEDS.find((f) => f.id === 10).summary_mode = 'on';
         await store.getState().reloadFromBackend();
         checkNew('(opt011-r3) 前置：重建场景起点确认为 on', feedMode('10').summaryMode === 'on');
         store.getState().toggleFeedSummary('cat-1', '10', 'off');   // A：挂起（base on）
@@ -765,14 +763,14 @@ export async function run(ctx) {
           && !store.getState().toasts.at(-1)?.text.includes('已恢复原值'));
         be.pending.length = 0;
 
-        removed.auto_summary = false;
+        removed.summary_mode = 'off';
         FEEDS.splice(fIdx, 0, removed);                              // 后端重建（off）
         await store.getState().reloadFromBackend();
         store.getState().toggleFeedSummary('cat-1', '10', 'on');     // B：挂起（base off）
         await nTick(20);
         FEEDS.splice(FEEDS.findIndex((f) => f.id === 10), 1);        // 再次移除
         await store.getState().reloadFromBackend();
-        removed.auto_summary = true;
+        removed.summary_mode = 'on';
         FEEDS.splice(fIdx, 0, removed);                              // 重建（on）
         await store.getState().reloadFromBackend();
         checkNew('(opt011-r3) 前置：重建接受后 store 确认为 on（实体已回归）',
@@ -819,18 +817,18 @@ export async function run(ctx) {
         if (cmd === 'list_feeds') {
           return new Promise((resolve, reject) => be.reads.push({ cmd, resolve, reject, snapshot: JSON.parse(JSON.stringify(P.feeds)) }));
         }
-        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_flags') {
+        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_modes') {
           S.invokeCalls.push({ cmd, args });
           return new Promise((resolve, reject) => be.writes.push({ cmd, args, resolve, reject }));
         }
         return prevInvoke(cmd, args);
       });
       const feedMode = () => selectFeedConfig(store.getState(), '10').summaryMode;
-      const catFlag = () => store.getState().feedIndex.get('10')?.cat.autoSummary;
+      const catFlag = () => store.getState().feedIndex.get('10')?.cat.summaryMode;
       const feedWrites = () => be.writes.filter((w) => w.cmd === 'set_feed_ai_modes');
       const flushNewest = (n) => { for (const r of be.reads.splice(-n)) r.resolve(r.snapshot); };
       const commitFeed = (mode) => { P.feeds.find((x) => x.id === 10).summary_mode = mode; };
-      const commitCat = (v) => { P.folders.find((x) => x.id === 1).auto_summary = v; };
+      const commitCat = (v) => { P.folders.find((x) => x.id === 1).summary_mode = v ? 'on' : 'off'; };
       const controlledReload = async () => {
         const p = store.getState().reloadFromBackend();
         await nTick(20);
@@ -893,12 +891,12 @@ export async function run(ctx) {
         be.writes.length = 0;
 
         /* ---------- R4-3 场景①（分类） ---------- */
-        store.getState().toggleCatSummary('cat-1', true);          // A
+        store.getState().toggleCatSummary('cat-1', 'on');          // A
         await nTick(20);
-        store.getState().toggleCatSummary('cat-1', false);         // B
+        store.getState().toggleCatSummary('cat-1', 'off');         // B
         await nTick(20);
         checkNew('(opt011-r4) 场景①（分类）前置：A 在途、B 排队',
-          be.writes.filter((w) => w.cmd === 'set_folder_ai_flags').length === 1);
+          be.writes.filter((w) => w.cmd === 'set_folder_ai_modes').length === 1);
         const reload3 = store.getState().reloadFromBackend();
         await nTick(20);
         commitCat(true);
@@ -910,30 +908,30 @@ export async function run(ctx) {
         be.writes[1].reject({ message: '注入：分类 B 失败' });
         await nTick(40);
         checkNew('(opt011-r4) 场景①（分类）：旧快照晚接受 + B 失败 → 恢复 A 的成功确认值 true',
-          catFlag() === true);
+          catFlag() === 'on');
         be.writes.length = 0;
 
         /* ---------- R4-4 场景②（分类） ---------- */
         commitCat(true);
         await controlledReload();
-        checkNew('(opt011-r4) 场景②（分类）前置：受控 reload 后确认为 true', catFlag() === true);
-        store.getState().toggleCatSummary('cat-1', false);         // A
+        checkNew('(opt011-r4) 场景②（分类）前置：受控 reload 后确认为 true', catFlag() === 'on');
+        store.getState().toggleCatSummary('cat-1', 'off');         // A
         await nTick(20);
         commitCat(false);
         const reload4 = store.getState().reloadFromBackend();
         await nTick(20);
-        store.getState().toggleCatSummary('cat-1', true);          // B（刷新途中点击）
+        store.getState().toggleCatSummary('cat-1', 'on');          // B（刷新途中点击）
         await nTick(20);
         flushNewest(be.reads.length);
         await reload4;
         await nTick(20);
         checkNew('(opt011-r4) 场景②（分类）：接受 false 快照不得吞掉 B 的意图（保持 true）',
-          catFlag() === true);
+          catFlag() === 'on');
         be.writes[0].reject({ message: '注入：分类 A 失败' });
         await nTick(40);
         be.writes[1].resolve(null);
         await nTick(40);
-        checkNew('(opt011-r4) 场景②（分类）：B 成功后 UI 与真实成功结果一致（true）', catFlag() === true);
+        checkNew('(opt011-r4) 场景②（分类）：B 成功后 UI 与真实成功结果一致（true）', catFlag() === 'on');
         be.writes.length = 0;
 
         /* ---------- R4-5 边界：较早读取晚到（查询代际淘汰，不覆盖较新接受的读取） ---------- */
@@ -1025,7 +1023,7 @@ export async function run(ctx) {
         if (cmd === 'list_feeds') {
           return new Promise((resolve, reject) => be.reads.push({ cmd, resolve, reject, snapshot: JSON.parse(JSON.stringify(P.feeds)) }));
         }
-        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_flags') {
+        if (cmd === 'set_feed_ai_modes' || cmd === 'set_folder_ai_modes') {
           S.invokeCalls.push({ cmd, args });
           return new Promise((resolve, reject) => be.writes.push({ cmd, args, resolve, reject }));
         }

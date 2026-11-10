@@ -45,11 +45,11 @@ async fn miniflux_sync_end_to_end() {
     let local_entry = db::NewArticle {
         guid: "guid-local-1".into(),
         url: Some("http://127.0.0.1:8765/post/1".into()),
-        title: "Local Article".into(),
+        title: "Remote version of same article".into(),
         author: Some("Local Author".into()),
         summary: None,
-        content_html: Some("<p>local content</p>".into()),
-        body_text: "local content".into(),
+        content_html: Some("<p>Mock fetched content</p>".into()),
+        body_text: "Mock fetched content".into(),
         image_url: None,
         enclosure_url: None,
         enclosure_mime: None,
@@ -362,7 +362,7 @@ async fn setup_remote_unsub(
 
 fn feed_id_by_url(conn: &rusqlite::Connection, url: &str) -> Option<i64> {
     conn.query_row(
-        "SELECT id FROM feeds WHERE feed_url = ?1",
+        "SELECT id FROM feeds WHERE active=1 AND feed_url = ?1",
         rusqlite::params![url],
         |r| r.get(0),
     )

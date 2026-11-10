@@ -142,7 +142,7 @@ fn mark_all_read_view_filters() {
             author: None,
             summary: None,
             content_html: None,
-            body_text: "b".into(),
+            body_text: format!("body-{guid}"),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,

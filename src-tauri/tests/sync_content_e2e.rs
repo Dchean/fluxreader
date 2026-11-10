@@ -344,16 +344,14 @@ fn normalized_url_match_maps_same_article() {
     };
     let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
 
-    // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇（规范化键同源同口径）
-    let maps = db::sync_match_maps(&conn).unwrap();
-    let matched = maps
-        .url_to_id
-        .get(&db::normalize_url("http://example.com/story"));
-    assert_eq!(
-        matched.copied(),
-        Some(aid),
-        "normalized URL must match the local article (https://example.com/story/ vs http://example.com/story)"
-    );
+    // 规范化URL仅缩小候选；本夹具标题、正文与附件全部相同，允许首绑。
+    let mut remote = a;
+    remote.guid = "remote-100".into();
+    remote.source = "miniflux".into();
+    remote.url = Some("http://example.com/story".into());
+    let bound = db::upsert_remote_article(&conn, feed, &remote, Some(100)).unwrap();
+    assert_eq!(bound.id, aid);
+    assert!(!bound.inserted, "内容确认后复用同源未绑定早到行");
 
     let _ = std::fs::remove_file(&tmp);
 }

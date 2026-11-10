@@ -935,8 +935,10 @@ fn seed_local_article(conn: &rusqlite::Connection) -> i64 {
 }
 
 fn feed_count(conn: &rusqlite::Connection) -> i64 {
-    conn.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
 }
 
 fn article_count(conn: &rusqlite::Connection) -> i64 {
@@ -2231,8 +2233,10 @@ async fn authority_backfill_imports_late_old_unread_and_binds_only_same_feed() {
         let (feed, stub) =
             seed_remote_article(&connection, "http://example.com/own.xml", 10, 90_001);
         db::set_read(&connection, stub, true).unwrap();
-        connection.execute("INSERT INTO articles (feed_id, guid, url, url_norm, title, is_read) VALUES (?1, 'direct-own', 'http://example.com/e/201', 'http://example.com/e/201', 'own', 1)", [feed]).unwrap();
+        connection.execute("INSERT INTO articles (feed_id, guid, url, url_norm, title, is_read) VALUES (?1, 'direct-own', 'http://example.com/e/201', 'http://example.com/e/201', 'late old unread', 1)", [feed]).unwrap();
         let own = connection.last_insert_rowid();
+        db::backfill_article_content(&connection, own, "fixture", "fixture", None, None, None)
+            .unwrap();
         connection.execute("INSERT INTO articles (feed_id, guid, url, url_norm, title, remote_id) VALUES (?1, 'bound-empty', 'http://example.com/e/203', 'http://example.com/e/203', 'empty', 203)", [feed]).unwrap();
         let bodyless = connection.last_insert_rowid();
         let (_, foreign) =
@@ -2253,7 +2257,11 @@ async fn authority_backfill_imports_late_old_unread_and_binds_only_same_feed() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(own_state, (Some(201), true), "首绑保持 GR read-wins");
+    assert_eq!(
+        own_state,
+        (Some(201), false),
+        "内容证明首绑后接收远端未读，无本地 pending 时双向收敛"
+    );
     let foreign_identity: Option<i64> = connection
         .query_row(
             "SELECT remote_id FROM articles WHERE id = ?1",
@@ -3072,7 +3080,7 @@ async fn greader_orphan_rollback_and_remote_cancel_recovers_states() {
         let conn = db.lock().await;
         let orphan_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://example.com/historical-orphan.xml'",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://example.com/historical-orphan.xml'",
                 [],
                 |r| r.get(0),
             )

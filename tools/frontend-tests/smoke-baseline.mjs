@@ -17,6 +17,7 @@ check('bootstrap 后 entries 有 1 条', store.getState().entries.length === 1);
 // ---- S-1：翻译流式 XSS 回读消毒版 ----
 const entryId = store.getState().entries[0].id;
 store.getState().selectArticle(entryId);
+await new Promise((r) => setTimeout(r, 20));
 
 // 触发翻译（走 tauri 路径，onDelta 追加未消毒内容）
 store.getState().toggleReaderTranslation();
@@ -175,20 +176,25 @@ check(
   !!readCall && readCall.args.read === true && store.getState().entries.find((a) => a.id === '1')?.isRead === true,
 );
 
-// F8：全部已读的视图口径（收藏 → starredOnly；今天 → sinceMs）
-store.setState({ activeViewFilter: 'starred', activeFeedFilter: 'all' });
-S.invokeCalls.length = 0;
-store.getState().markCurrentViewAllRead();
-await new Promise((r) => setTimeout(r, 10)); // api.markAllRead 内部 await getInvoke()，需让出微任务
-const starredCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
-check(
-  'S-5: 收藏视图全部已读带 starredOnly',
-  !!starredCall && starredCall.args.starredOnly === true && (starredCall.args.sinceMs === null || starredCall.args.sinceMs === undefined),
-);
-store.setState({ activeViewFilter: 'today' });
+// F8：全读只消费实际视图成员；禁止用无会话动态范围API代替未捕获集合。
+await ctx.useMainBackend();
+await ctx.resetStore({activeViewFilter:'starred'});
+await store.getState().reloadFromBackend();
 S.invokeCalls.length = 0;
 store.getState().markCurrentViewAllRead();
 await new Promise((r) => setTimeout(r, 10));
-const todayCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
-check('S-5: 今天视图全部已读带 sinceMs', !!todayCall && typeof todayCall.args.sinceMs === 'number' && todayCall.args.sinceMs > 0);
+const starredCall = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
+check(
+  'S-5: 收藏视图全部已读只发送已捕获的102/103',
+  starredCall?.args.ids.join(',')==='102,103'&&!S.invokeCalls.some(c=>c.cmd==='mark_all_read'),
+);
+store.getState().selectView('today');
+await ctx.waitUntil(()=>store.getState().readingSession?.ready&&store.getState().backendReloadsInFlight===0);
+const todayMembers=[...store.getState().readingSession.memberIds];
+S.invokeCalls.length = 0;
+store.getState().markCurrentViewAllRead();
+await new Promise((r) => setTimeout(r, 10));
+const todayCall = S.invokeCalls.find((c) => c.cmd === 'set_read_bulk');
+check('S-5: 今天视图全部已读沿捕获日界成员102/101执行',
+  todayMembers.join(',')==='102,101'&&todayCall?.args.ids.join(',')===todayMembers.join(',')&&!S.invokeCalls.some(c=>c.cmd==='mark_all_read'));
 }

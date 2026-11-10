@@ -102,11 +102,12 @@ componentTest('键盘与焦点：J/K 在五布局同步 activeArticleId、DOM fo
   }
 });
 
-componentTest('收藏筛选移除当前卡：焦点落到原下标的下一卡，live region 宣告取消收藏与迁移目标', { timeout: 40000 }, async () => {
+componentTest('收藏会话取消收藏：当前卡与焦点原地保留，live region 宣告状态变化', { timeout: 40000 }, async () => {
   installBackend();
   resetStore();
   seedFromRows(keyboardRows().filter((row) => Number(row.feed_id) === 11), { layout: 'social' });
   useAppStore.setState({ activeViewFilter: 'starred', timelineFilter: 'all' });
+  await useAppStore.getState().reloadFromBackend();
 
   const { createElement, act } = await import('react');
   const { Timeline } = await import('../../src/components/Timeline.tsx');
@@ -126,19 +127,19 @@ componentTest('收藏筛选移除当前卡：焦点落到原下标的下一卡�
   });
   await flush(4, 30);
 
-  assert.equal(selectVisibleEntries(useAppStore.getState())[0]?.id, before[1].id,
-    '取消收藏后第一条应被筛选移除');
-  assert.equal(focusedCardId(), before[1].id, '焦点应迁到原下标的下一张卡');
+  assert.equal(selectVisibleEntries(useAppStore.getState())[0]?.id, before[0].id, '取消收藏不抽走当前会话成员');
+  assert.equal(focusedCardId(), before[0].id, '焦点保留在原卡');
   const live = liveRegion(entry.container).textContent ?? '';
   assert.match(live, /已取消收藏/, 'live region 应宣告取消收藏');
-  assert.ok(live.includes(before[1].title), 'live region 应包含新焦点条目标题');
+  assert.ok(live.includes(before[0].title), 'live region 应包含状态变化的当前条目标题');
 });
 
-componentTest('画廊换 lane 的收藏移除也迁移焦点：目标为原顺序的下一条目', { timeout: 40000 }, async () => {
+componentTest('画廊收藏会话取消收藏：跨 lane 的当前焦点与成员保持', { timeout: 40000 }, async () => {
   installBackend();
   resetStore();
   seedFromRows(keyboardRows().filter((row) => Number(row.feed_id) === 12), { layout: 'image' });
   useAppStore.setState({ activeViewFilter: 'starred', timelineFilter: 'all' });
+  await useAppStore.getState().reloadFromBackend();
 
   const { createElement, act } = await import('react');
   const { Timeline } = await import('../../src/components/Timeline.tsx');
@@ -156,7 +157,7 @@ componentTest('画廊换 lane 的收藏移除也迁移焦点：目标为原顺�
   });
   await flush(4, 30);
 
-  assert.equal(focusedCardId(), before[1].id, '画廊焦点应迁到原线性顺序的下一条目（可跨 lane）');
+  assert.equal(focusedCardId(), before[0].id, '画廊当前焦点不因收藏变化跨 lane 迁移');
   const live = liveRegion(entry.container).textContent ?? '';
   assert.match(live, /已取消收藏/);
 });
@@ -222,11 +223,12 @@ componentTest('Sidebar：源行主选择与刷新/编辑为同级 button，activ
   assert.equal(pressed.length, 2, '当前视图与当前布局各有一个 aria-pressed=true');
 });
 
-componentTest('焦点迁移：末项移除落到上一项，live region 保持 polite/atomic', { timeout: 40000 }, async () => {
+componentTest('收藏会话末项取消收藏：末项焦点保留，live region 保持 polite/atomic', { timeout: 40000 }, async () => {
   installBackend();
   resetStore();
   seedFromRows(keyboardRows().filter((row) => Number(row.feed_id) === 11), { layout: 'social' });
   useAppStore.setState({ activeViewFilter: 'starred', timelineFilter: 'all' });
+  await useAppStore.getState().reloadFromBackend();
 
   const { createElement, act } = await import('react');
   const { Timeline } = await import('../../src/components/Timeline.tsx');
@@ -246,18 +248,18 @@ componentTest('焦点迁移：末项移除落到上一项，live region 保持 p
   });
   await flush(4, 30);
 
-  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 2,
-    '末项移除后应剩两条');
-  assert.equal(focusedCardId(), before[1].id, '末项移除后焦点应落到新的末项（上一项）');
+  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 3, '末项仍属于当前会话');
+  assert.equal(focusedCardId(), before[2].id, '末项焦点保留');
   const node = liveRegion(entry.container);
-  assert.ok(node.textContent?.includes(before[1].title), 'live region 应点名上一项');
+  assert.ok(node.textContent?.includes(before[2].title), 'live region 点名当前末项');
 });
 
-componentTest('焦点迁移：列表清空后焦点落到滚动容器并播报列表为空', { timeout: 40000 }, async () => {
+componentTest('收藏会话最后一项取消收藏：当前列表不空、不移动焦点', { timeout: 40000 }, async () => {
   installBackend();
   resetStore();
   seedFromRows(keyboardRows().filter((row) => Number(row.feed_id) === 11).slice(0, 1), { layout: 'social' });
   useAppStore.setState({ activeViewFilter: 'starred', timelineFilter: 'all' });
+  await useAppStore.getState().reloadFromBackend();
 
   const { createElement, act } = await import('react');
   const { Timeline } = await import('../../src/components/Timeline.tsx');
@@ -275,11 +277,10 @@ componentTest('焦点迁移：列表清空后焦点落到滚动容器并播报�
   });
   await flush(4, 30);
 
-  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 0, '列表应清空');
-  assert.equal(document.activeElement?.id, 'timelineContentScroll',
-    '空列表时焦点应落到列表滚动容器');
+  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 1, '最后一项仍在当前会话');
+  assert.equal(focusedCardId(), card.dataset.id, '最后一项焦点保留在原卡');
   const node = liveRegion(entry.container);
-  assert.match(node.textContent ?? '', /列表已为空/, 'live region 应播报列表为空');
+  assert.match(node.textContent ?? '', /已取消收藏/, 'live region 宣告状态变化');
 });
 
 componentTest('焦点迁移：焦点在筛选器时不抢走焦点', { timeout: 40000 }, async () => {
@@ -287,6 +288,7 @@ componentTest('焦点迁移：焦点在筛选器时不抢走焦点', { timeout: 
   resetStore();
   seedFromRows(keyboardRows().filter((row) => Number(row.feed_id) === 11), { layout: 'social' });
   useAppStore.setState({ activeViewFilter: 'starred', timelineFilter: 'all' });
+  await useAppStore.getState().reloadFromBackend();
 
   const { createElement, act } = await import('react');
   const { Timeline } = await import('../../src/components/Timeline.tsx');
@@ -306,7 +308,7 @@ componentTest('焦点迁移：焦点在筛选器时不抢走焦点', { timeout: 
   });
   await flush(4, 30);
 
-  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 2, '被筛掉的条目应移除');
+  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 3, '属性变化不重筛当前会话');
   assert.equal(document.activeElement, filterButton,
     '用户焦点在筛选器时，条目移除不得抢焦点');
 });
@@ -316,6 +318,7 @@ componentTest('焦点迁移：焦点在侧栏时不抢走焦点', { timeout: 500
   resetStore();
   seedFromRows(keyboardRows().filter((row) => Number(row.feed_id) === 11), { layout: 'social' });
   useAppStore.setState({ activeViewFilter: 'starred', timelineFilter: 'all' });
+  await useAppStore.getState().reloadFromBackend();
 
   const { createElement, act } = await import('react');
   const { default: App } = await import('../../src/App.tsx');
@@ -335,7 +338,7 @@ componentTest('焦点迁移：焦点在侧栏时不抢走焦点', { timeout: 500
   });
   await flush(4, 30);
 
-  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 2, '被筛掉的条目应移除');
+  assert.equal(selectVisibleEntries(useAppStore.getState()).length, 3, '属性变化不重筛当前会话');
   assert.equal(document.activeElement, sidebarSelect,
     '用户焦点在侧栏时，条目移除不得抢焦点');
 });

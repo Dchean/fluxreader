@@ -20,6 +20,8 @@ pub struct ArticleListArgs {
     pub only_unread: Option<bool>,
     pub only_starred: Option<bool>,
     pub only_today: Option<bool>,
+    pub since_ms: Option<i64>,
+    pub until_ms: Option<i64>,
     pub newest_first: Option<bool>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -42,7 +44,7 @@ pub async fn list_articles(
     args: ArticleListArgs,
 ) -> AppResult<Vec<db::ArticleListItem>> {
     let conn = state.db.lock().await;
-    db::list_articles(&conn, &article_query(&args))
+    db::list_articles_in_window(&conn, &article_query(&args), date_window(&args)?)
 }
 
 /// 计算某篇文章在当前筛选排序下的绝对位置（0 起）——供前端「搜索/深层打开
@@ -54,7 +56,23 @@ pub async fn article_index(
     article_id: i64,
 ) -> AppResult<Option<i64>> {
     let conn = state.db.lock().await;
-    db::article_index(&conn, &article_query(&args), article_id)
+    db::article_index_in_window(
+        &conn,
+        &article_query(&args),
+        article_id,
+        date_window(&args)?,
+    )
+}
+
+fn date_window(args: &ArticleListArgs) -> AppResult<Option<(i64, i64)>> {
+    match (args.since_ms, args.until_ms) {
+        (Some(start), Some(end)) if start < end => Ok(Some((start, end))),
+        (None, None) => Ok(None),
+        _ => Err(crate::error::AppError::new(
+            "validate",
+            "日期范围必须同时提供起止且起点早于终点",
+        )),
+    }
 }
 
 /// 从反序列化的列表参数构建 db::ArticleQuery（list_articles 与 article_index 共用）。
@@ -88,6 +106,24 @@ pub async fn get_articles(
 ) -> AppResult<Vec<db::ArticleRow>> {
     let conn = state.db.lock().await;
     db::get_articles(&conn, &ids)
+}
+
+#[tauri::command]
+pub async fn get_article_updates(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> AppResult<db::ArticleUpdates> {
+    let conn = state.db.lock().await;
+    db::get_article_updates(&conn, &ids)
+}
+
+#[tauri::command]
+pub async fn list_article_member_ids(
+    state: State<'_, AppState>,
+    args: ArticleListArgs,
+) -> AppResult<Vec<i64>> {
+    let conn = state.db.lock().await;
+    db::list_article_member_ids(&conn, &article_query(&args), date_window(&args)?)
 }
 
 /// 图片位上报当前封面失效；仅在 URL 未被其它更新替换时清空，避免误删新封面。
