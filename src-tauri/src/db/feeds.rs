@@ -24,6 +24,7 @@ pub fn mark_binding_incomplete(conn: &Connection, account_key: &str) -> AppResul
 }
 
 pub fn clear_binding_incomplete(conn: &Connection, account_key: &str) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key = ?1",
         params![binding_incomplete_key(account_key)],
@@ -32,6 +33,7 @@ pub fn clear_binding_incomplete(conn: &Connection, account_key: &str) -> AppResu
 }
 
 pub fn clear_binding_incomplete_attempts(conn: &Connection) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key LIKE ?1",
         params![format!("{BINDING_INCOMPLETE_KEY_PREFIX}%")],
@@ -97,6 +99,7 @@ pub fn mark_zero_binding_discovery_attempt(
 }
 
 pub fn clear_zero_binding_discovery_attempts(conn: &Connection) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key LIKE ?1",
         params![format!("{ZERO_BINDING_DISCOVERY_KEY_PREFIX}%")],
@@ -200,7 +203,7 @@ pub struct FeedRow {
     pub effective_layout: String,
 }
 
-const FEED_COLS: &str = "id, COALESCE(folder_id, 0), feed_url, site_url, title, favicon_url, layout, auto_summary, auto_translate, summary_mode, translate_mode, fetch_failed, fetch_error, last_fetched_at, sync_id, CASE active WHEN 1 THEN 'active' ELSE 'retained' END, CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END";
+const FEED_COLS: &str = "id, COALESCE(folder_id, 0), COALESCE((SELECT url FROM local_sync_feed_state WHERE id=feeds.id),feed_url), site_url, title, favicon_url, layout, auto_summary, auto_translate, summary_mode, translate_mode, fetch_failed, fetch_error, last_fetched_at, sync_id, CASE (SELECT active FROM local_sync_feed_state WHERE id=feeds.id) WHEN 1 THEN 'active' ELSE 'retained' END, CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END";
 
 fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FeedRow> {
     let auto_summary = r.get::<_, i64>(7)? != 0;
@@ -232,14 +235,14 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FeedRow> {
 
 pub fn list_feeds(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {FEED_COLS} FROM feeds WHERE active = 1 ORDER BY id"
+        "SELECT {FEED_COLS} FROM feeds WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) ORDER BY id"
     ))?;
     let rows = stmt.query_map([], feed_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn list_article_sources(conn: &Connection) -> AppResult<Vec<FeedRow>> {
-    let mut stmt = conn.prepare(&format!("SELECT {FEED_COLS} FROM feeds WHERE active=1 OR EXISTS(SELECT 1 FROM articles a WHERE a.feed_id=feeds.id AND a.is_starred=1) ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!("SELECT {FEED_COLS} FROM feeds WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) OR EXISTS(SELECT 1 FROM local_sync_article_state a WHERE a.feed_id=feeds.id AND a.is_starred=1) ORDER BY id"))?;
     let rows = stmt.query_map([], feed_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -259,7 +262,7 @@ pub fn find_feed_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> 
 pub fn feed_url_by_id(conn: &Connection, feed_id: i64) -> AppResult<Option<String>> {
     let url = conn
         .query_row(
-            "SELECT feed_url FROM feeds WHERE id = ?1",
+            "SELECT url FROM local_sync_feed_state WHERE id = ?1",
             params![feed_id],
             |r| r.get(0),
         )
@@ -341,14 +344,63 @@ pub fn insert_feed_origin_modes(
     translate_mode: FeedAiMode,
     origin: &str,
 ) -> AppResult<i64> {
-    let retained = conn
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        let id = insert_feed_origin_modes(
+            &tx,
+            feed_url,
+            site_url,
+            title,
+            favicon_url,
+            folder_id,
+            layout,
+            summary_mode,
+            translate_mode,
+            origin,
+        )?;
+        tx.commit()?;
+        return Ok(id);
+    }
+    let existing = conn
         .query_row(
-            "SELECT id FROM feeds WHERE feed_url = ?1 AND active = 0",
+            "SELECT id FROM feeds WHERE feed_url = ?1",
             [feed_url],
             |r| r.get::<_, i64>(0),
         )
         .optional()?;
+    let retained = match existing {
+        Some(id) if !crate::local_sync::logical::feed_active(conn, id)? => Some(id),
+        _ => None,
+    };
     if let Some(id) = retained {
+        let mut patch = serde_json::Map::new();
+        if let Some(epoch) = crate::local_sync::logical::reactivation_epoch(conn, id)? {
+            patch.insert("reactivate".into(), epoch);
+        }
+        patch.insert(
+            "folder".into(),
+            serde_json::json!(conn
+                .query_row(
+                    "SELECT sync_id FROM folders WHERE id=?1",
+                    [folder_id],
+                    |r| r.get::<_, String>(0)
+                )
+                .optional()?),
+        );
+        patch.insert("layout".into(), serde_json::json!(layout));
+        patch.insert(
+            "summary_mode".into(),
+            serde_json::json!(summary_mode.as_str()),
+        );
+        patch.insert(
+            "translate_mode".into(),
+            serde_json::json!(translate_mode.as_str()),
+        );
+        patch.insert("title".into(), serde_json::json!(title));
+        if let Some(url) = site_url {
+            patch.insert("site_url".into(), serde_json::json!(url));
+        }
+        let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
         conn.execute(
             "UPDATE feeds SET active = 1, lifecycle_version = lifecycle_version + 1,
             folder_id = ?1, layout = ?2, summary_mode = ?3, translate_mode = ?4,
@@ -364,6 +416,7 @@ pub fn insert_feed_origin_modes(
                 id
             ],
         )?;
+        crate::local_sync::logical::finish_explicit(conn, explicit)?;
         remove_feed_tombstone(conn, feed_url)?;
         return Ok(id);
     }
@@ -399,12 +452,11 @@ pub fn set_feed_custom_title(conn: &Connection, id: i64, title: &str) -> AppResu
     if title.is_empty() {
         return Ok(());
     }
-    conn.execute(
-        "UPDATE feeds SET title = ?1, title_custom = ?1
-          WHERE id = ?2 AND ?1 <> feed_url",
-        params![title, id],
-    )?;
-    Ok(())
+    let url = feed_url_by_id(conn, id)?;
+    if url.as_deref() == Some(title) {
+        return Ok(());
+    }
+    update_feed_full(conn, id, Some(title), None, None, None, None, None, None)
 }
 
 /// 导入/配置快照的显式标题归一：去空白后非空且不等于源 URL 才是用户意图。
@@ -415,7 +467,15 @@ pub fn explicit_feed_title<'a>(title: &'a str, feed_url: &str) -> Option<&'a str
 }
 
 pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        delete_feed(&tx, id)?;
+        tx.commit()?;
+        return Ok(());
+    }
     super::contents::with_write_savepoint(conn, "retain_unsubscribed", || {
+        let patch = serde_json::Map::from_iter([("deleted".into(), serde_json::json!(true))]);
+        let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
         conn.execute(
             "UPDATE feeds SET lifecycle_version = lifecycle_version + 1 WHERE id=?1 AND active=1",
             [id],
@@ -430,10 +490,13 @@ pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
         conn.execute("UPDATE feeds SET active = 0, fetch_generation = fetch_generation + 1,
             layout = CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END
             WHERE id = ?1", [id])?;
-        conn.execute(
-            "DELETE FROM articles WHERE feed_id = ?1 AND is_starred = 0",
-            [id],
-        )?;
+        if !explicit {
+            conn.execute(
+                "DELETE FROM articles WHERE feed_id = ?1 AND is_starred = 0",
+                [id],
+            )?;
+        }
+        crate::local_sync::logical::finish_explicit(conn, explicit)?;
         // Keep the stable source identity and explicit exclusion even when no saved article
         // remains; re-subscribing can recover this identity without inventing a new source.
         Ok(())
@@ -451,6 +514,7 @@ pub fn set_feed_fetch_state(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE feeds SET
             fetch_failed = ?1,
@@ -481,6 +545,10 @@ pub fn set_feed_fetch_state_if_generation(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
+    if !crate::local_sync::logical::feed_active(conn, id)? {
+        return Ok(false);
+    }
     let changed = conn.execute(
         "UPDATE feeds SET
             fetch_failed = ?1,
@@ -509,7 +577,12 @@ pub struct FeedRefreshAttempt {
 }
 
 pub fn begin_feed_refresh(conn: &Connection, feed_id: i64) -> AppResult<FeedRefreshAttempt> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
+    if !crate::local_sync::logical::feed_active(&tx, feed_id)? {
+        return Err(crate::error::AppError::not_found(format!(
+            "feed {feed_id} not found"
+        )));
+    }
     let changed = tx.execute(
         "UPDATE feeds SET fetch_generation = fetch_generation + 1 WHERE id = ?1 AND active = 1",
         params![feed_id],
@@ -520,7 +593,7 @@ pub fn begin_feed_refresh(conn: &Connection, feed_id: i64) -> AppResult<FeedRefr
         )));
     }
     let attempt = tx.query_row(
-        "SELECT feed_url, etag, last_modified, fetch_generation
+        "SELECT (SELECT url FROM local_sync_feed_state WHERE id=feeds.id), etag, last_modified, fetch_generation
            FROM feeds WHERE id = ?1",
         params![feed_id],
         |r| {
@@ -571,8 +644,8 @@ pub fn feeds_due_for_refresh_candidates(
     include_remote: bool,
 ) -> AppResult<Vec<FeedRefreshCandidate>> {
     let mut stmt = conn.prepare(
-        "SELECT id, feed_url FROM feeds
-         WHERE active = 1 AND (last_fetched_at IS NULL
+        "SELECT id, (SELECT url FROM local_sync_feed_state WHERE id=feeds.id) FROM feeds
+         WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) AND (last_fetched_at IS NULL
             OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
                  AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
            AND (?2 OR origin != 'remote')",
@@ -605,7 +678,7 @@ pub fn feeds_all_candidates(
     include_remote: bool,
 ) -> AppResult<Vec<FeedRefreshCandidate>> {
     let mut stmt = conn.prepare(
-        "SELECT id, feed_url FROM feeds WHERE active = 1 AND (?1 OR origin != 'remote')",
+        "SELECT id, (SELECT url FROM local_sync_feed_state WHERE id=feeds.id) FROM feeds WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) AND (?1 OR origin != 'remote')",
     )?;
     let rows = stmt.query_map(params![include_remote], |r| Ok((r.get(0)?, r.get(1)?)))?;
     collect_refresh_candidates(rows)
@@ -625,6 +698,22 @@ pub fn set_feed_title_and_icon(
     favicon: Option<&str>,
     site_url: Option<&str>,
 ) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        set_feed_title_and_icon(&tx, id, title, favicon, site_url)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    if crate::local_sync::logical::enabled(conn)? {
+        let source: Option<String> = conn
+            .query_row("SELECT sync_id FROM feeds WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
+        if let Some(source) = source {
+            if crate::local_sync::logical::get(conn, &format!("s/{source}/created"))?.is_some() {
+                crate::local_sync::logical::materialize(conn, &format!("s/{source}"))?;
+            }
+        }
+    }
     let title = title.filter(|t| !t.trim().is_empty());
     let favicon = favicon.filter(|f| !f.trim().is_empty());
     // 抓取只更新 fetched_title；显示名 title 在有 title_custom 时保持用户值，
@@ -660,11 +749,7 @@ pub fn set_feed_title_and_icon(
 }
 
 pub fn update_feed_layout(conn: &Connection, id: i64, layout: &str) -> AppResult<()> {
-    conn.execute(
-        "UPDATE feeds SET layout = ?1 WHERE id = ?2",
-        params![layout, id],
-    )?;
-    Ok(())
+    update_feed_full(conn, id, None, None, Some(layout), None, None, None, None)
 }
 
 /// 编辑源一次性落库：标题 / 所属分类 / 布局 / AI 开关（单语句，避免多次往返）。
@@ -707,9 +792,50 @@ pub fn update_feed_full(
     summary_mode: Option<FeedAiMode>,
     translate_mode: Option<FeedAiMode>,
 ) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        update_feed_full(
+            &tx,
+            id,
+            title,
+            folder_id,
+            layout,
+            auto_summary,
+            auto_translate,
+            summary_mode,
+            translate_mode,
+        )?;
+        tx.commit()?;
+        return Ok(());
+    }
     let title = title.map(str::trim).filter(|t| !t.is_empty());
     let summary_mode = summary_mode.or(auto_summary.map(FeedAiMode::from_legacy_bool));
     let translate_mode = translate_mode.or(auto_translate.map(FeedAiMode::from_legacy_bool));
+    let mut patch = serde_json::Map::new();
+    if let Some(title) = title {
+        patch.insert("title".into(), serde_json::json!(title));
+        patch.insert("title_custom".into(), serde_json::json!(title));
+    }
+    if let Some(folder) = folder_id {
+        patch.insert(
+            "folder".into(),
+            serde_json::json!(conn
+                .query_row("SELECT sync_id FROM folders WHERE id=?1", [folder], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?),
+        );
+    }
+    if let Some(layout) = layout {
+        patch.insert("layout".into(), serde_json::json!(layout));
+    }
+    if let Some(mode) = summary_mode {
+        patch.insert("summary_mode".into(), serde_json::json!(mode.as_str()));
+    }
+    if let Some(mode) = translate_mode {
+        patch.insert("translate_mode".into(), serde_json::json!(mode.as_str()));
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
     // 空标题回退原值（不置 NULL——源名必填）
     conn.execute(
         "UPDATE feeds SET
@@ -733,6 +859,7 @@ pub fn update_feed_full(
             id
         ],
     )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
@@ -764,22 +891,17 @@ pub fn set_feed_ai_flags(
     summary: bool,
     translate: bool,
 ) -> AppResult<()> {
-    let summary_mode = FeedAiMode::from_legacy_bool(summary);
-    let translate_mode = FeedAiMode::from_legacy_bool(translate);
-    conn.execute(
-        "UPDATE feeds SET
-            summary_mode = ?1, translate_mode = ?2,
-            auto_summary = ?3, auto_translate = ?4
-         WHERE id = ?5",
-        params![
-            summary_mode.as_str(),
-            translate_mode.as_str(),
-            summary_mode.mirrors_legacy_bool() as i64,
-            translate_mode.mirrors_legacy_bool() as i64,
-            id
-        ],
-    )?;
-    Ok(())
+    update_feed_full(
+        conn,
+        id,
+        None,
+        None,
+        None,
+        Some(summary),
+        Some(translate),
+        None,
+        None,
+    )
 }
 
 /* ============================================================

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../../store';
+import { enqueueAiConfigWrite, useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { Icons } from '../icons';
 import { FluxDropdown, SettingCard } from '../primitives';
 import { AI_PRESETS, DEFAULT_PROMPTS, type AiConfigState } from './shared';
-import { enqueueAiConfigWrite, mergeConfigFields, mergePromptsOnly } from './aiConfig';
+import { mergeConfigFields, mergePromptsOnly } from './aiConfig';
 
 /* ---------- TAB 5: AI服务 ---------- */
 

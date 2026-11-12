@@ -3724,33 +3724,6 @@ body.has-player-expanded .toast-layer {
   }
 }
 
-/* ---------- GitHub 设备流授权码常驻块 ---------- */
-.device-code-block {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.device-code-value {
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 3px;
-  color: var(--accent);
-  background: var(--accent-subtle);
-  border: 1px dashed var(--accent);
-  border-radius: var(--radius-sm);
-  padding: 6px 14px;
-  user-select: text;
-}
-
-.device-code-hint {
-  font-size: 10.5px;
-  color: var(--text-tertiary);
-}
-
 /* ---------- 首屏加载骨架（dataLoading 期间替代真实 UI） ---------- */
 .app-loading-splash {
   grid-column: 1 / -1;
@@ -4515,3 +4488,9 @@ a[href]:focus-visible,
     animation: none !important;
   }
 }
+
+/* Local media recovery controls inherit each existing image slot's dimensions. */
+.cover-fallback { position: relative; }
+.image-retry { color: var(--text-secondary); background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 2px 5px; font: inherit; font-size: 11px; cursor: pointer; }
+.cover-fallback > .image-retry { position: absolute; inset-inline: 2px; bottom: 2px; }
+

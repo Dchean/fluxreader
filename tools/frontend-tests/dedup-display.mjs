@@ -42,7 +42,7 @@ export async function run(ctx) {
     rows: [],
     settingsRaw: null,      // app_settings 原文（普通通知/字体设置，组语义不读设置）
     scopeCalls: [],         // 每次 counts_snapshot 的 layout（调用序）
-    deferCountsOnce: false, // true → 下一次 counts_snapshot 挂起（载荷=发起时刻）
+    deferCountsOnce: false, // true → 下一次 counts_snapshot 挂起（后端提交投影=发起时刻）
     pendingCounts: [],
     deferReadId: null,      // 指定 id 的下一次 set_read(true) 挂起
     pendingRead: [],
@@ -186,7 +186,7 @@ export async function run(ctx) {
         return Promise.resolve(row ? { ...projected(row), content_html: '<p>详情</p>' } : null);
       }
       /* R2/N2：计数组合快照是唯一计数 IPC（源键+聚合键同一时刻）。defer 计划
-         用于受控屏障：载荷在**请求发起时**计算（模拟"旧读取"），手动放行。 */
+         用于受控屏障：后端提交投影在**请求发起时**计算（模拟"旧读取"），手动放行。 */
       case 'counts_snapshot': {
         const layout = args && args.layout;
         B.scopeCalls.push(layout);
@@ -248,6 +248,7 @@ export async function run(ctx) {
         return Promise.resolve(markReadClosure(eligible.filter((r) => !r.is_read).map((r) => r.id)).length);
       }
       case 'get_setting': {
+        if (args.key !== 'app_settings') return Promise.resolve(null);
         B.getSettingCalls += 1;
         if (B.rejectGetSettingCount > 0) {
           B.rejectGetSettingCount -= 1;
@@ -257,7 +258,7 @@ export async function run(ctx) {
           B.rejectGetSettingOnce = false;
           return Promise.reject({ message: '注入：读取设置失败' });
         }
-        /* R3：旧读探针——挂起一次并返回给定原文（读取时刻的载荷）。
+        /* R3：旧读探针——挂起一次并返回给定原文（读取时刻的后端提交投影）。
            R4：挂起项可 release（结算）或 reject（注入读取失败——回读失败探针）。 */
         if (B.deferGetSettingOnce) {
           const raw = B.deferGetSettingOnce;
@@ -268,28 +269,19 @@ export async function run(ctx) {
         }
         return Promise.resolve(B.settingsRaw);
       }
-      case 'set_setting': {
+      case 'patch_app_settings': {
         B.setSettingCalls += 1;
         const plan = B.setSettingPlans.length ? B.setSettingPlans.shift() : B.setSettingPlan;
         B.setSettingPlan = null;
-        if (plan && plan.mode === 'reject') {
-          return Promise.reject({ message: '注入：设置保存失败' });
+        if (plan && plan.mode === 'reject') return Promise.reject({ message: '注入：设置保存失败' });
+        // 假后端按实际IPC事务契约仅合并patch；projected是后端状态预测，绝非发送后端提交投影。
+        const project = () => JSON.stringify({ ...JSON.parse(B.settingsRaw ?? '{}'), ...args.patch });
+        let committedValue;
+        const commit = () => { if (committedValue === undefined) B.settingsRaw = committedValue = project(); return committedValue; };
+        if (plan && (plan.mode === 'manual' || plan.mode === 'defer')) {
+          return new Promise((resolve) => B.pendingSetSetting.push({ args, get projected() { return project(); }, commit, release: () => resolve(commit()) }));
         }
-        if (plan && plan.mode === 'manual') {
-          /* R4：提交/回应分离——commit() 写持久态（可提前），release() 结算回应。 */
-          return new Promise((resolve) => {
-            let committed = false;
-            const commit = () => { if (!committed) { committed = true; B.settingsRaw = args.value; } };
-            B.pendingSetSetting.push({ args, commit, release: () => { commit(); resolve(null); } });
-          });
-        }
-        if (plan && plan.mode === 'defer') {
-          return new Promise((resolve) => {
-            B.pendingSetSetting.push({ args, release: () => { B.settingsRaw = args.value; resolve(null); } });
-          });
-        }
-        B.settingsRaw = args.value;
-        return Promise.resolve(null);
+        return Promise.resolve(commit());
       }
       case 'sync_status': return Promise.resolve({ connected: false });
       case 'sync_queue_stats': return Promise.resolve(null);
@@ -393,7 +385,7 @@ export async function run(ctx) {
       B.deferCountsOnce = true;
       store.getState().markCurrentViewAllRead();
       await nTick(0); await nTick(0);
-      checkNew('(dedup-c1) 前置：article 对账的 counts_snapshot 已被挂起（载荷=发起时刻）', B.pendingCounts.length === 1);
+      checkNew('(dedup-c1) 前置：article 对账的 counts_snapshot 已被挂起（后端提交投影=发起时刻）', B.pendingCounts.length === 1);
       store.getState().selectLayout('social');
       await nTick(0); await nTick(0); await nTick(0); await nTick(0);
       const before = selectViewCounts(store.getState()).all;
@@ -436,7 +428,7 @@ export async function run(ctx) {
       const { noteConfirmedAppSettings } = await import('../../dist-test/store/slices/settings.js');
       // 探针一：A(notifyOnNewArticles=true) 成功 + B(fontSize) 失败 → 回滚目标 = A 的成功值
       await boot([mkRow({ id: 32, feed_id: 10, url: null })], false);
-      noteConfirmedAppSettings(JSON.stringify(store.getState().settings));
+      noteConfirmedAppSettings(B.settingsRaw = JSON.stringify(store.getState().settings));
       B.setSettingPlans = [{ mode: 'defer' }, { mode: 'reject' }];
       const toasts = await captureToasts(async () => {
         store.getState().updateSettings({ notifyOnNewArticles: true });
@@ -473,7 +465,7 @@ export async function run(ctx) {
       /* 夹具确定性：前序探针改过 fontSize（18），这里显式钉住本探针的确认基线
          （16），否则断言 16 只是在依赖跨块残留值——基线必须来自本块声明。 */
       store.setState({ settings: { ...store.getState().settings, fontSize: 16 } });
-      noteConfirmedAppSettings(JSON.stringify(store.getState().settings));
+      noteConfirmedAppSettings(B.settingsRaw = JSON.stringify(store.getState().settings));
       B.setSettingPlans = [{ mode: 'reject' }];
       const t1 = await captureToasts(async () => {
         store.getState().updateSettings({ fontSize: 20 });
@@ -587,7 +579,7 @@ export async function run(ctx) {
 
     /* ============================================================
        (H) N2：双写者共享提交协议——旧读取不得覆盖新对账 / 新读取
-       （两方向都用受控屏障；旧载荷在发起时刻冻结）
+       （两方向都用受控屏障；旧后端提交投影在发起时刻冻结）
        ============================================================ */
     {
       // 方向①：reload（旧）在途 → 对账（新）先落地 → 旧 reload 放行不得覆盖
@@ -595,7 +587,7 @@ export async function run(ctx) {
       B.deferCountsOnce = true;
       const reloadP = store.getState().reloadFromBackend();
       await nTick(0); await nTick(0);
-      checkNew('(dedup-h1) 前置：旧 reload 的计数读取已挂起（载荷=发起时刻）', B.pendingCounts.length === 1);
+      checkNew('(dedup-h1) 前置：旧 reload 的计数读取已挂起（后端提交投影=发起时刻）', B.pendingCounts.length === 1);
       await store.getState().toggleEntryFlag('71', 'isRead'); // 后端行翻转 + 其自身对账落地
       await nTick(0); await nTick(0);
       const fresh = selectViewCounts(store.getState()).unread;
@@ -729,7 +721,7 @@ export async function run(ctx) {
       store.getState().toggleEntryFlag('65', 'isRead'); // 翻回未读
       await nTick(0); await nTick(0);
       const before = store.getState().entries.find((e) => e.id === '65')?.isRead;
-      B.pendingRead.shift().release(); // 放行 64 的回执（请求时刻载荷含 65）
+      B.pendingRead.shift().release(); // 放行 64 的回执（请求时刻后端提交投影含 65）
       await nTick(0); await nTick(0);
       checkNew('(dedup-j4) 已被较新 unread 接管的回执行：不翻状态、计数不无条件扣（欠计两侧都堵）',
         store.getState().entries.find((e) => e.id === '65')?.isRead === false
@@ -822,7 +814,7 @@ export async function run(ctx) {
       await nTick(0); await nTick(0);
       store.getState().updateSettings({ fontSize: 18 });
       await nTick(0); await nTick(0);
-      /* 外部配置：持久态 notifyOnNewArticles=true（模拟 configSyncApply / 手改 DB）。 */
+      /* 外部配置：持久态 notifyOnNewArticles=true（模拟 便携恢复 / 手改 DB）。 */
       B.settingsRaw = JSON.stringify({ ...JSON.parse(B.settingsRaw), notifyOnNewArticles: true });
       await store.getState().bootstrapSettings(); // 新鲜读：无写交错
       await nTick(0); await nTick(0);
@@ -866,7 +858,7 @@ export async function run(ctx) {
 
     /* ============================================================
        (O) R3：配置应用边界（store 协调面）——窗口内新点击排在应用+回读后；
-           回读保留点击键、其余取远端；载荷发送时重建；确认基线以后端为准。
+           回读保留点击键、其余取远端；后端提交投影发送时重建；确认基线以后端为准。
        ============================================================ */
     {
       const { runAppSettingsApplyBoundary, readBackAppliedAppSettings } = await import('../../dist-test/store/slices/settings.js');
@@ -875,7 +867,7 @@ export async function run(ctx) {
       /* 应用回读用受控挂起：门在回读在途期间保持——保证「窗口内点击」确实
          发生在应用+回读完成之前（否则读回先落地，点击不再是窗口内语义）。 */
       const remoteRaw = JSON.stringify({ ...JSON.parse(B.settingsRaw), notifyOnNewArticles: true, fontSize: 22 });
-      B.deferGetSettingOnce = remoteRaw;
+      B.deferGetSettingOnce = B.settingsRaw = remoteRaw;
       const applyDone = runAppSettingsApplyBoundary(async () => {
         await readBackAppliedAppSettings();
       });
@@ -892,10 +884,10 @@ export async function run(ctx) {
       checkNew('(dedup-o2) 回读保留点击键、其余取远端（点击不丢、远端覆盖生效）',
         store.getState().settings.notifyOnNewArticles === true && store.getState().settings.fontSize === 18,
         JSON.stringify({ notify: store.getState().settings.notifyOnNewArticles, fontSize: store.getState().settings.fontSize }));
-      checkNew('(dedup-o3) 门释放后点击请求才发出，载荷含回读基线 + 点击（发送时重建）',
+      checkNew('(dedup-o3) 门释放后点击请求才发出，后端提交投影含回读基线 + 点击（发送时重建）',
         B.pendingSetSetting.length === 1
-        && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18
-        && JSON.parse(B.pendingSetSetting[0].args.value).notifyOnNewArticles === true,
+        && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18
+        && JSON.parse(B.pendingSetSetting[0].projected).notifyOnNewArticles === true,
         JSON.stringify({ sent: B.pendingSetSetting.length }));
       B.pendingSetSetting.shift().release();
       await nTick(0); await nTick(0);
@@ -1070,7 +1062,7 @@ export async function run(ctx) {
     }
 
     /* ============================================================
-       (T) R4/P2-3：门后多点击——发送载荷剔除**更晚且未落定**的意图：
+       (T) R4/P2-3：门后多点击——发送后端提交投影剔除**更晚且未落定**的意图：
           旧请求不得偷提交后续失败意图（跨字段 A成功B失败；同字段相反另块）。
        ============================================================ */
     {
@@ -1081,7 +1073,7 @@ export async function run(ctx) {
       store.setState({ settings: { ...store.getState().settings, notifyOnNewArticles: false, fontSize: 16, themeMode: 'dark' } });
       B.settingsRaw = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: false, fontSize: 16, themeMode: 'dark' });
       B.setSettingPlans = [{ mode: 'manual' }, { mode: 'reject' }];
-      B.deferGetSettingOnce = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: true, fontSize: 22 });
+      B.deferGetSettingOnce = B.settingsRaw = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: true, fontSize: 22 });
       const applyP = runAppSettingsApplyBoundary(async () => { await readBackAppliedAppSettings(); });
       await nTick(0); await nTick(0);
       store.getState().updateSettings({ fontSize: 18 });        // A（窗口内）
@@ -1095,18 +1087,18 @@ export async function run(ctx) {
       checkNew('(dedup-t2) 回读保留点击键：fontSize=18/themeMode=light、通知=true',
         store.getState().settings.fontSize === 18 && store.getState().settings.themeMode === 'light'
         && store.getState().settings.notifyOnNewArticles === true);
-      checkNew('(dedup-t3) A 载荷剔除更晚未落定的 B 意图：themeMode 仍为 dark、含远端 通知=true',
+      checkNew('(dedup-t3) A 后端提交投影剔除更晚未落定的 B 意图：themeMode 仍为 dark、含远端 通知=true',
         B.pendingSetSetting.length === 1
-        && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18
-        && JSON.parse(B.pendingSetSetting[0].args.value).themeMode === 'dark'
-        && JSON.parse(B.pendingSetSetting[0].args.value).notifyOnNewArticles === true,
+        && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18
+        && JSON.parse(B.pendingSetSetting[0].projected).themeMode === 'dark'
+        && JSON.parse(B.pendingSetSetting[0].projected).notifyOnNewArticles === true,
         JSON.stringify({ sent: B.pendingSetSetting.length }));
       B.pendingSetSetting[0].commit();
-      B.pendingSetSetting.shift().release(); // A 成功（DB=A 载荷）
+      B.pendingSetSetting.shift().release(); // A 成功（DB=A 后端提交投影）
       const tToasts = await captureToasts(async () => {
         await nTick(0); await nTick(0); await nTick(0); // B 发出 → reject
       });
-      checkNew('(dedup-t4) B 失败不得污染 DB/UI：回滚到确认基线（A 载荷）——UI/DB 一致',
+      checkNew('(dedup-t4) B 失败不得污染 DB/UI：回滚到确认基线（A 后端提交投影）——UI/DB 一致',
         store.getState().settings.themeMode === 'dark' && JSON.parse(B.settingsRaw).themeMode === 'dark'
         && store.getState().settings.fontSize === 18 && JSON.parse(B.settingsRaw).fontSize === 18
         && store.getState().settings.notifyOnNewArticles === true
@@ -1120,7 +1112,7 @@ export async function run(ctx) {
       store.setState({ settings: { ...store.getState().settings, notifyOnNewArticles: false, fontSize: 16 } });
       B.settingsRaw = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: false, fontSize: 16 });
       B.setSettingPlans = [{ mode: 'manual' }, { mode: 'reject' }];
-      B.deferGetSettingOnce = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: false, fontSize: 22 });
+      B.deferGetSettingOnce = B.settingsRaw = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: false, fontSize: 22 });
       const applyP = runAppSettingsApplyBoundary(async () => { await readBackAppliedAppSettings(); });
       await nTick(0); await nTick(0);
       store.getState().updateSettings({ fontSize: 18 }); // A
@@ -1128,8 +1120,8 @@ export async function run(ctx) {
       await nTick(0);
       B.pendingGetSetting.shift().release();
       await applyP; await nTick(0); await nTick(0);
-      checkNew('(dedup-t5) 同字段相反：A 载荷取 A 的 18（剔除 B 的 16）',
-        B.pendingSetSetting.length === 1 && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18,
+      checkNew('(dedup-t5) 同字段相反：A 后端提交投影取 A 的 18（剔除 B 的 16）',
+        B.pendingSetSetting.length === 1 && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18,
         JSON.stringify({ sent: B.pendingSetSetting.length }));
       B.pendingSetSetting[0].commit();
       B.pendingSetSetting.shift().release(); // A 成功
@@ -1150,7 +1142,7 @@ export async function run(ctx) {
          显式钉住本块的可视/持久基线。 */
       store.setState({ settings: { ...store.getState().settings, notifyOnNewArticles: false, fontSize: 16 } });
       B.settingsRaw = JSON.stringify({ notifyOnNewArticles: false, fontSize: 16 });
-      B.setSettingPlan = { mode: 'manual' }; // 点击写得受控挂起（校验载荷）
+      B.setSettingPlan = { mode: 'manual' }; // 点击写得受控挂起（校验后端提交投影）
       B.deferGetSettingOnce = JSON.stringify({ notifyOnNewArticles: false, fontSize: 16 }); // 回读（将失败）
       const applyP = settingsMod.runAppSettingsApplyBoundary(async () => {
         try { await settingsMod.readBackAppliedAppSettings(); } catch { settingsMod.markAppSettingsUnconfirmed(); }
@@ -1164,10 +1156,10 @@ export async function run(ctx) {
       B.settingsRaw = JSON.stringify({ notifyOnNewArticles: true, fontSize: 22 });
       B.pendingGetSetting.shift().reject(); // 回读失败 → 基线未确认
       await applyP; await nTick(0); await nTick(0); await nTick(0);
-      checkNew('(dedup-u1) 回读失败后发送前校准：载荷含远端 通知=true（未读回的远端键不被旧快照覆写）',
+      checkNew('(dedup-u1) 回读失败后发送前校准：后端提交投影含远端 通知=true（未读回的远端键不被旧快照覆写）',
         B.pendingSetSetting.length === 1
-        && JSON.parse(B.pendingSetSetting[0].args.value).notifyOnNewArticles === true
-        && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18
+        && JSON.parse(B.pendingSetSetting[0].projected).notifyOnNewArticles === true
+        && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18
         && B.getSettingCalls >= 2,
         JSON.stringify({ sent: B.pendingSetSetting.length, reads: B.getSettingCalls }));
       B.pendingSetSetting.shift().release();
@@ -1201,16 +1193,16 @@ export async function run(ctx) {
 
     /* ============================================================
        (V) R5/反例一（controller-remote-base-r4 等价）：远端新值 ≠ 旧本地值——
-           载荷=「基线+本笔 patch」，被更晚失败意图触及的键取**远端基线**而非
+           后端提交投影=「基线+本笔 patch」，被更晚失败意图触及的键取**远端基线**而非
            乐观前旧本值。附 A 失败 B 成功（失败意图不被后续笔偷提交）。
        ============================================================ */
     {
       const settingsMod = await import('../../dist-test/store/slices/settings.js');
       await boot([mkRow({ id: 96, feed_id: 10, url: null })], false);
       store.setState({ settings: { ...store.getState().settings, fontSize: 16, lineHeight: 180, notifyOnNewArticles: false } });
-      settingsMod.noteConfirmedAppSettings(JSON.stringify(store.getState().settings)); // 旧基线（lineHeight 180）
+      settingsMod.noteConfirmedAppSettings(B.settingsRaw = JSON.stringify(store.getState().settings)); // 旧基线（lineHeight 180）
       B.setSettingPlans = [{ mode: 'manual' }, { mode: 'reject' }];
-      B.deferGetSettingOnce = JSON.stringify({ ...store.getState().settings, lineHeight: 200, notifyOnNewArticles: true }); // 远端新值
+      B.deferGetSettingOnce = B.settingsRaw = JSON.stringify({ ...store.getState().settings, lineHeight: 200, notifyOnNewArticles: true }); // 远端新值
       const gate = mkDeferred();
       let enter; const entered = new Promise((r) => { enter = r; });
       const applyP = settingsMod.runAppSettingsApplyBoundary(async () => {
@@ -1229,8 +1221,8 @@ export async function run(ctx) {
       await applyP; await nTick(0); await nTick(0); await nTick(0);
       checkNew('(dedup-v1) 反例一前置：远端键（lineHeight=200）≠旧本地（180），回读已落地、A 已发出',
         store.getState().settings.lineHeight === 220 && B.pendingSetSetting.length === 1);
-      const vA = JSON.parse(B.pendingSetSetting[0].args.value);
-      checkNew('(dedup-v2) A 载荷=基线+本笔 patch：lineHeight 取远端 200（不回退旧本 180）',
+      const vA = JSON.parse(B.pendingSetSetting[0].projected);
+      checkNew('(dedup-v2) A 后端提交投影=基线+本笔 patch：lineHeight 取远端 200（不回退旧本 180）',
         vA.fontSize === 18 && vA.lineHeight === 200 && vA.notifyOnNewArticles === true);
 
       B.pendingSetSetting[0].commit();
@@ -1245,15 +1237,15 @@ export async function run(ctx) {
       const { noteConfirmedAppSettings } = await import('../../dist-test/store/slices/settings.js');
       await boot([mkRow({ id: 97, feed_id: 10, url: null })], false);
       store.setState({ settings: { ...store.getState().settings, fontSize: 16, lineHeight: 180, notifyOnNewArticles: false } });
-      noteConfirmedAppSettings(JSON.stringify(store.getState().settings));
+      noteConfirmedAppSettings(B.settingsRaw = JSON.stringify(store.getState().settings));
       B.setSettingPlans = [{ mode: 'reject' }, { mode: 'manual' }];
       store.getState().updateSettings({ fontSize: 18 });    // A（失败）
       store.getState().updateSettings({ lineHeight: 220 }); // B（成功）
       await captureToasts(async () => { await nTick(0); await nTick(0); await nTick(0); });
-      checkNew('(dedup-v4) A 失败：其键回投基线 16；B 载荷不含 A 的失败值（不被偷提交）',
+      checkNew('(dedup-v4) A 失败：其键回投基线 16；B 后端提交投影不含 A 的失败值（不被偷提交）',
         store.getState().settings.fontSize === 16 && B.pendingSetSetting.length === 1
-        && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 16
-        && JSON.parse(B.pendingSetSetting[0].args.value).lineHeight === 220);
+        && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 16
+        && JSON.parse(B.pendingSetSetting[0].projected).lineHeight === 220);
       B.pendingSetSetting.shift().release();
       await nTick(0); await nTick(0);
       checkNew('(dedup-v5) B 成功：UI/DB 一致（fontSize 16 / lineHeight 220）',
@@ -1285,10 +1277,10 @@ export async function run(ctx) {
       B.setSettingPlan = { mode: 'manual' };
       store.getState().updateSettings({ fontSize: 18 }); // 窗口外点击
       await nTick(0); await nTick(0); await nTick(0);
-      checkNew('(dedup-w1) 窗口外点击先校准：A 载荷含远端 通知=true + 本笔 18（旧全量不覆写远端键）',
+      checkNew('(dedup-w1) 窗口外点击先校准：A 后端提交投影含远端 通知=true + 本笔 18（旧全量不覆写远端键）',
         B.pendingSetSetting.length === 1
-        && JSON.parse(B.pendingSetSetting[0].args.value).notifyOnNewArticles === true
-        && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18
+        && JSON.parse(B.pendingSetSetting[0].projected).notifyOnNewArticles === true
+        && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18
         && B.getSettingCalls >= 2,
         JSON.stringify({ sent: B.pendingSetSetting.length, reads: B.getSettingCalls }));
       B.pendingSetSetting.shift().release();
@@ -1334,7 +1326,7 @@ export async function run(ctx) {
 
     /* ============================================================
        (X) R5/反例三（controller-postgate-click-r4 等价）：门释放后 A 网络在途，
-           此时 C 点击——B 的载荷不得偷带 C 的未落定意图；C 失败后 DB/UI 回基线。
+           此时 C 点击——B 的后端提交投影不得偷带 C 的未落定意图；C 失败后 DB/UI 回基线。
            独立持久态 + 提交/回应分离（manual/commit/reject）。
        ============================================================ */
     {
@@ -1357,15 +1349,15 @@ export async function run(ctx) {
       gate.resolve();
       await applyP; await nTick(0); await nTick(0); await nTick(0);
       checkNew('(dedup-x1) 前置：A 已发出并挂起（manual），B/C 未发',
-        B.pendingSetSetting.length === 1 && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18);
+        B.pendingSetSetting.length === 1 && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18);
       store.getState().updateSettings({ notifyOnNewArticles: true }); // C（门释放后、A 在途）
       await nTick(0); await nTick(0);
       checkNew('(dedup-x2) 前置：C 排队（A 未结算，B/C 均未发出）', B.pendingSetSetting.length === 1);
       B.pendingSetSetting[0].commit();
       B.pendingSetSetting.shift().release(); // A 成功
       await nTick(0); await nTick(0); await nTick(0);
-      const xB = B.pendingSetSetting.length === 1 ? JSON.parse(B.pendingSetSetting[0].args.value) : {};
-      checkNew('(dedup-x3) B 载荷不含 C 的未落定 通知=true（仍 false），含 A 的 18 与自身 200',
+      const xB = B.pendingSetSetting.length === 1 ? JSON.parse(B.pendingSetSetting[0].projected) : {};
+      checkNew('(dedup-x3) B 后端提交投影不含 C 的未落定 通知=true（仍 false），含 A 的 18 与自身 200',
         B.pendingSetSetting.length === 1 && xB.notifyOnNewArticles === false
         && xB.fontSize === 18 && xB.lineHeight === 200,
         JSON.stringify({ sent: B.pendingSetSetting.length, dedup: xB.notifyOnNewArticles }));
@@ -1385,7 +1377,7 @@ export async function run(ctx) {
       await boot([mkRow({ id: 192, feed_id: 10, url: null })], false);
       store.setState({ settings: { ...store.getState().settings, fontSize: 16, themeMode: 'dark', notifyOnNewArticles: false } });
       B.setSettingPlans = [{ mode: 'manual' }, { mode: 'manual' }];
-      B.deferGetSettingOnce = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: true }); // 校准读（远端）
+      B.deferGetSettingOnce = B.settingsRaw = JSON.stringify({ ...store.getState().settings, notifyOnNewArticles: true }); // 校准读（远端）
       store.getState().updateSettings({ fontSize: 18 }); // A：基线未知 → 校准（挂起）
       await nTick(0); await nTick(0);
       checkNew('(dedup-y1) 前置：校准读取挂起（A 未发出）',
@@ -1394,7 +1386,7 @@ export async function run(ctx) {
       await nTick(0);
       B.pendingGetSetting.shift().release(); // 校准完成（远端 通知=true）
       await nTick(0); await nTick(0); await nTick(0);
-      const yA = B.pendingSetSetting.length === 1 ? JSON.parse(B.pendingSetSetting[0].args.value) : {};
+      const yA = B.pendingSetSetting.length === 1 ? JSON.parse(B.pendingSetSetting[0].projected) : {};
       checkNew('(dedup-y2) A 以校准基线发送：通知=true、fontSize=18，且不含 B 的 themeMode',
         B.pendingSetSetting.length === 1 && yA.notifyOnNewArticles === true && yA.fontSize === 18 && yA.themeMode !== 'light',
         JSON.stringify({ sent: B.pendingSetSetting.length, themeMode: yA.themeMode }));
@@ -1403,8 +1395,8 @@ export async function run(ctx) {
       await nTick(0); await nTick(0); await nTick(0);
       checkNew('(dedup-y3) B 随后发送自身意图（themeMode=light），不含 A 之外的多余键',
         B.pendingSetSetting.length === 1
-        && JSON.parse(B.pendingSetSetting[0].args.value).themeMode === 'light'
-        && JSON.parse(B.pendingSetSetting[0].args.value).fontSize === 18);
+        && JSON.parse(B.pendingSetSetting[0].projected).themeMode === 'light'
+        && JSON.parse(B.pendingSetSetting[0].projected).fontSize === 18);
       B.pendingSetSetting.shift().release();
       await nTick(0); await nTick(0);
       checkNew('(dedup-y4) 落定后 UI/DB 一致：通知=true / fontSize=18 / themeMode=light',
@@ -1422,7 +1414,7 @@ export async function run(ctx) {
       await nTick(0); await nTick(0);
       store.getState().updateSettings({ themeMode: 'light' }); // B：校准等待期间点击
       await nTick(0);
-      B.deferGetSettingOnce = JSON.stringify({ ...JSON.parse(zFull), notifyOnNewArticles: true }); // B 的校准读（下一个 get_setting）
+      B.deferGetSettingOnce = B.settingsRaw = JSON.stringify({ ...JSON.parse(zFull), notifyOnNewArticles: true }); // B 的校准读（下一个 get_setting）
       B.pendingGetSetting.shift().reject(); // A 的校准失败
       const zToasts = await captureToasts(async () => { await nTick(0); await nTick(0); await nTick(0); });
       checkNew('(dedup-z1) A 校准失败：不发送、fontSize 回投 16、失败可见；B 校准已接手（未发出）',
@@ -1432,7 +1424,7 @@ export async function run(ctx) {
       checkNew('(dedup-z1b) 前置：B 的校准读取已挂起', B.pendingGetSetting.length === 1);
       B.pendingGetSetting.shift().release(); // B 的校准完成（远端 通知=true）
       await nTick(0); await nTick(0); await nTick(0);
-      const zB = B.pendingSetSetting.length === 1 ? JSON.parse(B.pendingSetSetting[0].args.value) : {};
+      const zB = B.pendingSetSetting.length === 1 ? JSON.parse(B.pendingSetSetting[0].projected) : {};
       checkNew('(dedup-z2) B 自身校准成功：以基线发送 themeMode=light（不含 A 的失败 font18，retain 通知=true）',
         B.pendingSetSetting.length === 1 && zB.themeMode === 'light' && zB.notifyOnNewArticles === true && zB.fontSize === 16,
         JSON.stringify({ sent: B.pendingSetSetting.length, fontSize: zB.fontSize }));

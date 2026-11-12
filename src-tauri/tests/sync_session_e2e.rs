@@ -558,7 +558,7 @@ async fn serialize() -> tokio::sync::MutexGuard<'static, ()> {
 ============================================================ */
 
 #[tokio::test]
-async fn stale_subscription_response_after_disconnect_writes_nothing() {
+async fn states_discovery_stale_response_stops_before_binding_cursor_or_next_request() {
     let _serial = serialize().await;
     let mut server = start_mock("stale_subs").await;
     let (conn, path) = fresh_db("stale_subs");
@@ -596,6 +596,7 @@ async fn stale_subscription_response_after_disconnect_writes_nothing() {
             res = &mut fut => panic!("feeds_phase 在屏障前结束：{res:?}"),
         }
     }
+    let requests_at_disconnect = server.gate.request_lines();
 
     // 断开（生产同一事务内核）：清理 + 代际推进
     {
@@ -604,7 +605,17 @@ async fn stale_subscription_response_after_disconnect_writes_nothing() {
         assert_eq!(db::sync_generation(&conn).unwrap(), 1);
     }
     server.gate.release();
-    fut.await.expect("断开后旧响应应被丢弃，不返回错误假象");
+    let result = fut.await;
+    assert_eq!(
+        result.unwrap_err().code,
+        "staleSession",
+        "断开后旧订阅响应必须在导入/绑定边界终止整轮"
+    );
+    assert_eq!(
+        server.gate.request_lines(),
+        requests_at_disconnect,
+        "stale discovery must not request the next page or send a later acknowledgement"
+    );
 
     let conn = db::open(&path).unwrap();
     assert_eq!(
@@ -646,7 +657,7 @@ async fn stale_subscription_response_after_disconnect_writes_nothing() {
 ============================================================ */
 
 #[tokio::test]
-async fn stale_push_confirmation_after_account_switch_does_not_touch_new_account() {
+async fn greader_stale_push_confirmation_stops_before_ack_or_next_batch() {
     let _serial = serialize().await;
     let mut server_a = start_mock("push_a").await;
     let server_b = start_mock("push_b").await;
@@ -677,6 +688,7 @@ async fn stale_push_confirmation_after_account_switch_does_not_touch_new_account
             res = &mut fut => panic!("states_phase 在屏障前结束：{res:?}"),
         }
     }
+    let requests_at_switch = server_a.gate.request_lines();
 
     // 切到 B（生产同一事务内核：清理 A、换凭据、代际推进），随后为 B 准备自己的
     // 远端绑定与待推队列——旧确认不得触碰它们。
@@ -698,12 +710,15 @@ async fn stale_push_confirmation_after_account_switch_does_not_touch_new_account
         db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
     }
     server_a.gate.release();
-    let result = fut.await;
-    assert!(
-        result.is_err(),
-        "账号在途切换必须返回明确失效错误，而不是假成功"
+    let error = fut
+        .await
+        .expect_err("账号在途切换必须返回明确失效错误，而不是假成功");
+    assert_eq!(error.code, "staleSession");
+    assert_eq!(
+        server_a.gate.request_lines(),
+        requests_at_switch,
+        "stale push confirmation must not send a readback ACK or process the next batch"
     );
-    assert_eq!(result.unwrap_err().code, "staleSession");
 
     // 已发出的首个批次不可撤回（计数 1）；后续批次（star）必须因代际丢失而不再发出。
     assert_eq!(
@@ -743,7 +758,7 @@ async fn stale_push_confirmation_after_account_switch_does_not_touch_new_account
 ============================================================ */
 
 #[tokio::test]
-async fn stale_items_response_after_disconnect_writes_no_articles_no_cursor() {
+async fn greader_stale_item_response_stops_before_ack_or_next_batch() {
     let _serial = serialize().await;
     let mut server = start_mock("stale_items").await;
     let (conn, path) = fresh_db("stale_items");
@@ -768,6 +783,7 @@ async fn stale_items_response_after_disconnect_writes_no_articles_no_cursor() {
             res = &mut fut => panic!("states_phase 在屏障前结束：{res:?}"),
         }
     }
+    let requests_at_disconnect = server.gate.request_lines();
 
     {
         let mut conn = db.lock().await;
@@ -776,6 +792,11 @@ async fn stale_items_response_after_disconnect_writes_no_articles_no_cursor() {
     server.gate.release();
     let err = fut.await.expect_err("旧条目响应必须被丢弃并返回失效错误");
     assert_eq!(err.code, "staleSession");
+    assert_eq!(
+        server.gate.request_lines(),
+        requests_at_disconnect,
+        "stale GR item response must not ACK a cursor or request another batch"
+    );
 
     let conn = db::open(&path).unwrap();
     assert_eq!(
@@ -794,7 +815,7 @@ async fn stale_items_response_after_disconnect_writes_no_articles_no_cursor() {
 ============================================================ */
 
 #[tokio::test]
-async fn stale_fever_page_after_disconnect_keeps_history_unknown() {
+async fn fever_stale_page_response_stops_before_ack_or_next_batch() {
     let _serial = serialize().await;
     let mut server = start_mock("stale_fever").await;
     let (conn, path) = fresh_db("stale_fever");
@@ -838,6 +859,7 @@ async fn stale_fever_page_after_disconnect_keeps_history_unknown() {
             res = &mut fut => panic!("states_phase 在屏障前结束：{res:?}"),
         }
     }
+    let requests_at_disconnect = server.gate.request_lines();
 
     {
         let mut conn = db.lock().await;
@@ -846,6 +868,11 @@ async fn stale_fever_page_after_disconnect_keeps_history_unknown() {
     server.gate.release();
     let err = fut.await.expect_err("Fever 历史页在断开后必须被丢弃");
     assert_eq!(err.code, "staleSession");
+    assert_eq!(
+        server.gate.request_lines(),
+        requests_at_disconnect,
+        "stale Fever page must not ACK history or request another page"
+    );
 
     let conn = db::open(&path).unwrap();
     assert_eq!(
@@ -878,20 +905,15 @@ async fn config_import_pending_never_sends_old_password_to_new_server() {
     let (conn, path) = fresh_db("import_pending");
     seed_account(&conn, &server_a, "user-a", "pw-a");
 
-    let payload = app_lib::config_sync::SyncPayload {
-        schema: 3,
-        uploaded_at: "2026-09-01T00:00:00Z".into(),
-        folders: vec![],
-        feeds: vec![],
-        app_settings: None,
-        connection_config: Some(app_lib::config_sync::ConnectionConfig {
+    app_lib::connection_suggestion::store_pending_connection(
+        &conn,
+        &app_lib::connection_suggestion::ConnectionConfig {
             sync_protocol: Some("greader".into()),
             greader_endpoint: Some(server_b.base.clone()),
             greader_username: Some("user-b".into()),
-        }),
-    };
-    let outcome = app_lib::config_sync::apply_payload(&conn, &payload).unwrap();
-    assert!(outcome.pending_connection.is_some(), "导入必须落待确认建议");
+        },
+    )
+    .unwrap();
 
     // 活动凭据不变（B 地址只存在于建议里）
     assert_eq!(
@@ -925,7 +947,7 @@ async fn config_import_pending_never_sends_old_password_to_new_server() {
     // 代际推进、建议被消费、同步走 B
     let activate_version = {
         let conn = db.lock().await;
-        app_lib::config_sync::read_pending_suggestion(&conn)
+        app_lib::connection_suggestion::read_pending_suggestion(&conn)
             .unwrap()
             .expect("建议应可读")
             .version
@@ -1038,22 +1060,14 @@ fn import_pending(
     conn: &rusqlite::Connection,
     server: &MockServer,
     user: &str,
-) -> (u64, app_lib::config_sync::ConnectionConfig) {
-    let cc = app_lib::config_sync::ConnectionConfig {
+) -> (u64, app_lib::connection_suggestion::ConnectionConfig) {
+    let cc = app_lib::connection_suggestion::ConnectionConfig {
         sync_protocol: Some("greader".into()),
         greader_endpoint: Some(server.base.clone()),
         greader_username: Some(user.into()),
     };
-    let payload = app_lib::config_sync::SyncPayload {
-        schema: 3,
-        uploaded_at: "2026-09-01T00:00:00Z".into(),
-        folders: vec![],
-        feeds: vec![],
-        app_settings: None,
-        connection_config: Some(cc.clone()),
-    };
-    app_lib::config_sync::apply_payload(conn, &payload).unwrap();
-    let version = app_lib::config_sync::read_pending_suggestion(conn)
+    app_lib::connection_suggestion::store_pending_connection(conn, &cc).unwrap();
+    let version = app_lib::connection_suggestion::read_pending_suggestion(conn)
         .unwrap()
         .expect("建议应已落库")
         .version;
@@ -1158,7 +1172,7 @@ async fn activation_stale_version_rejected_before_http() {
         server_b.gate.request_lines()
     );
     let conn = db.lock().await;
-    let suggestion = app_lib::config_sync::read_pending_suggestion(&conn)
+    let suggestion = app_lib::connection_suggestion::read_pending_suggestion(&conn)
         .unwrap()
         .expect("C 应仍在");
     assert_eq!(suggestion.version, v_c, "新建议 C 不得被消费");
@@ -1224,7 +1238,7 @@ async fn late_activation_after_replacement_during_http_keeps_newer_suggestion() 
     assert_eq!(err.code, "staleActivation");
 
     let conn = db.lock().await;
-    let suggestion = app_lib::config_sync::read_pending_suggestion(&conn)
+    let suggestion = app_lib::connection_suggestion::read_pending_suggestion(&conn)
         .unwrap()
         .expect("C 应仍在");
     assert_eq!(suggestion.version, v_c, "C 不得被 B 的迟到提交消费");
@@ -1415,7 +1429,7 @@ async fn activation_same_identity_still_requires_fresh_password() {
     {
         let conn = db.lock().await;
         assert!(
-            app_lib::config_sync::read_pending_suggestion(&conn)
+            app_lib::connection_suggestion::read_pending_suggestion(&conn)
                 .unwrap()
                 .is_some(),
             "被拒激活不得消费建议"
@@ -1474,7 +1488,7 @@ async fn pending_serial_prevents_aba_with_inflight_activation() {
     // 验证在途：用户放弃建议，随后重导**同值**建议
     let v2 = {
         let conn = db.lock().await;
-        app_lib::config_sync::clear_pending_connection(&conn).unwrap();
+        app_lib::connection_suggestion::clear_pending_connection(&conn).unwrap();
         import_pending(&conn, &server_b, "user-b").0
     };
     assert!(
@@ -1487,7 +1501,7 @@ async fn pending_serial_prevents_aba_with_inflight_activation() {
     assert_eq!(err.code, "staleActivation");
 
     let conn = db.lock().await;
-    let suggestion = app_lib::config_sync::read_pending_suggestion(&conn)
+    let suggestion = app_lib::connection_suggestion::read_pending_suggestion(&conn)
         .unwrap()
         .expect("重导的新建议必须保留");
     assert_eq!(suggestion.version, v2, "新 token 的建议不得被旧激活消费");

@@ -86,12 +86,13 @@ async fn sync_save_impl(
 
     // 旧凭据 + 代际读取（同一次持锁；保留 Result）：Err 原样上抛——
     // 不得当未配置/首次连接（R1 P2）。
-    let (old, expected_generation) = {
-        let conn = db.lock().await;
-        let old = crate::sync::read_credentials(&conn);
-        let generation = db::sync_generation(&conn);
-        (old, generation)
-    };
+    let (old, expected_generation) = crate::state::database_work(db.clone(), |conn| {
+        Ok((
+            crate::sync::read_credentials(conn),
+            db::sync_generation(conn),
+        ))
+    })
+    .await?;
     let expected_generation = expected_generation?;
     // 密码复用 / 身份变化判定 / 首连判定（纯逻辑，模块单测覆盖）
     let mut plan = resolve_save_plan(
@@ -117,10 +118,10 @@ async fn sync_save_impl(
     // R1 P2：激活的 HTTP 前校验——携带的版本必须仍指向**当前**建议，且建议内容
     // 与本次保存目标身份一致；不匹配在发任何请求之前拒绝（不信任 UI）。
     if let Some(expected_version) = activate_pending_version {
-        let pending = {
-            let conn = db.lock().await;
-            crate::config_sync::read_pending_suggestion(&conn)?
-        };
+        let pending = crate::state::database_work(db.clone(), |conn| {
+            crate::connection_suggestion::read_pending_suggestion(conn)
+        })
+        .await?;
         match pending {
             Some(s)
                 if s.version == expected_version
@@ -150,15 +151,27 @@ async fn sync_save_impl(
     )
     .await?;
 
-    let mut conn = db.lock().await;
-    let unbound_local = commit_account_settings(
-        &mut conn,
-        &plan,
-        &resolved_base,
-        crate::credentials::encrypt_secret,
-    )?;
+    let recovery = crate::local_sync::runtime::background_database(db).await?;
+    while crate::local_sync::runtime::blocking(
+        recovery.clone(),
+        crate::local_sync::database::resume_local_slice,
+    )
+    .await?
+    {
+        tokio::task::yield_now().await;
+    }
+    let old_was_empty = plan.old_was_empty;
+    let unbound_local = crate::state::database_work(db.clone(), move |conn| {
+        commit_account_settings(
+            conn,
+            &plan,
+            &resolved_base,
+            crate::credentials::encrypt_secret,
+        )
+    })
+    .await?;
     // 首连判定：保存前无凭据，且清理后仍有未绑定的本地直连源
-    let first_connect = plan.old_was_empty && unbound_local > 0;
+    let first_connect = old_was_empty && unbound_local > 0;
     Ok(serde_json::json!({
         "message": msg,
         "firstConnect": first_connect,
@@ -220,7 +233,7 @@ struct SavePlan {
 /// 待确认建议与本次保存目标是否指向同一身份（逐字段比对：建议只提供部分字段时，
 /// 只校验已提供的字段）。激活提交与 HTTP 前预校验共用这一判定。
 fn suggestion_matches_plan(
-    suggestion: &crate::config_sync::ConnectionConfig,
+    suggestion: &crate::connection_suggestion::ConnectionConfig,
     plan: &SavePlan,
 ) -> bool {
     let protocol_matches = match suggestion.sync_protocol.as_deref() {
@@ -340,8 +353,20 @@ fn commit_account_settings(
     resolved_base: &str,
     encrypt: fn(&str) -> AppResult<String>,
 ) -> AppResult<i64> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     // 并发保存防覆盖：提交前复核开始验证时捕获的代际。
+    if crate::local_sync::runtime::configured(&tx)? {
+        return Err(AppError::new(
+            "localSyncMode",
+            "请先断开 WebDAV 持续同步，再连接 RSS 服务",
+        ));
+    }
+    if !crate::local_sync::logical::settled(&tx)? {
+        return Err(AppError::new(
+            "localSyncPending",
+            "本地已接受状态仍在恢复，完成后可连接 RSS 服务",
+        ));
+    }
     let current_generation = db::sync_generation(&tx)?;
     if current_generation != plan.expected_generation {
         return Err(AppError::new(
@@ -416,7 +441,7 @@ fn commit_account_settings(
     // 与当前建议做版本 + 身份的 CAS，命中才清除；不匹配**整体拒绝**（活动配置
     // 保持原样、新建议保持）——迟到激活不得覆盖/消费在 HTTP 期间新导入的建议。
     if let Some(expected_version) = plan.activate_pending {
-        let current = crate::config_sync::read_pending_suggestion(&tx)?;
+        let current = crate::connection_suggestion::read_pending_suggestion(&tx)?;
         let matched = matches!(
             &current,
             Some(s) if s.version == expected_version
@@ -428,7 +453,7 @@ fn commit_account_settings(
                 "待确认连接建议已在保存过程中变更（版本或内容不匹配），本次激活未写入，当前连接未改变",
             ));
         }
-        crate::config_sync::clear_pending_connection(&tx)?;
+        crate::connection_suggestion::clear_pending_connection(&tx)?;
     }
     // 普通保存（activate_pending=None）绝不触碰建议——无关保存不得清理它。
     // 推进代际：所有既有会话（含仅密码更新场景的在途请求）自此失效。
@@ -466,7 +491,7 @@ fn commit_disconnect(
     expected_generation: i64,
     encrypt: fn(&str) -> AppResult<String>,
 ) -> AppResult<(usize, usize)> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     // 与保存同规则：提交前复核代际，避免与并发保存交错出半套状态。
     let current_generation = db::sync_generation(&tx)?;
     if current_generation != expected_generation {
@@ -642,116 +667,121 @@ pub async fn sync_local_feeds(
     // OPT-006：入队时同一次持锁捕获代际——随后推送（feeds_phase_at）要求代际
     // 未变，防止「入队后账号被切换」把本地订阅自动推给新账号（首连推送必须
     // 经用户确认，不能绕过 SyncTab 的 firstConnect 流程）。
-    let (queued, generation, protocol, scope) = {
-        let conn = state.db.lock().await;
-        // OPT-014 R1：凭据读取失败 → Err（不得当未连接静默返回）。
-        // OPT-009 阶段 B：账号身份 + 代际一次快照；入队携带账号指纹，推送端按
-        // key/代际屏障执行（换号不会把本地订阅推给新账号）。
-        let Some(ctx) = crate::sync::current_account(&conn)? else {
-            return Err(AppError::new("notConnected", "未连接同步服务"));
-        };
-        let protocol = db::get_setting(&conn, "sync_protocol")?
-            .filter(|p| p == "fever" || p == "greader")
-            .unwrap_or_else(|| "greader".into());
-        if !super::subscription_write_back_supported(&protocol) {
-            return Ok(SyncLocalFeedsResult::unsupported(&protocol));
-        }
-        let targeted = feed_id.is_some() || feed_url.is_some();
-        let requested_url = feed_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty());
-        let target_url_norm = match feed_id {
-            Some(target) => match db::feed_url_by_id(&conn, target)? {
-                Some(url) => Some(db::normalize_url(&url)),
-                None => requested_url.map(db::normalize_url),
-            },
-            None => requested_url.map(db::normalize_url),
-        };
-        let target_url_norms: Option<std::collections::HashSet<String>> =
-            targeted.then(|| target_url_norm.into_iter().collect());
-        let matches_target = |url: &str| {
-            target_url_norms
-                .as_ref()
-                .map_or(true, |targets| targets.contains(&db::normalize_url(url)))
-        };
-        let rows = db::list_unbound_local_feeds(&conn)?;
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|(id, url, _)| match feed_id {
-                Some(target) => *id == target,
-                None => matches_target(url),
-            })
-            .collect();
-        // P3[7]（REQ-104）：读队列失败**不能降级成空队列**再继续入队——那样
-        // pending_urls 变空，下面会把每个未绑定源都重新 enqueue，产生重复 add_feed
-        // 队项（重复推送订阅）。此前是 warn + Vec::new() 后照常入队。
-        // 读失败说明无法判断「谁已在队列」，此时正确做法是中止本次操作：宁可让用户
-        // 重试，也不要写入重复队项（重复是**不可逆**的，重试是幂等的）。
-        let queued_items = db::take_sync_queue(&conn).map_err(|e| {
-            log::warn!("sync: 读队列失败，中止本次推送以免重复入队: {e}");
-            e
-        })?;
-        let legacy_add_queue_ids: std::collections::HashSet<i64> = queued_items
-            .iter()
-            .filter(|i| i.action == "add_feed")
-            .filter(|i| i.feed_url.as_deref().is_some_and(matches_target))
-            .map(|i| i.id)
-            .collect();
-        let mut pending_urls: std::collections::HashSet<String> = queued_items
-            .iter()
-            .filter(|i| i.action == "add_feed")
-            .filter_map(|i| i.feed_url.clone())
-            .filter(|url| matches_target(url))
-            .collect();
-        // OPT-009：订阅 outbox 中**同账号且同为 subscribe** 的 pending URL 同样
-        // 算「已在队列」（连点不堆积）。其它 edit/move/unsubscribe 意图不参与
-        // 定向新增的跳过判断，也不得被本次定向推送执行。
-        for item in db::pending_outbox(&conn)? {
-            if item.account_key == ctx.key
-                && item.action == db::ACTION_SUBSCRIBE
-                && matches_target(&item.feed_url)
-            {
-                pending_urls.insert(item.feed_url);
-            }
-        }
-        let mut n = 0usize;
-        for (_id, url, folder) in rows {
-            if pending_urls.contains(&url) {
-                continue; // 已在队列（上次失败待重试）
-            }
-            let folder_label = match folder {
-                Some(fid) => db::folder_name(&conn, fid)?,
-                None => None,
+    let (queued, generation, protocol, scope) =
+        crate::state::database_work(state.db.clone(), move |conn| {
+            let _writer = db::writer_guard(conn)?;
+            // OPT-014 R1：凭据读取失败 → Err（不得当未连接静默返回）。
+            // OPT-009 阶段 B：账号身份 + 代际一次快照；入队携带账号指纹，推送端按
+            // key/代际屏障执行（换号不会把本地订阅推给新账号）。
+            let Some(ctx) = crate::sync::current_account(conn)? else {
+                return Err(AppError::new("notConnected", "未连接同步服务"));
             };
-            db::enqueue_subscribe(
-                &conn,
-                ctx.generation,
-                &ctx.key,
-                &url,
-                // 首连推送的未绑定本地源：标题沿用本地既有值（含源抓取发现的
-                // 标题），不在此处新造目标——B2-5 的标题目标由导入/新增路径给出。
-                None,
-                folder_label.as_deref(),
-            )?;
-            pending_urls.insert(url);
-            n += 1;
-        }
-        let subscription_outbox_ids: std::collections::HashSet<i64> = db::pending_outbox(&conn)?
-            .into_iter()
-            .filter(|item| {
-                item.account_key == ctx.key
+            let protocol = db::get_setting(conn, "sync_protocol")?
+                .filter(|p| p == "fever" || p == "greader")
+                .unwrap_or_else(|| "greader".into());
+            if !super::subscription_write_back_supported(&protocol) {
+                return Ok((0, ctx.generation, protocol, None));
+            }
+            let targeted = feed_id.is_some() || feed_url.is_some();
+            let requested_url = feed_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty());
+            let target_url_norm = match feed_id {
+                Some(target) => match db::feed_url_by_id(conn, target)? {
+                    Some(url) => Some(db::normalize_url(&url)),
+                    None => requested_url.map(db::normalize_url),
+                },
+                None => requested_url.map(db::normalize_url),
+            };
+            let target_url_norms: Option<std::collections::HashSet<String>> =
+                targeted.then(|| target_url_norm.into_iter().collect());
+            let matches_target = |url: &str| {
+                target_url_norms
+                    .as_ref()
+                    .map_or(true, |targets| targets.contains(&db::normalize_url(url)))
+            };
+            let rows = db::list_unbound_local_feeds(conn)?;
+            let rows: Vec<_> = rows
+                .into_iter()
+                .filter(|(id, url, _)| match feed_id {
+                    Some(target) => *id == target,
+                    None => matches_target(url),
+                })
+                .collect();
+            // P3[7]（REQ-104）：读队列失败**不能降级成空队列**再继续入队——那样
+            // pending_urls 变空，下面会把每个未绑定源都重新 enqueue，产生重复 add_feed
+            // 队项（重复推送订阅）。此前是 warn + Vec::new() 后照常入队。
+            // 读失败说明无法判断「谁已在队列」，此时正确做法是中止本次操作：宁可让用户
+            // 重试，也不要写入重复队项（重复是**不可逆**的，重试是幂等的）。
+            let queued_items = db::take_sync_queue(conn).map_err(|e| {
+                log::warn!("sync: 读队列失败，中止本次推送以免重复入队: {e}");
+                e
+            })?;
+            let legacy_add_queue_ids: std::collections::HashSet<i64> = queued_items
+                .iter()
+                .filter(|i| i.action == "add_feed")
+                .filter(|i| i.feed_url.as_deref().is_some_and(matches_target))
+                .map(|i| i.id)
+                .collect();
+            let mut pending_urls: std::collections::HashSet<String> = queued_items
+                .iter()
+                .filter(|i| i.action == "add_feed")
+                .filter_map(|i| i.feed_url.clone())
+                .filter(|url| matches_target(url))
+                .collect();
+            // OPT-009：订阅 outbox 中**同账号且同为 subscribe** 的 pending URL 同样
+            // 算「已在队列」（连点不堆积）。其它 edit/move/unsubscribe 意图不参与
+            // 定向新增的跳过判断，也不得被本次定向推送执行。
+            for item in db::pending_outbox(conn)? {
+                if item.account_key == ctx.key
                     && item.action == db::ACTION_SUBSCRIBE
                     && matches_target(&item.feed_url)
-            })
-            .map(|item| item.id)
-            .collect();
-        let scope = targeted.then(|| crate::sync::FeedsPushScope {
-            legacy_add_queue_ids,
-            subscription_outbox_ids,
-        });
-        (n, ctx.generation, protocol, scope)
-    };
+                {
+                    pending_urls.insert(item.feed_url);
+                }
+            }
+            let mut n = 0usize;
+            for (_id, url, folder) in rows {
+                if pending_urls.contains(&url) {
+                    continue; // 已在队列（上次失败待重试）
+                }
+                let folder_label = match folder {
+                    Some(fid) => db::folder_name(conn, fid)?,
+                    None => None,
+                };
+                db::enqueue_subscribe(
+                    conn,
+                    ctx.generation,
+                    &ctx.key,
+                    &url,
+                    // 首连推送的未绑定本地源：标题沿用本地既有值（含源抓取发现的
+                    // 标题），不在此处新造目标——B2-5 的标题目标由导入/新增路径给出。
+                    None,
+                    folder_label.as_deref(),
+                )?;
+                pending_urls.insert(url);
+                n += 1;
+            }
+            let subscription_outbox_ids: std::collections::HashSet<i64> = db::pending_outbox(conn)?
+                .into_iter()
+                .filter(|item| {
+                    item.account_key == ctx.key
+                        && item.action == db::ACTION_SUBSCRIBE
+                        && matches_target(&item.feed_url)
+                })
+                .map(|item| item.id)
+                .collect();
+            let scope = targeted.then(|| crate::sync::FeedsPushScope {
+                legacy_add_queue_ids,
+                subscription_outbox_ids,
+            });
+            Ok((n, ctx.generation, protocol, scope))
+        })
+        .await?;
+    if !super::subscription_write_back_supported(&protocol) {
+        return Ok(SyncLocalFeedsResult::unsupported(&protocol));
+    }
     // OPT-009 B3：入队是订阅写回的状态变化——锁外先广播一次回执（覆盖「会话
     // 构建失败/离线」时 UI 看不到入队结果的情形）；后续执行器路径会再广播
     // 确认后的真值。未配置同步时 notify 内部静默。
@@ -767,28 +797,30 @@ pub async fn sync_local_feeds(
             if let Some(scope) = &scope {
                 !scope.legacy_add_queue_ids.is_empty() || !scope.subscription_outbox_ids.is_empty()
             } else {
-                let conn = state.db.lock().await;
-                let legacy = match db::take_sync_queue(&conn) {
-                    Ok(q) => q.iter().any(|i| i.action == "add_feed"),
-                    Err(e) => {
-                        log::warn!(
-                            "sync: 读队列失败，按「可能有待推项」继续（避免误报无需同步）: {e}"
-                        );
-                        true
-                    }
-                };
-                let outbox = match crate::sync::current_account(&conn) {
-                    Ok(Some(ctx)) => match db::pending_outbox(&conn) {
-                        Ok(items) => items.iter().any(|i| i.account_key == ctx.key),
+                crate::state::database_work(state.db.clone(), |conn| {
+                    let legacy = match db::take_sync_queue(conn) {
+                        Ok(q) => q.iter().any(|i| i.action == "add_feed"),
                         Err(e) => {
-                            log::warn!("sync: 读订阅写回队列失败，按「可能有待推项」继续: {e}");
+                            log::warn!(
+                                "sync: 读队列失败，按「可能有待推项」继续（避免误报无需同步）: {e}"
+                            );
                             true
                         }
-                    },
-                    // 身份读取失败/未配置：按保守「可能有待推」，由 feeds_phase 报错
-                    _ => true,
-                };
-                legacy || outbox
+                    };
+                    let outbox = match crate::sync::current_account(conn) {
+                        Ok(Some(ctx)) => match db::pending_outbox(conn) {
+                            Ok(items) => items.iter().any(|i| i.account_key == ctx.key),
+                            Err(e) => {
+                                log::warn!("sync: 读订阅写回队列失败，按「可能有待推项」继续: {e}");
+                                true
+                            }
+                        },
+                        // 身份读取失败/未配置：按保守「可能有待推」，由 feeds_phase 报错
+                        _ => true,
+                    };
+                    Ok(legacy || outbox)
+                })
+                .await?
             }
         };
         if !has_pending {
@@ -818,11 +850,11 @@ pub async fn sync_local_feeds(
 /// 使所有在途同步会话失效（旧响应不得复活旧内容，也不得写入后续游标）。
 #[tauri::command]
 pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
-    let (feeds, articles) = {
-        let mut conn = state.db.lock().await;
-        let generation = db::sync_generation(&conn)?;
-        commit_disconnect(&mut conn, generation, crate::credentials::encrypt_secret)?
-    };
+    let (feeds, articles) = crate::state::database_work(state.db.clone(), |conn| {
+        let generation = db::sync_generation(conn)?;
+        commit_disconnect(conn, generation, crate::credentials::encrypt_secret)
+    })
+    .await?;
     Ok(format!(
         "已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"
     ))
@@ -838,16 +870,20 @@ pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
 #[tauri::command]
 pub async fn sync_pending_connection(
     state: State<'_, AppState>,
-) -> AppResult<Option<crate::config_sync::PendingSuggestion>> {
-    let conn = state.db.lock().await;
-    crate::config_sync::read_pending_suggestion(&conn)
+) -> AppResult<Option<crate::connection_suggestion::PendingSuggestion>> {
+    crate::state::database_work(state.db.clone(), move |conn| {
+        crate::connection_suggestion::read_pending_suggestion(conn)
+    })
+    .await
 }
 
 /// 放弃待确认连接建议（不触碰活动凭据/绑定）。激活入口仍走 sync_save。
 #[tauri::command]
 pub async fn sync_dismiss_pending_connection(state: State<'_, AppState>) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    crate::config_sync::clear_pending_connection(&conn)
+    crate::state::database_work(state.db.clone(), |conn| {
+        crate::connection_suggestion::clear_pending_connection(conn)
+    })
+    .await
 }
 
 /// 缓存清理回执文案（OPT-008C：把文案与计数口径固化为可单测的纯函数）。
@@ -876,10 +912,11 @@ pub async fn cache_cleanup(
     if scope != "articles" && scope != "ai" {
         return Err(AppError::new("validate", "scope 必须是 articles 或 ai"));
     }
-    let (deleted, ai_cleared) = {
-        let mut conn = state.db.lock().await;
-        db::cleanup_cache(&mut conn, days, &scope)?
-    };
+    let cleanup_scope = scope.clone();
+    let (deleted, ai_cleared) = crate::state::database_work(state.db.clone(), move |conn| {
+        db::cleanup_cache(conn, days, &cleanup_scope)
+    })
+    .await?;
     Ok(cache_cleanup_receipt(days, &scope, deleted, ai_cleared))
 }
 
@@ -896,25 +933,27 @@ pub struct SyncStatusInfo {
 
 #[tauri::command]
 pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo> {
-    let conn = state.db.lock().await;
-    let endpoint = db::get_setting(&conn, "greader_endpoint")
-        .ok()
-        .flatten()
-        .filter(|e| !e.trim().is_empty());
-    let account = db::get_setting(&conn, "greader_username")
-        .ok()
-        .flatten()
-        .filter(|a| !a.trim().is_empty());
-    Ok(SyncStatusInfo {
-        connected: endpoint.is_some(),
-        endpoint,
-        account,
-        last_sync: db::last_sync_ts(&conn).unwrap_or(0),
-        protocol: db::get_setting(&conn, "sync_protocol")
+    crate::state::database_work(state.db.clone(), move |conn| {
+        let endpoint = db::get_setting(conn, "greader_endpoint")
             .ok()
             .flatten()
-            .filter(|p| p == "fever" || p == "greader"),
+            .filter(|e| !e.trim().is_empty());
+        let account = db::get_setting(conn, "greader_username")
+            .ok()
+            .flatten()
+            .filter(|a| !a.trim().is_empty());
+        Ok(SyncStatusInfo {
+            connected: endpoint.is_some(),
+            endpoint,
+            account,
+            last_sync: db::last_sync_ts(conn).unwrap_or(0),
+            protocol: db::get_setting(conn, "sync_protocol")
+                .ok()
+                .flatten()
+                .filter(|p| p == "fever" || p == "greader"),
+        })
     })
+    .await
 }
 
 /// 同步队列统计（TASK-116 四态展示）：侧栏 pill 与设置页「同步状态」摘要卡的
@@ -923,8 +962,7 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
 /// retry_wait 单独暴露；last_error 取最近失败摘要。纯读命令，未连接也可调。
 #[tauri::command]
 pub async fn sync_queue_stats(state: State<'_, AppState>) -> AppResult<db::SyncQueueStats> {
-    let conn = state.db.lock().await;
-    db::sync_queue_stats(&conn)
+    crate::state::database_work(state.db.clone(), move |conn| db::sync_queue_stats(conn)).await
 }
 
 #[tauri::command]
@@ -932,10 +970,10 @@ pub async fn sync_retry_expired(
     state: State<'_, AppState>,
     expected_account_generation: i64,
 ) -> AppResult<db::ExpiredRetryResult> {
-    let result = {
-        let mut conn = state.db.lock().await;
-        retry_expired_from_conn(&mut conn, expected_account_generation)?
-    };
+    let result = crate::state::database_work(state.db.clone(), move |conn| {
+        retry_expired_from_conn(conn, expected_account_generation)
+    })
+    .await?;
     crate::sync::notify_queue_changed(&state.db).await;
     Ok(result)
 }
@@ -1110,8 +1148,10 @@ fn subscription_outbox_stats_from_conn(
 pub async fn subscription_capabilities(
     state: State<'_, AppState>,
 ) -> AppResult<SubscriptionCapabilities> {
-    let conn = state.db.lock().await;
-    subscription_capabilities_from_conn(&conn)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        subscription_capabilities_from_conn(conn)
+    })
+    .await
 }
 
 /// 订阅写回持久回执（只读）：**当前账号限定**的 pending（含失败子集
@@ -1122,8 +1162,10 @@ pub async fn subscription_capabilities(
 pub async fn subscription_outbox_stats(
     state: State<'_, AppState>,
 ) -> AppResult<db::SubscriptionOutboxStats> {
-    let conn = state.db.lock().await;
-    subscription_outbox_stats_from_conn(&conn)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        subscription_outbox_stats_from_conn(conn)
+    })
+    .await
 }
 
 /// doc(hidden) 集成测试入口：与 `subscription_capabilities` 命令同一实现
@@ -1947,12 +1989,12 @@ mod account_commit_tests {
     fn normal_save_preserves_pending_suggestion() {
         let mut conn = conn();
         seed_old_account(&conn);
-        let suggestion = crate::config_sync::ConnectionConfig {
+        let suggestion = crate::connection_suggestion::ConnectionConfig {
             sync_protocol: Some("greader".into()),
             greader_endpoint: Some("http://b.example".into()),
             greader_username: Some("user-b".into()),
         };
-        let _ = crate::config_sync::store_pending_connection(&conn, &suggestion).unwrap();
+        let _ = crate::connection_suggestion::store_pending_connection(&conn, &suggestion).unwrap();
 
         save_account_for_test(
             &mut conn,
@@ -1977,8 +2019,8 @@ mod account_commit_tests {
         protocol: &str,
         endpoint: &str,
         user: &str,
-    ) -> crate::config_sync::ConnectionConfig {
-        crate::config_sync::ConnectionConfig {
+    ) -> crate::connection_suggestion::ConnectionConfig {
+        crate::connection_suggestion::ConnectionConfig {
             sync_protocol: Some(protocol.into()),
             greader_endpoint: Some(endpoint.into()),
             greader_username: Some(user.into()),
@@ -1992,13 +2034,13 @@ mod account_commit_tests {
     fn activation_commit_rejects_stale_version_and_keeps_newer_suggestion() {
         let mut conn = conn();
         seed_old_account(&conn);
-        let v_b = crate::config_sync::store_pending_connection(
+        let v_b = crate::connection_suggestion::store_pending_connection(
             &conn,
             &suggestion("greader", "http://b.example", "user-b"),
         )
         .unwrap();
         // 期间新导入 C 覆盖建议（版本 +1）
-        let v_c = crate::config_sync::store_pending_connection(
+        let v_c = crate::connection_suggestion::store_pending_connection(
             &conn,
             &suggestion("greader", "http://c.example", "user-c"),
         )
@@ -2047,7 +2089,7 @@ mod account_commit_tests {
             .contains("c.example"));
 
         // ③ 无建议时携带 token：拒绝
-        crate::config_sync::clear_pending_connection(&conn).unwrap();
+        crate::connection_suggestion::clear_pending_connection(&conn).unwrap();
         let mut none_token = plan_now(&conn, true, "greader", "http://c.example", "user-c", "pw-c");
         none_token.activate_pending = Some(v_c);
         assert_eq!(
@@ -2068,7 +2110,7 @@ mod account_commit_tests {
     fn activation_commit_consumes_when_version_and_identity_match() {
         let mut conn = conn();
         seed_old_account(&conn);
-        let v = crate::config_sync::store_pending_connection(
+        let v = crate::connection_suggestion::store_pending_connection(
             &conn,
             &suggestion("greader", "http://b.example", "user-b"),
         )
@@ -2087,7 +2129,7 @@ mod account_commit_tests {
             "http://b.example"
         );
         assert!(
-            crate::config_sync::read_pending_suggestion(&conn)
+            crate::connection_suggestion::read_pending_suggestion(&conn)
                 .unwrap()
                 .is_none(),
             "CAS 命中才消费建议"

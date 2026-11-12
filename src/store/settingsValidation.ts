@@ -78,6 +78,7 @@ export const SETTINGS_VALIDATORS: Record<keyof SettingsState, (v: unknown) => bo
   notifyOnNewArticles: isBool,
   autoSync: isBool,
   syncMode: oneOf(SYNC_MODES),
+  readBodyRetentionDays: inIntRange([0, 3650]),
 };
 
 /** 单个键值是否合法；未知键一律非法（不认识的键不进 settings） */

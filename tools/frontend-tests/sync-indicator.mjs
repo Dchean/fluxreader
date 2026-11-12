@@ -4,7 +4,7 @@
 // - 常驻文案只显示账户名/本地模式/同步中/同步完成/同步失败，数量只进详情；
 // - 同步中优先于旧失败；空闲后 error/队列失败才进入失败态；
 // - 成功窗口由 store 的 syncSucceededAt 驱动，到期恢复账户名；
-// - sync_status 的 account/protocol/last_sync 只写同步字段，不得复用 GitHub 账户；
+// - sync_status 的 account/protocol/last_sync 只写同步字段，不得复用 WebDAV 资料库状态；
 // - SyncQueueStats / SubscriptionOutboxStats 都进入灯色与详情。
 export const id = 'sync-indicator';
 
@@ -224,7 +224,7 @@ export async function run(ctx) {
       last_error: null,
     }, 0).includes('后端已同步'));
 
-  /* ---------- store：sync_status 是账户事实源，不碰 GitHub 登录 ---------- */
+  /* ---------- store：sync_status 是账户事实源，不碰 WebDAV 状态 ---------- */
   let statusReply = {
     connected: true,
     endpoint: 'https://reader.example/api/greader.php',
@@ -254,7 +254,7 @@ export async function run(ctx) {
   });
   try {
     store.setState({
-      githubAccount: { login: 'octocat' },
+      localSyncState: { connected: false, library_id: 'local' },
       syncAccount: null,
       syncProtocol: null,
       syncEndpoint: null,
@@ -263,14 +263,14 @@ export async function run(ctx) {
     });
     const status = await store.getState().refreshSyncStatus();
     const st1 = store.getState();
-    checkNew('(sync-light-6) refreshSyncStatus 原子写入 connected/account/protocol/endpoint/last_sync，GitHub 账户不受影响',
+    checkNew('(sync-light-6) refreshSyncStatus 原子写入 connected/account/protocol/endpoint/last_sync，WebDAV 资料库状态不受影响',
       status?.account === 'alice'
       && st1.syncConnected === true
       && st1.syncAccount === 'alice'
       && st1.syncProtocol === 'greader'
       && st1.syncEndpoint === 'https://reader.example/api/greader.php'
       && st1.syncLastSync === 12345
-      && st1.githubAccount?.login === 'octocat');
+      && st1.localSyncState?.library_id === 'local');
 
     statusFails = true;
     await store.getState().refreshSyncStatus();

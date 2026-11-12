@@ -3,8 +3,8 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, selectArticleBody, selectAiProductState, selectAiCacheStatus, selectAiStatusInput, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
-import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
-import { proxyImagesInHtml } from '../lib/imageProxy';
+import { handleArticleLinkClick, isHttpUrl, openExternalWithFeedback } from '../lib/external';
+import { originalProseImage } from './useProseImages';
 import { useEnteringClass } from './useEnteringClass';
 import { ReaderProse } from './ReaderProse';
 import { HydrateFailure } from './HydrateFailure';
@@ -28,6 +28,8 @@ export function Reader() {
   const translating = useAppStore((s) => s.translating);
   const settings = useAppStore((s) => s.settings);
   const openLightbox = useAppStore((s) => s.openLightbox);
+  const libraryGeneration = useAppStore(s => s.libraryGeneration);
+  const libraryRestoreBusy = useAppStore(s => s.libraryRestoreBusy);
   const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
   const player = useAppStore((s) => s.player);
 
@@ -35,6 +37,7 @@ export function Reader() {
   const toggleCurrentStar = useAppStore((s) => s.toggleCurrentStar);
   const toggleReaderRenderMode = useAppStore((s) => s.toggleReaderRenderMode);
   const toggleReaderFulltext = useAppStore((s) => s.toggleReaderFulltext);
+  const extractCurrentArticle = useAppStore((s) => s.extractCurrentArticle);
   const toggleReaderTranslation = useAppStore((s) => s.toggleReaderTranslation);
   const triggerReaderSummary = useAppStore((s) => s.triggerReaderSummary);
   const clearAiProduct = useAppStore((s) => s.clearAiProduct);
@@ -64,35 +67,24 @@ export function Reader() {
      字段值不变即命中缓存引用，只有记录真变才触发渲染。同 Sidebar.tsx 的既有约定：
      返回新引用的派生 selector 必须包 useShallow。 */
   const body = useAppStore(useShallow((s) => selectArticleBody(s, s.activeArticleId)));
+  // ready + 空正文是已查询到的本机事实；missing 仍只表示条目缺行。
+  const locallyMissingBody = dataMode === 'tauri' && body.state === 'ready' && !body.content.trim();
+  const hasOriginalUrl = isHttpUrl(art?.url);
   /* 文章之间切换、以及原文↔译文视图切换时，正文淡入一次（REQ-005） */
   const readerViewRef = useRef<HTMLDivElement>(null);
   useEnteringClass(readerViewRef, `${art?.id ?? ''}|${isShowingTranslatedProse}`, 'reader-entering');
   /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
-     拿 bytes 转 data: URL 替换。代理目标 = 当前要显示的基础 HTML（全文或 RSS 原文），
-     按 baseHtml 缓存，避免每次渲染重复抓图。 */
+     由 ReaderProse 按可见图片节点获取共享租约；正文缓存仍保留原 URL。 */
   const canSwitchFulltext = !!body.rawContent && body.rawContent !== body.content;
   const baseHtml = showFulltext || !body.rawContent ? body.content : body.rawContent;
-  const [proxiedContent, setProxiedContent] = useState<{ key: string; html: string } | null>(null);
-  useEffect(() => {
-    if (!baseHtml) { setProxiedContent(null); return; }
-    if (proxiedContent?.key === baseHtml) return; // 已代理过
-    let alive = true;
-    void proxyImagesInHtml(baseHtml, art?.url).then((result) => {
-      if (!alive) return;
-      if (result == null) { setProxiedContent(null); return; } // 无代理需要或浏览器环境
-      setProxiedContent({ key: baseHtml, html: result });
-    });
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseHtml, art?.url]);
   /* 正文两路呈现（审计 F14 / OPT-012）：源码态展示的是**原始文本**（当前用户选择的
      RSS 原文/提取全文/已消毒译文，未经图片代理——显示代理 base64 会冒充源码），
-     渲染态保持现行为（代理命中时用代理产物）。流式未消毒译文两路都是纯文本。
+     渲染态按节点获取图片资源，不重写正文缓存。流式未消毒译文两路都是纯文本。
      Note: 为何源码不能继续走 dangerouslySetInnerHTML、分离契约与取舍 —— 见
      .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
   const renderHtml = isShowingTranslatedProse
     ? body.translatedContent
-    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml);
+    : baseHtml;
   const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml;
   const feedName = useAppStore((s) => (s.activeArticleId ? (s.sourceIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? '') ?? s.feedIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? ''))?.feed.name ?? '' : ''));
   const config = useAppStore(
@@ -172,10 +164,10 @@ export function Reader() {
   const handleProseClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     if (target.tagName === 'IMG') {
-      const src = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
-      if (src && !src.startsWith('data:')) {
+      const source = originalProseImage(target as HTMLImageElement);
+      if (source) {
         e.preventDefault();
-        openLightbox(src);
+        openLightbox(source.url, undefined, source.pageUrl ?? art?.url);
       }
       return;
     }
@@ -208,6 +200,7 @@ export function Reader() {
             </button>
             <button
               className="toggle-action-btn"
+              disabled={!hasOriginalUrl}
               onClick={() => {
                 if (!art.url) { showToast('该条目没有原文链接'); return; }
                 void openExternalWithFeedback(art.url);
@@ -306,9 +299,10 @@ export function Reader() {
                     </button>
                   </>
                 ) : null}
-                {dataMode === 'tauri' && (body.state === 'ready' || (body.state === 'cleared' && body.content !== '')) && (!body.fulltextExtracted || canSwitchFulltext) && (
+                {dataMode === 'tauri' && !locallyMissingBody && (body.state === 'ready' || (body.state === 'cleared' && body.content !== '')) && (!body.fulltextExtracted || canSwitchFulltext) && (
                   <button
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
+                    disabled={body.extractingFulltext || libraryRestoreBusy}
                     onClick={toggleReaderFulltext}
                     title={
                       !body.fulltextExtracted
@@ -320,7 +314,7 @@ export function Reader() {
                   >
                     <Icons.doc />
                     <span>
-                      {!body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
+                      {body.extractingFulltext ? '正在提取…' : !body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
                     </span>
                   </button>
                 )}
@@ -378,8 +372,16 @@ export function Reader() {
               </div>
             )}
 
+            {body.fulltextError && (
+              <div className="ai-error-row" role="status">
+                <span className="ai-error-text">{body.fulltextError}</span>
+                {!locallyMissingBody && <button className="ai-retry-btn"
+                  disabled={body.extractingFulltext || libraryRestoreBusy} onClick={extractCurrentArticle}>重试</button>}
+              </div>
+            )}
+
             {/* 正文：源码/渲染/流式三条路径收口在 ReaderProse（F14/OPT-012）。
-                传参含义：renderHtml 走渲染态（含代理产物），sourceText 走源码态
+                传参含义：renderHtml 走净化渲染态（图片节点由租约管理），sourceText 走源码态
                 （原始文本，不经代理），isStreamingTranslation 走纯文本。 */}
             {!isShowingTranslatedProse
               && (body.state === 'loading' || body.state === 'failed' || body.state === 'missing' || body.state === 'unrequested') ? (
@@ -401,6 +403,18 @@ export function Reader() {
               ) : (
                 <span className="hydrate-placeholder">加载正文…</span>
               )
+            ) : !isShowingTranslatedProse && locallyMissingBody ? (
+              <div className="hydrate-failure" role="group" aria-label="本机未保存正文" aria-busy={body.extractingFulltext}>
+                <span className="hydrate-placeholder">本机未保存正文</span>
+                {hasOriginalUrl && dataMode === 'tauri' ? (
+                  <button type="button" className="hydrate-retry"
+                    disabled={body.extractingFulltext || libraryRestoreBusy} onClick={extractCurrentArticle}>
+                    {body.extractingFulltext ? '正在获取…' : '从原网页重新获取'}
+                  </button>
+                ) : (
+                  <span className="hydrate-placeholder">没有可用的原文链接，无法重新获取</span>
+                )}
+              </div>
             ) : (
               <ReaderProse
                 renderHtml={renderHtml}
@@ -412,6 +426,9 @@ export function Reader() {
                   fontSize: settings.fontSize,
                   lineHeight: settings.lineHeight / 100,
                 }}
+                imagePageUrl={art.url}
+                imageOwner={`${libraryGeneration}:${art.id}:${body.contentRevision}`}
+                imagesEnabled={!libraryRestoreBusy}
                 onClick={handleProseClick}
               />
             )}
@@ -421,3 +438,7 @@ export function Reader() {
     </main>
   );
 }
+
+
+
+

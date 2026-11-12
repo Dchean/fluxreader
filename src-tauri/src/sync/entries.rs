@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::db::{self, NewArticle};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::greader::{self, ItemContent};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -11,12 +11,28 @@ use tokio::sync::Mutex;
 
 /// Shared admission for Content and State. A source import/tombstone failure is
 /// not a trustworthy partial source map. Recheck this at state commit as well.
-pub(super) fn pull_admitted(
-    conn: &Connection,
+pub(super) async fn pull_admitted(
+    database: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     report: &mut SyncReport,
 ) -> AppResult<bool> {
-    session.ensure_current(conn)?;
+    let generation = session.generation;
+    let mut owned_report = std::mem::take(report);
+    let (returned_report, result) = crate::state::database_work(database.clone(), move |conn| {
+        let result = pull_admitted_generation(conn, generation, &mut owned_report);
+        Ok((owned_report, result))
+    })
+    .await?;
+    *report = returned_report;
+    result
+}
+
+pub(super) fn pull_admitted_generation(
+    conn: &Connection,
+    generation: i64,
+    report: &mut SyncReport,
+) -> AppResult<bool> {
+    SyncSession::ensure_generation(conn, generation)?;
     let Some(account) = super::current_account(conn)? else {
         return Err(crate::error::AppError::new(
             "notConnected",
@@ -43,6 +59,251 @@ pub(super) fn pull_admitted(
         return Ok(false);
     }
     db::has_remote_feed_binding(conn)
+}
+
+/// Move this round's unique merge state onto the DB worker without copying the
+/// complete identity map for every page. Business failures restore partial
+/// progress before the caller decides whether to rebuild or stop. Outer errors
+/// (worker panic/cancellation or stale generation) MUST terminate the round:
+/// the temporary Default map is never a valid replacement snapshot.
+type PullWorkResult<T> = AppResult<AppResult<T>>;
+
+/// Row-level pull failures remain soft unless the original session became
+/// stale while waiting. A late stale must retain partial maps/report ownership
+/// but still terminate the round; it cannot become a generic "replay later"
+/// report error.
+pub(super) fn record_pull_apply_failure(
+    error: AppError,
+    report: &mut SyncReport,
+    message: impl FnOnce(&AppError) -> String,
+) -> AppResult<()> {
+    if error.code == "staleSession" {
+        Err(error)
+    } else {
+        report.errors.push(message(&error));
+        Ok(())
+    }
+}
+
+pub(super) async fn pull_database_work<T: Send + 'static>(
+    database: &std::sync::Arc<tokio::sync::Mutex<Connection>>,
+    generation: i64,
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+    work: impl FnOnce(&mut Connection, &mut db::SyncMatchMaps, &mut SyncReport) -> AppResult<T>
+        + Send
+        + 'static,
+) -> PullWorkResult<T> {
+    let mut owned_maps = std::mem::take(maps);
+    let mut owned_report = std::mem::take(report);
+    let (returned_maps, returned_report, result) =
+        crate::state::database_work(database.clone(), move |conn| {
+            let result = SyncSession::ensure_generation(conn, generation)
+                .map(|()| work(conn, &mut owned_maps, &mut owned_report));
+            Ok((owned_maps, owned_report, result))
+        })
+        .await?;
+    *maps = returned_maps;
+    *report = returned_report;
+    // Admission can wait behind a session switch after the entry check. Return
+    // the owned progress first, then promote that late stale to a round failure.
+    match result? {
+        Err(error) if error.code == "staleSession" => Err(error),
+        business_result => Ok(business_result),
+    }
+}
+
+#[cfg(test)]
+mod blocking_pull_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct FileDatabase(PathBuf);
+
+    impl FileDatabase {
+        fn new() -> Self {
+            let root = std::env::var_os("FLUXREADER_TEST_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let dir = root.join(format!(
+                "fluxreader-pull-worker-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn open(&self) -> Connection {
+            let conn = Connection::open(self.0.join("main.db")).unwrap();
+            conn.busy_timeout(Duration::ZERO).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            conn
+        }
+    }
+
+    impl Drop for FileDatabase {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("all test connections must be closed");
+        }
+    }
+
+    fn database() -> Arc<Mutex<Connection>> {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    #[tokio::test]
+    async fn business_failure_returns_original_map_and_partial_report_before_handling_error() {
+        let db = database();
+        let mut maps = db::SyncMatchMaps::default();
+        maps.id_to_mf_id.insert(17, Some(71));
+        let mut report = SyncReport {
+            pulled_entries: 4,
+            ..Default::default()
+        };
+        let result = pull_database_work(&db, 0, &mut maps, &mut report, |conn, maps, report| {
+            maps.id_to_mf_id.insert(18, Some(81));
+            report.pulled_entries += 1;
+            conn.execute("INSERT INTO unavailable_table VALUES(1)", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().code, "db");
+        assert_eq!(maps.id_to_mf_id.get(&17), Some(&Some(71)));
+        assert_eq!(maps.id_to_mf_id.get(&18), Some(&Some(81)));
+        assert_eq!(report.pulled_entries, 5);
+    }
+
+    #[tokio::test]
+    async fn stale_generation_does_not_run_work_and_keeps_captured_map() {
+        let db = database();
+        let mut maps = db::SyncMatchMaps::default();
+        maps.source_versions
+            .insert(7, ("original-source".into(), 3));
+        let mut report = SyncReport::default();
+        let result =
+            pull_database_work(&db, 1, &mut maps, &mut report, |_, _, _| -> AppResult<()> {
+                panic!("stale callback must not run");
+            })
+            .await;
+        assert_eq!(result.unwrap_err().code, "staleSession");
+        assert_eq!(
+            maps.source_versions.get(&7),
+            Some(&("original-source".into(), 3))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_after_writer_wait_returns_partial_map_and_terminates_round() {
+        let files = FileDatabase::new();
+        let mut main = files.open();
+        db::MIGRATIONS.to_latest(&mut main).unwrap();
+        let concurrent = files.open();
+        let generation = db::sync_generation(&main).unwrap();
+        let database = Arc::new(Mutex::new(main));
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let tx = db::write_transaction(&concurrent).unwrap();
+            assert_eq!(db::bump_sync_generation(&tx).unwrap(), generation + 1);
+            held_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            tx.commit().unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let waiting = tokio::spawn({
+            let database = database.clone();
+            async move {
+                let mut maps = db::SyncMatchMaps::default();
+                let mut report = SyncReport::default();
+                let result = pull_database_work(
+                    &database,
+                    generation,
+                    &mut maps,
+                    &mut report,
+                    move |conn, maps, report| -> AppResult<()> {
+                        maps.source_versions
+                            .insert(7, ("partial-before-wait".into(), 1));
+                        report.pulled_entries = 3;
+                        entered_tx.send(()).unwrap();
+                        let _writer = db::writer_guard(conn)?;
+                        SyncSession::ensure_generation(conn, generation)?;
+                        panic!("stale callback must not reach business work");
+                    },
+                )
+                .await;
+                (result, maps, report)
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(2)))
+                .await
+                .unwrap()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        let (result, maps, report) = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, "staleSession");
+        assert_eq!(
+            maps.source_versions.get(&7),
+            Some(&("partial-before-wait".into(), 1))
+        );
+        assert_eq!(report.pulled_entries, 3);
+    }
+
+    #[test]
+    fn record_pull_apply_failure_keeps_non_stale_row_errors_soft() {
+        let mut report = SyncReport::default();
+        record_pull_apply_failure(
+            AppError::new("db", "injected row failure"),
+            &mut report,
+            |error| format!("row: {error}"),
+        )
+        .unwrap();
+        assert_eq!(report.errors, vec!["row: [db] injected row failure"]);
+    }
+
+    #[tokio::test]
+    async fn worker_panic_is_outer_error_and_cannot_be_a_soft_page_failure() {
+        let db = database();
+        let mut maps = db::SyncMatchMaps::default();
+        let mut report = SyncReport::default();
+        let result = pull_database_work::<()>(&db, 0, &mut maps, &mut report, |conn, _, _| {
+            let tx = db::write_transaction(conn)?;
+            tx.execute(
+                "INSERT INTO settings(key,value) VALUES('panic_page','must rollback')",
+                [],
+            )?;
+            panic!("injected blocking worker panic");
+        })
+        .await;
+        // Call sites use .await? before their soft-page-error match. A panic
+        // therefore leaves the pull immediately, never consuming Default maps.
+        assert_eq!(result.unwrap_err().code, "internal");
+        assert_eq!(
+            db::get_setting(&*db.lock().await, "panic_page").unwrap(),
+            None
+        );
+    }
 }
 
 /// Only cold bindings that a state read or pending local action actually needs

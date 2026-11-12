@@ -542,7 +542,7 @@ fn staged_refresh_rolls_back_atomically_on_article_insert_failure() {
 }
 
 /// OPT-003 R1 反例（写入边界 + guid 命中刷新）：真实全文写入边界
-/// `update_article_fulltext` 必须 HTML/body_text 同源（旧实现只写 HTML+flag，
+/// checked extraction 必须 HTML/body_text 同源（旧实现只写 HTML+flag，
 /// 纯文本残留 RSS 文本）；随后同 guid 直连刷新，RSS 摘要不得替换任何一列。
 #[test]
 fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
@@ -577,7 +577,20 @@ fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
     .unwrap();
 
     // 真实提取写入边界：HTML 与纯文本必须同一来源（RED 锚：旧实现残留 RSS 文本）
-    db::update_article_fulltext(&conn, aid, "<p>提取的全文字一</p>", true).unwrap();
+    let (token, _) = db::article_content_commit_token(&conn, aid)
+        .unwrap()
+        .unwrap();
+    let (content, revision) =
+        db::replace_article_content_checked(&conn, aid, &token, "<p>提取的全文字一</p>")
+            .unwrap()
+            .unwrap();
+    let identity: String = conn
+        .query_row(
+            "SELECT identity FROM contents WHERE id=?1",
+            [content],
+            |r| r.get(0),
+        )
+        .unwrap();
     let (html, body, flag): (Option<String>, String, i64) = conn
         .query_row(
             "SELECT c.content_html, COALESCE(c.body_text, ''), COALESCE(c.fulltext_extracted, 0)
@@ -645,107 +658,24 @@ fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
         "同 guid 刷新：body_text 必须保持提取全文文本"
     );
     assert_eq!(flag, 1, "同 guid 刷新：全文标志必须与正文状态一致");
-
-    tmp.finish(conn);
-}
-
-/// OPT-003 R1 反例（历史 flag1 错配 + 改 guid 同 URL 刷新）：旧版提取只写
-/// HTML+flag、body_text 残留 RSS 文本的历史行，刷新保护必须按当前保留的
-/// HTML 重算 body_text（恢复同源），而不是冻结错配值。
-#[test]
-fn staged_refresh_recomputes_stale_body_text_on_historical_fulltext_refresh() {
-    let tmp = TempDb::new("fulltext_history");
-    let conn = db::open(tmp.path()).expect("open db");
-    db::create_folder(&conn, "历史", "article").unwrap();
-    db::insert_feed(
-        &conn,
-        "http://127.0.0.1:9/ft2.xml",
-        None,
-        "历史源",
-        None,
-        1,
-        "inherit",
-        false,
-        false,
-    )
-    .unwrap();
-
-    let (aid, _) = db::upsert_article_with_feed(
-        &conn,
-        1,
-        &direct_article(
-            "ft-old",
-            "http://127.0.0.1/ft2",
-            "标题二",
-            "<p>旧RSS正文二</p>",
-            "旧RSS正文二",
-        ),
-        false,
-    )
-    .unwrap();
-    // 模拟历史错配（OPT-008B 第二阶段形态）：提取行只写 HTML+flag，body_text
-    // 仍是旧 RSS 文本（经 contents 私有行直插，模拟旧版 update_article_fulltext
-    // 的写入形态）——刷新保护路径必须按保留 HTML 同源重算，不冻结错配。
-    conn.execute(
-        "INSERT INTO contents (identity, content_html, body_text, extraction_source, fulltext_extracted)
-         VALUES ('e|' || ?1, '<p>提取的全文字二</p>', '旧RSS正文二', 'readability', 1)",
-        [aid],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE articles SET content_id = (SELECT id FROM contents WHERE identity = 'e|' || ?1) WHERE id = ?1",
-        [aid],
-    )
-    .unwrap();
-
-    // 同一真实 GUID 的直连刷新，RSS 只带摘要，已提取全文继续受保护
-    let parsed = ingestion::ParsedFeed {
-        title: Some("历史源".into()),
-        site_url: None,
-        icon: None,
-        articles: vec![direct_article(
-            "ft-old",
-            "http://127.0.0.1/ft2",
-            "标题二",
-            "<p>新RSS摘要二</p>",
-            "新RSS摘要二",
-        )
-        .into()],
-    };
-    let fetched = ingestion::Fetched::Body {
-        bytes: Vec::new(),
-        content_type: None,
-        etag: None,
-        last_modified: None,
-    };
-    ingestion::apply_refresh_result(
-        &conn,
-        1,
-        &ingestion::RefreshWriteContext::new("http://127.0.0.1:9/ft2.xml", 0, None, None),
-        &fetched,
-        &parsed,
-        false,
-    )
-    .unwrap();
-
-    let (html, body, flag): (Option<String>, String, i64) = conn
-        .query_row(
-            "SELECT c.content_html, COALESCE(c.body_text, ''), COALESCE(c.fulltext_extracted, 0)
-             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
-            [aid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
     assert_eq!(
-        html.as_deref(),
-        Some("<p>提取的全文字二</p>"),
-        "改 guid 同 URL 刷新：提取正文不得被 RSS 摘要替换"
+        db::article_content_commit_token(&conn, aid)
+            .unwrap()
+            .unwrap()
+            .0
+            .content_id,
+        Some(content)
     );
     assert_eq!(
-        body, "提取的全文字二",
-        "历史 flag1 错配：刷新必须按保留的 HTML 重算 body_text"
+        conn.query_row(
+            "SELECT identity,revision FROM contents WHERE id=?1",
+            [content],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        (identity, revision),
+        "staged RSS refresh cannot churn the protected content identity/revision"
     );
-    assert_eq!(flag, 1, "改 guid 同 URL 刷新：全文标志保持");
 
     tmp.finish(conn);
 }

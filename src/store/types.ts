@@ -14,6 +14,10 @@ import type {
   SyncQueueStats,
   SyncStatusInfo,
   TranslationSegmentPlan,
+  LocalSyncConnection,
+  LocalSyncStatus,
+  PortableBackupInfo,
+  PortableBackupPreview,
 } from '../lib/api';
 import type { ReadingSession } from './readingSession';
 import type { GalleryLightboxState } from '../lib/galleryMedia';
@@ -34,6 +38,7 @@ export interface PodcastPlayerState {
   /** cover 所属文章条目 id（TASK-092：封面失效上报用）。新剧集没给 cover 时沿用旧 cover，
       id 也随之沿用旧值，保证上报的 (id, url) 与实际显示的封面一致；空 = 未知 */
   coverEntryId?: string;
+  coverPageUrl?: string;
   /** 真实音频地址（enclosure_url）；空 = 无可播放源 */
   audioUrl: string;
   /** 当前播放位置（秒，PlayerBar 从 audio 元素同步） */
@@ -64,8 +69,7 @@ export type SyncActivityOwner =
   | 'manual'
   | 'feed-add'
   | 'save-and-sync'
-  | 'background'
-  | 'github-disconnect';
+  | 'background';
 
 export interface BackendSyncActivityEvent {
   id: number;
@@ -123,6 +127,8 @@ export interface SettingsState {
    *  'direct' 本机抓取（默认）：全部源由 FluxReader 直连抓取，Miniflux 只同步状态；
    *  'hybrid' 跟随服务端：后台/手动/托盘刷新都只抓本地来源的源，内容由服务端同步提供 */
   syncMode: 'direct' | 'hybrid';
+  /** 已读且未收藏正文的保留天数；0=永久，正文期限执行由后端统一负责。 */
+  readBodyRetentionDays: number;
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
@@ -271,8 +277,10 @@ export interface AppState {
   /** 首次关闭询问弹窗（Rust close-ask 事件驱动） */
   closeAskVisible: boolean;
   lightboxUrl: string | null;
+  mediaCapacityRevision: number;
   /** 灯箱图片所属文章条目 id（封面失效上报用；正文图等非封面场景为 null） */
   lightboxEntryId: string | null;
+  lightboxPageUrl?: string;
   /** 画廊按条目的有序图片集合；单图调用保持 null。 */
   lightboxGallery: GalleryLightboxState | null;
   newCategoryModalOpen: boolean;
@@ -355,19 +363,27 @@ export interface AppState {
    *  （界面省略能力句，不伪造能力）。 */
   subscriptionCapabilities: SubscriptionCapabilities | null;
 
-  /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
-  githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
-  /** 已登录账户（设置页显示「已登录：username」） */
-  githubAccount: { login: string } | null;
-  /** 登录进行中（按钮防抖） */
-  githubLoggingIn: boolean;
-  /** 底层 github_login_start IPC 尚未 settle。取消后仍保持，直到旧请求
-   *  结算，防止并发第二次发起。 */
-  githubLoginStartPending: boolean;
-  /** github_login_poll IPC 在途。取消后仍保持到旧轮询结算，防止并发新发起。 */
-  githubPollPending: boolean;
-  /** github_login_cancel IPC 在途。结算前禁止新发起，避免取消与新流交错。 */
-  githubLoginCancelPending: boolean;
+  /** 只在资料库替换成功时推进；普通后台同步不改变阅读会话代际。 */
+  libraryGeneration: number;
+  libraryRestoreBusy: boolean;
+  localSyncState: LocalSyncStatus | null;
+  localSyncError: string | null;
+  localSyncBusy: 'connect' | 'disconnect' | 'run' | null;
+  refreshLocalSyncStatus: () => Promise<LocalSyncStatus>;
+  connectLocalSync: (connection: LocalSyncConnection) => Promise<boolean>;
+  disconnectLocalSync: () => Promise<void>;
+  runLocalSync: () => Promise<void>;
+  portableBackup: {
+    busy: 'export' | 'preview' | 'restore' | 'refresh' | null;
+    preview: { path: string; info: PortableBackupPreview } | null;
+    result: { kind: 'export' | 'restore'; info: PortableBackupInfo } | null;
+    error: string | null;
+    refreshFailed: boolean;
+  };
+  choosePortableBackup: (save: boolean) => Promise<void>;
+  cancelPortablePreview: () => void;
+  restorePortableBackup: () => Promise<void>;
+  retryRestoredLibraryRefresh: () => Promise<void>;
 
   /* ---------- 数据源模式 ---------- */
   /** tauri = 真实 SQLite 后端；mock = 浏览器开发回退 */
@@ -533,8 +549,7 @@ export interface AppState {
 
   /* ---------- Actions: 弹层 ---------- */
   openSettings: () => void;
-  /** 设置关闭的唯一入口：GitHub 设备授权进行中拒绝关闭并提示；
-   *  无授权流时正常关闭。X / Esc / Ctrl+, / 遮罩均走这里。 */
+  /** 设置关闭的唯一入口。 */
   closeSettings: () => void;
   switchSettingsTab: (tab: string) => void;
   openSettingsTab: (tab: string) => void;
@@ -544,7 +559,7 @@ export interface AppState {
   answerCloseAsk: (action: 'tray' | 'exit', remember: boolean) => void;
   /** 取消首次关闭询问：只隐藏弹窗，不提交 resolve_close，也不写记住选择。 */
   dismissCloseAsk: () => void;
-  openLightbox: (url: string, entryId?: string) => void;
+  openLightbox: (url: string, entryId?: string, pageUrl?: string) => void;
   openGalleryLightbox: (entryId: string) => void;
   refreshGalleryLightbox: () => void;
   stepGalleryLightbox: (delta: -1 | 1) => void;
@@ -644,10 +659,6 @@ export interface AppState {
   toggleAllFolders: () => void;
   toggleSettingsCatCollapse: (catId: string) => void;
 
-  /** 发起 GitHub 设备流登录（轮询不依赖组件生命周期） */
-  githubLoginStart: () => Promise<void>;
-  /** 取消后端设备流并等待结果；成功才清 flow。不撤销网页侧授权。 */
-  githubLoginCancel: () => Promise<void>;
-  /** 断开 GitHub 登录 */
-  githubLoginDisconnect: () => Promise<void>;
 }
+
+

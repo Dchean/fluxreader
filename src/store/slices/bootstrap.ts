@@ -1,8 +1,13 @@
+import { resetImagesForLibraryRestore, resumeImages } from '../../lib/imageProxy';
+import { resetCoverReports } from '../../lib/coverImage';
 // Note: 会话成员固定、属性按 ID 回读 — 见 .agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md
 import type { StateCreator } from 'zustand';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListArgs } from '../../lib/api';
-import { peekReturnAnchor } from '../../lib/readingPosition';
+import { clearLibraryReadingPositions, peekReturnAnchor } from '../../lib/readingPosition';
+import { clearLibraryBodyCache } from '../bodyCache';
+import { invalidateAiRequestsForLibraryRestore } from './ai';
+import { invalidateRssStatusReadsForRestore } from './sync';
 import {
   ARTICLES_PAGE_SIZE, appStore, beginCountsFetch, beginEntrySnapshotRead, buildFeedIndex, buildSourceIndex,
   buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial,
@@ -80,13 +85,6 @@ function readFrontier() {
   return beginEntrySnapshotRead();
 }
 
-export async function bootstrapGithubAuth() {
-  try {
-    const acc = await api.githubLoginStatus();
-    if (acc) appStore().setState({ githubAccount: acc });
-  } catch { /* 浏览器预览无后端 */ }
-}
-
 export async function confirmAppliedConfig(): Promise<void> {
   const cred = beginConfigRead();
   const [folders, feeds, sources] = await Promise.all([api.listFolders(), api.listFeeds(), api.listArticleSources()]);
@@ -94,6 +92,50 @@ export async function confirmAppliedConfig(): Promise<void> {
   const categories = folderRowsToCategories(folders, feeds);
   applyConfigRead(categories, cred);
   appStore().setState({ ...reconcileCategories(appStore().getState(), categories), sourceIndex: buildSourceIndex(categories, sources) });
+}
+
+/** 仅供成功恢复：明确创建新数据代际。普通 sync 属性回读不得借用本入口。 */
+export function resetLibraryViewAfterRestore(): void {
+  resetImagesForLibraryRestore();
+  resetCoverReports();
+  ++reloadSerial;
+  ++pageSerial;
+  ++sessionGeneration;
+  beginCountsFetch(); // 旧库计数读取即使晚于 restore 回包，也不得落到新资料库。
+  viewEntriesCache.clear();
+  clearLibraryReadingPositions();
+  invalidateAiRequestsForLibraryRestore();
+  invalidateRssStatusReadsForRestore();
+  appStore().getState().closeLightbox();
+  appStore().setState((s) => ({
+    libraryGeneration: s.libraryGeneration + 1,
+    readingSession: null, entries: [], categories: [], feedIndex: new Map(), sourceIndex: new Map(),
+    feedCounts: new Map(), scopeCounts: null, activeArticleId: null, activeFeedFilter: 'all',
+    articlesCursor: {}, articlesLimit: 0, articlesLoading: false, articlesExhausted: false,
+    backendReloadsInFlight: 0, dataLoading: true, bootstrapError: null,
+    isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false, openedReadIds: {},
+    summarizingIds: {}, translatingIds: {}, rawTranslatedIds: {}, summaryErrors: {}, translateErrors: {},
+    translating: false, aiStatusById: {}, aiStatusRevision: s.aiStatusRevision + 1,
+    searchOpen: false, contextMenuOpen: false,
+    errors: [], toasts: [], errorCenterOpen: false,
+    newCategoryModalOpen: false, addFeedModalOpen: false, editFeedModalOpen: false, renameCatModalOpen: false,
+    subOutboxStats: null, subscriptionCapabilities: null,
+    syncConnected: false, syncAccount: null, syncEndpoint: null, syncProtocol: null, syncLastSync: 0,
+    localSyncState: null,
+  }));
+  clearLibraryBodyCache();
+  if (!appStore().getState().libraryRestoreBusy) resumeImages();
+}
+
+let startupDataNotice: Promise<void> | null = null;
+function showStartupDataNotice(): Promise<void> {
+  if (!startupDataNotice) startupDataNotice = (async () => {
+    const message = await api.getSetting('startup_data_notice');
+    if (!message) return;
+    appStore().getState().showToast(message);
+    await api.setSetting('startup_data_notice', '');
+  })().catch(() => { startupDataNotice = null; });
+  return startupDataNotice;
 }
 
 export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice> = (set, get) => {
@@ -360,6 +402,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         if (warning) get().showToast(warning);
       })
       .catch(() => { /* 警告通道失败不阻塞启动装载 */ });
+    void showStartupDataNotice();
     /* 设置与元数据并行；成员查询在设置接受后开始，捕获真实启动筛选。 */
     const settingsTask = get().bootstrapSettings();
     pendingStartupLandGate = settingsTask;
@@ -384,3 +427,4 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   },
   };
 };
+

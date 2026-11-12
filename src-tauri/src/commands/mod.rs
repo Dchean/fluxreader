@@ -112,16 +112,19 @@ pub fn schedule_state_push_for_db(
                 return;
             };
             crate::sync::push_states_now(&database, &http).await;
-            retry = {
-                let conn = database.lock().await;
-                match (
-                    crate::sync::current_account(&conn),
-                    db::sync_queue_stats(&conn),
-                ) {
-                    (Ok(Some(_)), Ok(stats)) => stats.waiting > 0,
-                    _ => false,
-                }
-            };
+            retry = crate::state::database_work(database.clone(), |conn| {
+                Ok(
+                    match (
+                        crate::sync::current_account(conn),
+                        db::sync_queue_stats(conn),
+                    ) {
+                        (Ok(Some(_)), Ok(stats)) => stats.waiting > 0,
+                        _ => false,
+                    },
+                )
+            })
+            .await
+            .unwrap_or(false);
             if !retry {
                 retry_delay = std::time::Duration::from_secs(5);
             }
@@ -130,6 +133,7 @@ pub fn schedule_state_push_for_db(
 }
 
 pub(crate) fn schedule_state_push(state: &AppState) {
+    state.local_sync.notify_local_commit();
     schedule_state_push_for_db(&state.db, &state.http);
 }
 

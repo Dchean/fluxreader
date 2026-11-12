@@ -13,7 +13,7 @@
 // 不引入新依赖：rolldown 来自 Vite 的依赖树；.tsx 由 rolldown 的 oxc 转译器
 // 生成 `react/jsx-dev-runtime` 的 jsx()/jsxs() 调用（与 Vite 同一条链路）。
 
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -39,6 +39,10 @@ const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url));
  *  断言就失去意义。这里把 src/store.ts 统一重定向到 dist-test/store.js，
  *  保证「组件看到的就是被断言的那份状态」。 */
 const STORE_ALIAS = new Map([
+  // Resource service and restore/report hooks share one singleton across source/compiled consumers.
+  [`${SRC_DIR}lib${process.platform === 'win32' ? '\\' : '/'}imageProxy.ts`, 'dist-test/lib/imageProxy.js'],
+  [`${SRC_DIR}lib${process.platform === 'win32' ? '\\' : '/'}coverImage.ts`, 'dist-test/lib/coverImage.js'],
+  [`${SRC_DIR}components${process.platform === 'win32' ? '\\' : '/'}settings${process.platform === 'win32' ? '\\' : '/'}aiConfig.ts`, 'dist-test/components/settings/aiConfig.js'],
   [`${SRC_DIR}store.ts`, 'dist-test/store.js'],
   // API 的成功保存失效通知必须与 store 装配同实例，不能在组件端另建无监听副本。
   [`${SRC_DIR}lib${process.platform === 'win32' ? '\\' : '/'}api.ts`, 'dist-test/lib/api.js'],
@@ -68,7 +72,7 @@ export async function resolve(specifier, context, nextResolve) {
     const parent = context.parentURL ? fileURLToPath(context.parentURL) : `${process.cwd()}/probe.js`;
     const cut = parent.search(/[\\/]node_modules[\\/]/);
     const root = cut >= 0 ? parent.slice(0, cut + 1) : `${process.cwd()}/`;
-    return { url: pathToFileURL(`${root}node_modules/${shim}`).href, shortCircuit: true };
+    return { url: pathToFileURL(realpathSync(`${root}node_modules/${shim}`)).href, shortCircuit: true };
   }
   /* src/ 下的「省略扩展名」必须在 nextResolve 之前处理：链上的
      tools/test-loader.mjs 会给任何无扩展名相对路径盲加 .js（它是为 dist-test
@@ -113,3 +117,5 @@ export const UI_LOADER_PATH = fileURLToPath(import.meta.url);
 export async function readOwnSource() {
   return readFile(import.meta.url, 'utf8');
 }
+
+

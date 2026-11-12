@@ -25,8 +25,58 @@ use std::sync::{LazyLock, Mutex as StdMutex};
 static IN_FLIGHT_FEEDS: LazyLock<StdMutex<HashSet<(usize, String)>>> =
     LazyLock::new(|| StdMutex::new(HashSet::new()));
 
+type InFlightKey = (usize, String);
+#[cfg(debug_assertions)]
+type ClaimObserverSlot = StdMutex<Option<(InFlightKey, tokio::sync::oneshot::Sender<()>)>>;
+
+// Integration tests link the library without cfg(test), so this observation
+// hook is compiled only in debug/check/test builds. No production caller wires
+// it, and release builds omit it entirely.
+#[cfg(debug_assertions)]
+static IN_FLIGHT_CLAIM_OBSERVER: LazyLock<ClaimObserverSlot> =
+    LazyLock::new(|| StdMutex::new(None));
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod refresh_claim_hook {
+    use super::*;
+
+    pub struct ClaimObserver {
+        receiver: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    impl ClaimObserver {
+        pub fn install(db: &Arc<tokio::sync::Mutex<Connection>>, feed_url: &str) -> Self {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let key = (Arc::as_ptr(db) as usize, crate::db::normalize_url(feed_url));
+            *IN_FLIGHT_CLAIM_OBSERVER
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some((key, sender));
+            Self {
+                receiver: Some(receiver),
+            }
+        }
+
+        pub async fn wait_for_claim(&mut self) -> Option<()> {
+            let receiver = self.receiver.take()?;
+            tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
+                .await
+                .ok()?
+                .ok()
+        }
+    }
+
+    impl Drop for ClaimObserver {
+        fn drop(&mut self) {
+            *IN_FLIGHT_CLAIM_OBSERVER
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+        }
+    }
+}
+
 struct InFlightFeed {
-    key: (usize, String),
+    key: InFlightKey,
 }
 
 impl Drop for InFlightFeed {
@@ -46,6 +96,20 @@ fn claim_feed_refresh(
     let mut in_flight = IN_FLIGHT_FEEDS.lock().unwrap_or_else(|e| e.into_inner());
     if !in_flight.insert(key.clone()) {
         return None;
+    }
+    #[cfg(debug_assertions)]
+    {
+        let mut observer = IN_FLIGHT_CLAIM_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if observer
+            .as_ref()
+            .is_some_and(|(expected, _)| expected == &key)
+        {
+            let (_, sender) = observer.take().expect("observer matched");
+            drop(observer);
+            let _ = sender.send(());
+        }
     }
     Some(InFlightFeed { key })
 }
@@ -235,7 +299,7 @@ pub fn apply_refresh_result(
             // 中途任一失败（条目插入/触发器/磁盘错误）会留下「标题与条件头已换新、
             // 条目只进一半」的半提交状态。包进单一事务后，数据与状态同生共死；
             // 失败注入回归见 tests/staged_refresh_e2e.rs（BEFORE INSERT 触发器反例）。
-            let tx = conn.unchecked_transaction()?;
+            let tx = crate::db::write_transaction(conn)?;
             // CAS 必须先行：旧轮次连标题/文章都不允许进入写路径。条件更新命中后，
             // 同一事务持写锁到 commit，本轮 generation 不可能再被替换。
             if !feed_url_matches(&tx, feed_id, write.feed_url)? {
@@ -289,16 +353,20 @@ pub async fn refresh_feed_staged(
     feed_id: i64,
     dedup: bool,
 ) -> AppResult<FeedRefreshOutcome> {
-    let (attempt, _in_flight) = {
-        let conn = db.lock().await;
-        let feed_url = db::feed_url_by_id(&conn, feed_id)?.ok_or_else(|| {
+    let claim_db = db.clone();
+    let claimed = crate::state::database_work(db.clone(), move |conn| {
+        let feed_url = db::feed_url_by_id(conn, feed_id)?.ok_or_else(|| {
             crate::error::AppError::not_found(format!("feed {feed_id} not found"))
         })?;
-        let Some(in_flight) = claim_feed_refresh(db, &feed_url) else {
+        let Some(in_flight) = claim_feed_refresh(&claim_db, &feed_url) else {
             log::debug!("ingestion: feed {feed_id} 已有刷新在途，跳过重复请求");
-            return Ok(FeedRefreshOutcome::SkippedInFlight);
+            return Ok(None);
         };
-        (db::begin_feed_refresh(&conn, feed_id)?, in_flight)
+        Ok(Some((db::begin_feed_refresh(conn, feed_id)?, in_flight)))
+    })
+    .await?;
+    let Some((attempt, _in_flight)) = claimed else {
+        return Ok(FeedRefreshOutcome::SkippedInFlight);
     };
 
     match fetch_and_parse(
@@ -314,27 +382,28 @@ pub async fn refresh_feed_staged(
             spawn 独立任务（不占刷新信号量、不拖慢刷新关键路径——favicon 是
             锦上添花）。负缓存防无 favicon 的站点每轮重付探测超时。 */
             if parsed.icon.is_none() {
-                let (existing_icon, already_tried): (Option<String>, bool) = {
-                    let conn = db.lock().await;
-                    let icon = conn
-                        .query_row(
-                            "SELECT favicon_url FROM feeds WHERE id = ?1",
-                            rusqlite::params![feed_id],
-                            |r| r.get(0),
-                        )
-                        .ok()
-                        .flatten();
-                    // P3（2026-09-22 复查）：与 lib.rs 的既有处置一致——`lock().unwrap()`
-                    // 在互斥量中毒时会 panic。锁内只是 HashSet<i64>（「试过 favicon 的源」），
-                    // 中毒不影响其可用性，故用 into_inner 容忍中毒而非 panic。
-                    (
-                        icon,
-                        FAVICON_TRIED
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .contains(&feed_id),
-                    )
-                };
+                let (existing_icon, already_tried): (Option<String>, bool) =
+                    crate::state::database_work(db.clone(), move |conn| {
+                        let icon = conn
+                            .query_row(
+                                "SELECT favicon_url FROM feeds WHERE id = ?1",
+                                rusqlite::params![feed_id],
+                                |r| r.get(0),
+                            )
+                            .ok()
+                            .flatten();
+                        // P3（2026-09-22 复查）：与 lib.rs 的既有处置一致——`lock().unwrap()`
+                        // 在互斥量中毒时会 panic。锁内只是 HashSet<i64>（「试过 favicon 的源」），
+                        // 中毒不影响其可用性，故用 into_inner 容忍中毒而非 panic。
+                        Ok((
+                            icon,
+                            FAVICON_TRIED
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contains(&feed_id),
+                        ))
+                    })
+                    .await?;
                 if existing_icon.is_none() && !already_tried {
                     FAVICON_TRIED
                         .lock()
@@ -355,16 +424,21 @@ pub async fn refresh_feed_staged(
                             None => None,
                         };
                         if let Some(icon) = discovered {
-                            let conn = db.lock().await;
                             // P3[1]：favicon 落库失败此前静默。favicon 是锦上添花，
                             // 失败不影响抓取，但写不进去会让用户看到「图标一直不出现」
                             // 却无任何线索。改为 warn。
-                            if let Err(err) = conn.execute(
-                                "UPDATE feeds SET favicon_url = ?1
+                            if let Err(err) = crate::state::database_work(db.clone(), move |conn| {
+                                let _writer = db::writer_guard(conn)?;
+                                conn.execute(
+                                    "UPDATE feeds SET favicon_url = ?1
                                   WHERE id = ?2 AND feed_url = ?3
                                     AND (favicon_url IS NULL OR favicon_url = '')",
-                                rusqlite::params![icon, feed_id, write_feed_url],
-                            ) {
+                                    rusqlite::params![icon, feed_id, write_feed_url],
+                                )?;
+                                Ok(())
+                            })
+                            .await
+                            {
                                 log::warn!("ingestion: favicon 落库失败（feed={feed_id}）: {err}");
                             }
                         }
@@ -373,64 +447,68 @@ pub async fn refresh_feed_staged(
                     });
                 }
             }
-            let conn = db.lock().await;
-            if !feed_url_matches(&conn, feed_id, &attempt.feed_url)? {
-                return Ok(FeedRefreshOutcome::Superseded);
-            }
-            let before = refresh_visible_snapshot(&conn, feed_id)?;
-            let outcome = apply_refresh_result(
-                &conn,
-                feed_id,
-                &RefreshWriteContext::new(
-                    &attempt.feed_url,
-                    attempt.generation,
-                    attempt.etag.as_deref(),
-                    attempt.last_modified.as_deref(),
-                ),
-                &fetched,
-                &parsed,
-                dedup,
-            )?;
-            match outcome {
-                RefreshApplyOutcome::Applied(new_articles) => Ok(FeedRefreshOutcome::Applied {
-                    new_articles,
-                    data_changed: before != refresh_visible_snapshot(&conn, feed_id)?,
-                    feed_url: attempt.feed_url.clone(),
-                }),
-                RefreshApplyOutcome::Superseded => Ok(FeedRefreshOutcome::Superseded),
-            }
+            crate::state::database_work(db.clone(), move |conn| {
+                if !feed_url_matches(conn, feed_id, &attempt.feed_url)? {
+                    return Ok(FeedRefreshOutcome::Superseded);
+                }
+                let before = refresh_visible_snapshot(conn, feed_id)?;
+                let outcome = apply_refresh_result(
+                    conn,
+                    feed_id,
+                    &RefreshWriteContext::new(
+                        &attempt.feed_url,
+                        attempt.generation,
+                        attempt.etag.as_deref(),
+                        attempt.last_modified.as_deref(),
+                    ),
+                    &fetched,
+                    &parsed,
+                    dedup,
+                )?;
+                match outcome {
+                    RefreshApplyOutcome::Applied(new_articles) => Ok(FeedRefreshOutcome::Applied {
+                        new_articles,
+                        data_changed: before != refresh_visible_snapshot(conn, feed_id)?,
+                        feed_url: attempt.feed_url.clone(),
+                    }),
+                    RefreshApplyOutcome::Superseded => Ok(FeedRefreshOutcome::Superseded),
+                }
+            })
+            .await
         }
         Err(e) => {
-            let conn = db.lock().await;
-            if !feed_url_matches(&conn, feed_id, &attempt.feed_url)? {
-                log::debug!("ingestion: feed {feed_id} 已被删除或替换，失败结果丢弃");
-                return Ok(FeedRefreshOutcome::Superseded);
-            }
-            // P3[1]（REQ-104）：失败标记写回此前被 `let _ =` 静默吞掉，后果比一般
-            // 吞错更重——fetch_failed/fail_count/next_retry_at 写不进去，
-            // **指数退避就不会生效**，失败源会被每轮调度反复重抓（放大对站点的压力、
-            // 且前端错误标志不亮）。此处必须显式记录，让现场可诊断。
-            match db::set_feed_fetch_state_if_generation(
-                &conn,
-                feed_id,
-                attempt.generation,
-                true,
-                Some(&e.message),
-                attempt.etag.as_deref(),
-                attempt.last_modified.as_deref(),
-            ) {
-                Ok(true) => Err(e),
-                Ok(false) => {
-                    log::debug!("ingestion: feed {feed_id} 的失败结果已被更新轮次取代，丢弃");
-                    Ok(FeedRefreshOutcome::Superseded)
+            crate::state::database_work(db.clone(), move |conn| {
+                if !feed_url_matches(conn, feed_id, &attempt.feed_url)? {
+                    log::debug!("ingestion: feed {feed_id} 已被删除或替换，失败结果丢弃");
+                    return Ok(FeedRefreshOutcome::Superseded);
                 }
-                Err(err) => {
-                    log::warn!(
+                // P3[1]（REQ-104）：失败标记写回此前被 `let _ =` 静默吞掉，后果比一般
+                // 吞错更重——fetch_failed/fail_count/next_retry_at 写不进去，
+                // **指数退避就不会生效**，失败源会被每轮调度反复重抓（放大对站点的压力、
+                // 且前端错误标志不亮）。此处必须显式记录，让现场可诊断。
+                match db::set_feed_fetch_state_if_generation(
+                    conn,
+                    feed_id,
+                    attempt.generation,
+                    true,
+                    Some(&e.message),
+                    attempt.etag.as_deref(),
+                    attempt.last_modified.as_deref(),
+                ) {
+                    Ok(true) => Err(e),
+                    Ok(false) => {
+                        log::debug!("ingestion: feed {feed_id} 的失败结果已被更新轮次取代，丢弃");
+                        Ok(FeedRefreshOutcome::Superseded)
+                    }
+                    Err(err) => {
+                        log::warn!(
                         "ingestion: 写回抓取失败标记失败（feed={feed_id}）——退避将不生效: {err}"
                     );
-                    Err(e)
+                        Err(e)
+                    }
                 }
-            }
+            })
+            .await
         }
     }
 }

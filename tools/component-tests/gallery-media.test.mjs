@@ -284,7 +284,7 @@ componentTest('画廊多图：代理失败重试、换源晚回包不显示另�
   assert.match(view.query('.lightbox-status').textContent, /图片加载失败/);
   setPlan({ fetch_image: () => [0x89, 0x50, 0x4e, 0x47, 1] });
   await view.click('.lightbox-status button');
-  assert.match(view.query('.lightbox-img').getAttribute('src'), /^data:image\/png;base64,/);
+  assert.match(view.query('.lightbox-img').getAttribute('src'), /^blob:/);
 });
 
 componentTest('画廊多图：卡片代理结果绑定媒体版本，替换源后首帧与晚回包不串图', async () => {
@@ -296,11 +296,11 @@ componentTest('画廊多图：卡片代理结果绑定媒体版本，替换源�
   await view.act(async () => {
     useAppStore.setState((s) => ({ entries: s.entries.map((entry) => ({ ...entry, imageUrl: 'https://img.doubanio.com/new.jpg', mediaRevision: 3 })) }));
   });
-  assert.equal(view.query('.gallery-card img').getAttribute('src'), 'https://img.doubanio.com/new.jpg');
+  assert.equal(view.query('.gallery-card img'), null, '代理期间不旁路直连或显示旧图');
   await view.act(async () => { oldProxy.resolve([0x89, 0x50, 0x4e, 0x47, 2]); });
-  assert.equal(view.query('.gallery-card img').getAttribute('src'), 'https://img.doubanio.com/new.jpg');
+  assert.equal(view.query('.gallery-card img'), null, '代理期间不旁路直连或显示旧图');
   await view.act(async () => { freshProxy.resolve([0x89, 0x50, 0x4e, 0x47, 3]); });
-  await waitFor(() => view.query('.gallery-card img').getAttribute('src').startsWith('data:'), { label: '新版代理结果落地' });
+  await waitFor(() => view.query('.gallery-card img')?.getAttribute('src').startsWith('blob:'), { label: '新版代理结果落地' });
   assert.equal(invokeCount('get_article'), 0);
 });
 
@@ -322,7 +322,7 @@ componentTest('画廊多图：卡片图片失败/无图共用稳定Enter与Space
   const original = row(7971, [unique]);
   const empty = row(7972, []);
   const view = await setup([original, empty]);
-  const { getCoverState } = await import('../../src/lib/coverImage.ts');
+  const { acquireImage } = await import('../../src/lib/imageProxy.ts');
   const trigger = view.query('[data-id="7971"] .gallery-media-trigger');
   await view.act(async () => {
     trigger.focus();
@@ -330,7 +330,8 @@ componentTest('画廊多图：卡片图片失败/无图共用稳定Enter与Space
   });
   assert.equal(view.query('[data-id="7971"] .gallery-media-trigger'), trigger);
   assert.equal(trigger.querySelector('[data-cover-state="failed"]') !== null, true);
-  assert.equal(getCoverState(unique).status, 'idle', '首图失败不能将同URL的封面永久拉黑');
+  const coverLease = acquireImage(unique);
+  try { assert.equal(coverLease.snapshot().status, 'ready', '首图本地decode失败不能污染另一消费者'); } finally { coverLease.release(); }
   await view.act(async () => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
   assert.equal(state().lightboxUrl, unique, '失败占位仍能键盘打开可重试图片');
   await view.key('Escape');
@@ -421,3 +422,4 @@ componentTest('画廊多图F1边界：焦点已交给外部控件时媒体更新
   await view.act(async () => { outside.dispatchEvent(event); });
   assert.equal(event.defaultPrevented, false, '不建立全局Tab拦截');
 });
+

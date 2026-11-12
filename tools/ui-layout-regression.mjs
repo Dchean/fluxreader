@@ -15,6 +15,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectPage, evalValue, navigate, saveJson, screenshot, setViewport, waitFor } from './ui-layout/cdp.mjs';
+import {
+  CONTROLLED_MEDIA_FIXTURE_PATHS,
+  MOCK_DATA_VISUAL_FIXTURE_URLS,
+  createNetworkFailureTracker,
+} from './ui-layout/network-failure-evidence.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const EVIDENCE_REL = process.env.UI_LAYOUT_EVIDENCE_DIR ?? 'tmp/ui-layout-evidence';
@@ -3107,6 +3112,7 @@ async function main() {
   let media;
   let browser;
   let cdp;
+  let networkTracker;
   let traceEnvironment = null;
   const evidence = {
     generatedAt: new Date().toISOString(),
@@ -3128,6 +3134,14 @@ async function main() {
         armedAttempt: 1,
       },
     },
+  };
+  const finalizeNetworkEvidence = () => {
+    if (!networkTracker) return;
+    Object.assign(evidence, networkTracker.finalize({
+      expectedUrls: MOCK_DATA_VISUAL_FIXTURE_URLS,
+      mediaOrigin: media?.url ?? null,
+      mediaPaths: CONTROLLED_MEDIA_FIXTURE_PATHS,
+    }));
   };
   let activeViewportLabel = null;
 
@@ -3167,6 +3181,7 @@ async function main() {
         evidence.browser = { path: browser.browserPath, headless: true };
         const page = await connectPage(browser.debugPort, 'about:blank');
         cdp = page.cdp;
+        networkTracker = createNetworkFailureTracker(cdp);
         if (TRACE_MODE === 'viewport') {
           // 由当前实际进程回答；可执行路径或 UA 的 major 版本不能证明精确引擎版本。
           const version = await cdp.send('Browser.getVersion');
@@ -3187,13 +3202,6 @@ async function main() {
         });
         cdp.on('Runtime.exceptionThrown', (event) => {
           evidence.exceptions.push(event.exceptionDetails.exception?.description ?? event.exceptionDetails.text);
-        });
-        cdp.on('Network.loadingFailed', (event) => {
-          evidence.networkFailures.push({
-            errorText: event.errorText,
-            blockedReason: event.blockedReason ?? null,
-            type: event.type,
-          });
         });
 
         await setViewport(cdp, 1440, 900);
@@ -3263,6 +3271,8 @@ async function main() {
         }
         if (error instanceof StartupTimeoutError && attempt === 1) {
           evidence.startup.retried = true;
+          networkTracker?.close();
+          networkTracker = null;
           cdp?.close();
           cdp = null;
           terminateTree(browser?.child);
@@ -3307,6 +3317,9 @@ async function main() {
       assert.equal(second.status, 'ok', '[fault] 单次重试后的启动应成功');
       assert.equal(evidence.startup.retried, true, '[fault] 应记录启动重试');
       evidence.mediaRequests = media.requests;
+      finalizeNetworkEvidence();
+      assert.deepEqual(evidence.unexpectedNetworkFailures, [],
+        `存在未归类的网络失败：${JSON.stringify(evidence.unexpectedNetworkFailures)}`);
       await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence);
       console.log(JSON.stringify({
         ok: true,
@@ -3374,6 +3387,9 @@ async function main() {
     }
 
     evidence.mediaRequests = media.requests;
+    finalizeNetworkEvidence();
+    assert.deepEqual(evidence.unexpectedNetworkFailures, [],
+      `存在未归类的网络失败：${JSON.stringify(evidence.unexpectedNetworkFailures)}`);
     assert.deepEqual(evidence.consoleErrors, [], `浏览器 console.error：${JSON.stringify(evidence.consoleErrors)}`);
     assert.deepEqual(evidence.exceptions, [], `浏览器未捕获异常：${JSON.stringify(evidence.exceptions)}`);
     await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence);
@@ -3427,6 +3443,7 @@ async function main() {
     }, null, 2));
   } catch (error) {
     evidence.mediaRequests = media?.requests ?? [];
+    finalizeNetworkEvidence();
     evidence.failure = error?.stack ?? String(error);
     evidence.vite = { exited: vite?.child.exitCode ?? null, output: vite?.getOutput?.() ?? '' };
     try {
@@ -3468,6 +3485,7 @@ async function main() {
         process.exitCode = 1;
       }
     }
+    networkTracker?.close();
     cdp?.close();
     terminateTree(browser?.child);
     terminateTree(vite?.child);

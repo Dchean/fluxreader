@@ -16,7 +16,9 @@ export type UiSlice = Pick<
   | 'contextMenuOpen'
   | 'closeAskVisible'
   | 'lightboxUrl'
+  | 'mediaCapacityRevision'
   | 'lightboxEntryId'
+  | 'lightboxPageUrl'
   | 'lightboxGallery'
   | 'newCategoryModalOpen'
   | 'addFeedModalOpen'
@@ -126,6 +128,8 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   let galleryRequestId = 0;
   // Note: 集合/请求归灯箱持有，不改阅读成员与正文缓存 — 见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md
   const loadGallery = async (entry: ArticleEntry, previous: GalleryLightboxState | null) => {
+    if (get().libraryRestoreBusy) return;
+    const libraryGeneration = get().libraryGeneration;
     const requestId = ++galleryRequestId;
     const sourceKey = galleryMediaKey(entry);
     const firstImageUrl = entry.imageUrl || null;
@@ -145,7 +149,8 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
     const currentRequest = () => {
       const current = get().lightboxGallery;
       const liveEntry = get().entries.find((item) => item.id === entry.id);
-      return current?.requestId === requestId && requestId === galleryRequestId
+      return !get().libraryRestoreBusy && get().libraryGeneration === libraryGeneration
+        && current?.requestId === requestId && requestId === galleryRequestId
         && liveEntry && !liveEntry.unavailable && galleryMediaKey(liveEntry) === sourceKey
         && (current.opened || get().activeArticleId === entry.id)
         ? current : null;
@@ -186,7 +191,9 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   contextMenuOpen: false,
   closeAskVisible: false,
   lightboxUrl: null,
+  mediaCapacityRevision: 0,
   lightboxEntryId: null,
+  lightboxPageUrl: undefined,
   lightboxGallery: null,
   newCategoryModalOpen: false,
   addFeedModalOpen: false,
@@ -204,14 +211,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   /* ================= 弹层 ================= */
 
   openSettings: () => set({ settingsOpen: true }),
-  // Note: 设置关闭的所有入口必须经此守卫；授权流中只能提示、不得卸载弹窗 — 见 .agents/notes/implemented/bug-fix/2026-11-04-关闭取消语义与授权关闭守卫.md
-  closeSettings: () => {
-    if (get().githubFlow || get().githubLoggingIn) {
-      get().showToast('GitHub 授权进行中，等待网页授权完成后再关闭');
-      return;
-    }
-    set({ settingsOpen: false });
-  },
+  closeSettings: () => set({ settingsOpen: false }),
   switchSettingsTab: (tab) => set({ settingsTab: tab }),
   openSettingsTab: (tab) => set({ settingsOpen: true, settingsTab: tab }),
   openSearch: () => set({ searchOpen: true }),
@@ -233,9 +233,10 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
       );
   },
   dismissCloseAsk: () => set({ closeAskVisible: false }),
-  openLightbox: (url, entryId) => {
+  openLightbox: (url, entryId, pageUrl) => {
+    if (get().libraryRestoreBusy) return;
     ++galleryRequestId;
-    set({ lightboxUrl: url, lightboxEntryId: entryId ?? null, lightboxGallery: null });
+    set({ lightboxUrl: url, lightboxEntryId: entryId ?? null, lightboxPageUrl: pageUrl, lightboxGallery: null });
   },
   openGalleryLightbox: (entryId) => {
     const entry = get().entries.find((item) => item.id === entryId);
@@ -258,7 +259,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   },
   closeLightbox: () => {
     ++galleryRequestId;
-    set({ lightboxUrl: null, lightboxEntryId: null, lightboxGallery: null });
+    set({ lightboxUrl: null, lightboxEntryId: null, lightboxPageUrl: undefined, lightboxGallery: null });
   },
   openNewCategoryModal: () => set({ newCategoryModalOpen: true }),
   openAddFeedModal: (catId) => set({ addFeedModalOpen: true, addFeedTargetCatId: catId }),
@@ -354,3 +355,5 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   )),
   };
 };
+
+

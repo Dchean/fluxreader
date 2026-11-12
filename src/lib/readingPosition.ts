@@ -208,6 +208,11 @@ const returnAnchorArchive = new Map<string, TopAnchor>();
 
 /** 仅供测试生命周期复位模块状态；生产导航必须保留用户的返回存档与节流基准。 */
 export function resetReadingPositionForTests(): void {
+  clearLibraryReadingPositions();
+}
+
+/** 资料库替换后的旧 ID/位置全部失效；普通导航和后台同步不得调用。 */
+export function clearLibraryReadingPositions(): void {
   anchor = null;
   lastRecordAt = 0;
   returnAnchorArchive.clear();

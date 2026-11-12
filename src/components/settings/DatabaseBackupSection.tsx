@@ -58,10 +58,10 @@ export function DatabaseBackupSection() {
 
   return (
     <>
-      <div className="settings-group-title" style={{ marginTop: 20 }}>数据备份</div>
+      <div className="settings-group-title" style={{ marginTop: 20 }}>本机数据库快照</div>
       <SettingCard
-        title="手动备份"
-        desc="创建当前数据库完整快照；备份含正文与加密凭据，请妥善保管"
+        title="本机故障快照"
+        desc="仅用于当前 Windows 用户的故障恢复；含加密凭据，换机请使用便携备份"
       >
         <button
           className="toggle-action-btn"
@@ -88,11 +88,11 @@ export function DatabaseBackupSection() {
         </div>
       )}
       <SettingCard
-        title="恢复方式"
-        desc="恢复需退出 FluxReader 后替换数据库文件；应用不提供覆盖式恢复"
+        title="本机快照恢复"
+        desc="此类快照需退出应用后替换文件；换机请使用上方便携恢复"
       />
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        自动快照各保留最近 10 份；手动备份不会被自动清理。
+        手动快照不会被自动清理，请自行保留所需文件。
       </div>
     </>
   );

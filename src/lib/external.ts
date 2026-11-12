@@ -10,6 +10,14 @@ import { EXTERNAL_OPEN_FAILURE } from './copyPolicy';
 let openUrlFn: ((url: string) => Promise<void>) | null = null;
 const OPEN_FAILURE_HANDLER_KEY = '__FLUXREADER_EXTERNAL_OPEN_FAILURE__';
 
+/** 原网页动作共用的协议边界；无效地址不显示必然失败的恢复入口。 */
+export function isHttpUrl(url: string | null | undefined): boolean {
+  try {
+    const parsed = new URL((url ?? '').trim());
+    return /^https?:$/.test(parsed.protocol) && !!parsed.hostname;
+  } catch { return false; }
+}
+
 /** 由 store 注入 toast 单点；经 globalThis 共享，避免测试/生产出现第二份模块实例。 */
 export function bindExternalOpenFailureHandler(handler: (message: string) => void): void {
   (globalThis as Record<string, unknown>)[OPEN_FAILURE_HANDLER_KEY] = handler;

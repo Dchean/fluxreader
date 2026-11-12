@@ -27,6 +27,9 @@ feed_by_remote_id / set_folder_remote_id），生产零调用。
 ============================================================ */
 
 /// Pull 合并所需的全部匹配映射（一次批量预取）。
+/// Default is only an empty ownership-transfer placeholder while an async
+/// caller moves the real map into a blocking DB scope; never a fresh pull snapshot.
+#[derive(Default)]
 pub struct SyncMatchMaps {
     /// Active source identity/lifecycle captured before HTTP, never refreshed mid-pull.
     pub source_versions: HashMap<i64, (String, i64)>,
@@ -236,6 +239,7 @@ pub fn confirm_article_remote_origin(
     remote_id: i64,
     remote_feed_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     Ok(conn.execute(
         "UPDATE articles SET remote_origin_feed_id=?3
          WHERE id=?1 AND remote_id=?2 AND remote_origin_feed_id IS NOT ?3
@@ -290,6 +294,7 @@ pub fn verified_remote_binding(
 /// 写入本身即判定：WHERE 的 `remote_id IS NOT ?1` 只在值确实不同时命中一行
 /// （同时覆盖 NULL 与旧值两种形态），无需额外读一次现值。
 pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET remote_id = ?1 WHERE id = ?2 AND (remote_id IS NOT ?1)",
         params![remote_id, id],
@@ -451,6 +456,7 @@ pub fn reset_fever_history_state(conn: &Connection) -> AppResult<()> {
 /// feeds 的 remote_id 绑定。拉取调用方必须先用 match_remote_feed 确认强身份；
 /// 此公共原语保留已有写回/历史数据构造的语义，不承担全局唯一性约束。
 pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE feeds SET remote_id = ?1 WHERE id = ?2",
         params![remote_id, feed_id],
@@ -468,7 +474,7 @@ pub fn match_remote_feed(
     title: &str,
     site_url: Option<&str>,
 ) -> AppResult<Option<(i64, bool)>> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let ids: Vec<i64> = {
         let mut stmt = tx.prepare("SELECT id FROM feeds WHERE remote_id = ?1 ORDER BY id")?;
         let rows = stmt.query_map([remote_id], |r| r.get(0))?;
@@ -594,6 +600,12 @@ commands.rs SQL 抽取层（TASK-017）
 /// 确保「未分类」folder 存在：已有则返回其 id，无则创建后返回。
 /// 用于 add_feed 未指定分类时的兜底逻辑。
 pub fn ensure_uncategorized_folder(conn: &Connection) -> AppResult<i64> {
+    ensure_uncategorized_folder_origin(conn, false)
+}
+pub fn ensure_remote_uncategorized_folder(conn: &Connection) -> AppResult<i64> {
+    ensure_uncategorized_folder_origin(conn, true)
+}
+fn ensure_uncategorized_folder_origin(conn: &Connection, remote: bool) -> AppResult<i64> {
     let existing: Option<i64> = conn
         .query_row(
             "SELECT id FROM folders WHERE name = '未分类' ORDER BY id LIMIT 1",
@@ -603,6 +615,7 @@ pub fn ensure_uncategorized_folder(conn: &Connection) -> AppResult<i64> {
         .optional()?;
     match existing {
         Some(fid) => Ok(fid),
+        None if remote => create_remote_folder(conn, "未分类", "article"),
         None => create_folder(conn, "未分类", "article"),
     }
 }
@@ -634,9 +647,17 @@ pub fn list_unread_ids_scoped(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> AppResult<Vec<i64>> {
-    let (clause, binds) =
-        super::articles::scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
-    let sql = format!("SELECT a.id FROM articles a WHERE a.is_read = 0{clause}");
+    let logical_state = crate::local_sync::logical::query_requires_logical_state(conn)?;
+    let (clause, binds) = super::articles::scope_clause(
+        feed_id,
+        folder_id,
+        starred_only,
+        since_ms,
+        layout,
+        logical_state,
+    );
+    let read = super::articles::article_flag("a", logical_state, "is_read");
+    let sql = format!("SELECT a.id FROM articles a WHERE {read} = 0{clause}");
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), |r| r.get(0))?;
@@ -698,6 +719,7 @@ pub fn update_article_image_if_empty(
     article_id: i64,
     image_url: &str,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE articles SET image_url = ?1, image_source='page' WHERE id = ?2 AND NULLIF(trim(image_url),'') IS NULL",
         params![image_url, article_id],
@@ -855,6 +877,7 @@ pub fn update_feed_title_if_empty(
     title: &str,
     site_url: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE feeds SET
             fetched_title = CASE WHEN title = feed_url THEN ?1 ELSE fetched_title END,
@@ -884,6 +907,7 @@ pub fn sync_set_article_status(
     is_read: bool,
     is_starred: bool,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
         params![is_read as i64, is_starred as i64, article_id],
@@ -893,6 +917,7 @@ pub fn sync_set_article_status(
 
 /// 同步专用：标记文章为已读（仅当未读时），返回影响行数（Pull 段对账计数用）
 pub fn sync_mark_read_if_unread(conn: &Connection, article_id: i64) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0",
         params![article_id],
@@ -902,6 +927,7 @@ pub fn sync_mark_read_if_unread(conn: &Connection, article_id: i64) -> AppResult
 
 /// 同步专用：标记文章为未读（仅当已读时），返回影响行数
 pub fn sync_mark_unread_if_read(conn: &Connection, article_id: i64) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_read = 0 WHERE id = ?1 AND is_read = 1",
         params![article_id],
@@ -911,6 +937,7 @@ pub fn sync_mark_unread_if_read(conn: &Connection, article_id: i64) -> AppResult
 
 /// 同步专用：标记文章为收藏（仅当未收藏时），返回影响行数
 pub fn sync_mark_starred_if_unstarred(conn: &Connection, article_id: i64) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0",
         params![article_id],
@@ -920,6 +947,7 @@ pub fn sync_mark_starred_if_unstarred(conn: &Connection, article_id: i64) -> App
 
 /// 同步专用：取消文章收藏（仅当已收藏时），返回影响行数
 pub fn sync_mark_unstarred_if_starred(conn: &Connection, article_id: i64) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1",
         params![article_id],
@@ -959,6 +987,7 @@ pub fn sync_mark_read_if_unread_at_version(
     article_id: i64,
     read_version: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0 AND read_version = ?2",
         params![article_id, read_version],
@@ -972,6 +1001,7 @@ pub fn sync_mark_unread_if_read_at_version(
     article_id: i64,
     read_version: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_read = 0 WHERE id = ?1 AND is_read = 1 AND read_version = ?2",
         params![article_id, read_version],
@@ -985,6 +1015,7 @@ pub fn sync_mark_starred_if_unstarred_at_version(
     article_id: i64,
     star_version: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0 AND star_version = ?2",
         params![article_id, star_version],
@@ -998,6 +1029,7 @@ pub fn sync_mark_unstarred_if_starred_at_version(
     article_id: i64,
     star_version: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1 AND star_version = ?2",
         params![article_id, star_version],
@@ -1013,6 +1045,7 @@ pub fn sync_set_read_at_version(
     read: bool,
     read_version: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_read = ?1 WHERE id = ?2 AND read_version = ?3",
         params![read as i64, article_id, read_version],
@@ -1027,6 +1060,7 @@ pub fn sync_set_star_at_version(
     starred: bool,
     star_version: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE articles SET is_starred = ?1 WHERE id = ?2 AND star_version = ?3",
         params![starred as i64, article_id, star_version],
@@ -1100,12 +1134,32 @@ fn fill_visible(
 ///
 /// OPT-008B 第二阶段：正文回填按「逐字段空才补」合成目标内容，经 contents
 /// 身份归并（等价即复用——跨源同文共享；不把内容泄写进共享行的整值覆盖）。
-/// OPT-008B R3：当前指向**受保护提取行**（readability + 已提取）时不做 RSS
-/// 合成——就地修复异常 body（来源/标志保持 readability），防止历史「html 非空/
-/// body 缺失」行被降级成 rss 行而丢 fulltext_extracted（隔离回归见
-/// sync_extraction_tests::backfill_keeps_protected_readability_source）。
+/// 当前指向受保护提取行（readability + 已提取）时不合成或规范化正文；
+/// 保持已验证输入的 identity/HTML/text/revision，元数据仍独立回填。
 // Note: 可渲染 HTML 的净化口径只有 sanitize()（写入口与读边界共用） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
 pub fn backfill_article_content(
+    conn: &Connection,
+    article_id: i64,
+    content_html: &str,
+    body_text: &str,
+    image_url: Option<&str>,
+    enclosure_url: Option<&str>,
+    enclosure_mime: Option<&str>,
+) -> AppResult<bool> {
+    super::contents::with_write_savepoint(conn, "backfill_article_content", || {
+        backfill_article_content_in(
+            conn,
+            article_id,
+            content_html,
+            body_text,
+            image_url,
+            enclosure_url,
+            enclosure_mime,
+        )
+    })
+}
+
+fn backfill_article_content_in(
     conn: &Connection,
     article_id: i64,
     content_html: &str,
@@ -1119,19 +1173,11 @@ pub fn backfill_article_content(
     };
     let cur_html = before.content_html.clone().unwrap_or_default();
     let cur_body = before.body_text.clone().unwrap_or_default();
-    /* R3（历史异常 Readability 保护）：当前指向的是受保护提取行（readability +
-    fulltext_extracted）时，回填不得合成 `(提取 HTML, RSS 纯文本)` 的 **rss 源**
-    新行——那会把提取标志丢掉、把受保护行降级成 RSS 摘要（常规提取会被防退化
-    拦截，仅「html 非空但 body 缺失/错配」的历史异常行可达）。语义与 RSS 刷新
-    保护一致：就地修复 body（html_to_text 同源重算，revision+1），来源与标志
-    保持 readability。 */
+    // 保护当前已验证全文的精确字节。旧库惰性修复已退役；正文身份可能仍被
+    // L/已发布 BodyRef 引用，不能因本机没有 hold 就原地改写。
     let protected =
         before.source == super::contents::SOURCE_READABILITY && before.fulltext_extracted != 0;
-    if protected {
-        if let Some(cid) = before.content_id {
-            super::contents::repair_extracted_body_if_mismatch(conn, cid)?;
-        }
-    } else {
+    if !protected {
         // 逐字段空才补（旧语义），再按合成内容归并到 contents。
         let fill_html = cur_html.is_empty() && !content_html.trim().is_empty();
         let fill_body = cur_body.is_empty() && !body_text.is_empty();
@@ -1171,7 +1217,8 @@ pub fn backfill_article_content(
                     if let Some(old_id) = before.content_id {
                         conn.execute(
                             "DELETE FROM contents WHERE id = ?1
-                             AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)",
+                             AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)
+                     AND NOT EXISTS (SELECT 1 FROM local_sync_body_hold WHERE json_extract(body_ref,'$.primary')=contents.identity OR json_extract(body_ref,'$.rss')=contents.identity)",
                             params![old_id],
                         )?;
                     }
@@ -1198,6 +1245,15 @@ pub fn backfill_article_content(
                 format!("回填后复读失败：文章 {article_id} 不存在（并发删除？）"),
             )
         })?;
+    if !super::contents::content_non_empty(
+        before.content_html.as_deref(),
+        before.body_text.as_deref().unwrap_or(""),
+    ) && super::contents::content_non_empty(
+        after.content_html.as_deref(),
+        after.body_text.as_deref().unwrap_or(""),
+    ) {
+        super::body_retention::restart(conn, article_id, chrono::Utc::now().timestamp())?;
+    }
     Ok(before != after)
 }
 

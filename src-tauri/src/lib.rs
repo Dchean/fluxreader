@@ -2,7 +2,7 @@
 pub mod ai;
 pub mod ai_segments;
 pub mod commands;
-pub mod config_sync;
+pub mod connection_suggestion;
 pub mod credentials;
 pub mod db;
 pub mod diagnostics;
@@ -10,9 +10,10 @@ pub mod endpoint_resolve;
 pub mod error;
 pub mod extraction;
 pub mod fever;
-pub mod github_auth;
 pub mod greader;
+mod image_requests;
 pub mod ingestion;
+pub mod local_sync;
 pub mod media;
 pub mod navigation;
 pub mod opml;
@@ -44,18 +45,28 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 /// 读取 closeToTray 设置（缺省 true：关闭即最小化到托盘）
 async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
-    let conn = db.lock().await;
     /* TASK-068：收口为类型化助手（默认值语义不变） */
-    crate::db::app_settings_bool(&conn, "closeToTray", true)
+    state::database_work(db.clone(), |conn| {
+        Ok(crate::db::app_settings_bool(conn, "closeToTray", true))
+    })
+    .await
+    .unwrap_or(true)
 }
 
 /// 首次关闭询问是否已展示过（app_settings.closePromptShown，缺省 false）
 async fn read_close_prompt_shown(
     db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> bool {
-    let conn = db.lock().await;
     /* TASK-068：收口为类型化助手（默认值语义不变） */
-    crate::db::app_settings_bool(&conn, "closePromptShown", false)
+    state::database_work(db.clone(), |conn| {
+        Ok(crate::db::app_settings_bool(
+            conn,
+            "closePromptShown",
+            false,
+        ))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// 用户在首次关闭询问弹窗里做出选择：
@@ -70,16 +81,14 @@ async fn resolve_close(
     let to_tray = action == "tray";
     let db = app.state::<state::AppState>().db.clone();
     if remember {
-        let conn = db.lock().await;
-        let raw = crate::db::get_setting(&conn, "app_settings")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "{}".into());
-        let mut v: serde_json::Value =
-            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-        v["closeToTray"] = serde_json::json!(to_tray);
-        v["closePromptShown"] = serde_json::json!(true);
-        let _ = crate::db::set_setting(&conn, "app_settings", &v.to_string());
+        state::database_work(db, move |conn| {
+            crate::commands::apply_app_settings_patch(
+                conn,
+                &serde_json::json!({"closeToTray":to_tray,"closePromptShown":true}),
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
         /* 设置页的开关镜像由前端在 `answerCloseAsk` 调用点自行同步
         （store/slices/ui.ts，本次会话即时一致；下次启动由 bootstrapSettings
         恢复）。OPT-017F：原 `close-resolved` emit 全仓零监听，已删除——见
@@ -109,6 +118,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(navigation::init())
         // 窗口状态记忆：尺寸/位置/最大化跨启动保留。
         // OPT-015：main 跳过插件的初始自动恢复——冷启动恢复统一由 setup 里
@@ -192,6 +202,7 @@ pub fn run() {
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
+            local_sync::runtime::spawn(app.handle().clone());
             // 封面后台补全（摘要型源 og:image 兜底，低优先级；退出可终止）
             scheduler::spawn_cover_backfill(app.handle().clone(), setup_shutdown.clone());
 
@@ -361,6 +372,7 @@ pub fn run() {
             // 设置
             commands::get_setting,
             commands::set_setting,
+            commands::patch_app_settings,
             // 数据库备份（手动完整快照；恢复边界见 docs/backup.md）
             commands::create_database_backup,
             commands::take_startup_backup_warning,
@@ -400,26 +412,21 @@ pub fn run() {
             commands::extract_fulltext,
             // 图片代理（防盗链兼容）
             commands::fetch_image,
+            commands::cancel_image,
             // OPML 导入导出
             commands::opml_import,
             commands::opml_export,
             // SMTC 系统媒体控制
             media::media_update_full,
             media::media_stop,
-            // 配置同步（Gist / WebDAV）
-            config_sync::config_sync_save_credentials,
-            config_sync::config_sync_upload,
-            config_sync::config_sync_download,
-            // OPT-010：两段式——预览（只读）→ 确认后应用（hash/版本 CAS）
-            config_sync::config_sync_plan,
-            config_sync::config_sync_apply,
-            config_sync::config_sync_status,
-            // GitHub 设备流登录
-            github_auth::github_login_start,
-            github_auth::github_login_poll,
-            github_auth::github_login_cancel,
-            github_auth::github_login_status,
-            github_auth::github_login_disconnect,
+            local_sync::runtime::local_sync_status,
+            local_sync::runtime::local_sync_connect,
+            local_sync::runtime::local_sync_disconnect,
+            local_sync::runtime::local_sync_run,
+            local_sync::backup::choose_portable_backup_file,
+            local_sync::backup::export_portable_backup,
+            local_sync::backup::preview_portable_backup,
+            local_sync::backup::restore_portable_backup,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -436,6 +443,8 @@ pub fn run() {
                         if let Some(runtime) = &runtime {
                             runtime.stop();
                         }
+                        let local_runtime=app.try_state::<state::AppState>().map(|state|state.local_sync.clone());
+                        if let Some(runtime)=&local_runtime {runtime.stop();}
                         let app = app.clone();
                         let ready = exit_ready.clone();
                         let code = code.unwrap_or(0);
@@ -446,6 +455,8 @@ pub fn run() {
                                 }
                                 None => true,
                             };
+                            let local_drained=match local_runtime {Some(runtime)=>runtime.drain(std::time::Duration::from_secs(3)).await,None=>true};
+                            let drained=drained&&local_drained;
                             diagnostics::record(
                                 0,
                                 "shutdown",
@@ -464,6 +475,7 @@ pub fn run() {
                 cover_shutdown.trigger();
                 if let Some(state) = app.try_state::<state::AppState>() {
                     state.sync_runtime.stop();
+                    state.local_sync.stop();
                 }
             }
         });

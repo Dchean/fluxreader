@@ -1154,7 +1154,7 @@ async fn remote_rss_media_add_replace_remove_and_sparse_replay_share_revision_ru
 }
 
 #[test]
-fn page_cover_survives_rss_images_and_fulltext_then_cache_clear_removes_media() {
+fn page_cover_survives_rss_images_and_fulltext_then_cache_clear_drops_body_keeps_media() {
     let (_guard, mut conn) = open("page_rss_fulltext_media");
     let (feed, id) = seed(&conn, "https://audit.invalid/feed", "plain RSS");
     db::update_article_image_if_empty(&conn, id, "https://audit.invalid/page.png").unwrap();
@@ -1208,12 +1208,14 @@ fn page_cover_survives_rss_images_and_fulltext_then_cache_clear_removes_media() 
     db::set_read(&conn, id, true).unwrap();
     assert_eq!(db::cleanup_cache(&mut conn, 1, "articles").unwrap().0, 1);
     let cleared = db::get_article(&conn, id).unwrap().unwrap();
-    assert!(
-        cleared.images.is_empty()
-            && cleared.image_url.is_none()
-            && cleared.gallery_first_image_url.is_none()
+    assert!(cleared.content_html.is_none() && cleared.snippet.is_empty());
+    assert_eq!(cleared.images, extracted.images);
+    assert_eq!(cleared.image_url, extracted.image_url);
+    assert_eq!(
+        cleared.gallery_first_image_url,
+        extracted.gallery_first_image_url
     );
-    assert_eq!(cleared.image_count, 0);
+    assert_eq!(cleared.image_count, extracted.image_count);
     assert!(cleared.media_revision > revised.media_revision);
 }
 

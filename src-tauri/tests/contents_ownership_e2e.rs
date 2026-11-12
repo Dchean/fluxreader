@@ -516,581 +516,216 @@ fn ai_commit_guard_rejects_after_content_change_and_cleanup() {
 }
 
 /* ============================================================
-二·五、identity 不变量（OPT-008C）：修复后身份必须与字节一致
+二·五、当前格式正文身份：精确字节复用、保护与碰撞
+旧库惰性 identity 修复已退役；逐项替代依据见正文身份 Note 的11-11后继。
 ============================================================ */
 
-/// 造「历史异常提取行」：readability + fulltext_extracted=1、HTML 正常但
-/// body_text 与 HTML 不同源（旧版只写 HTML+flag 的形态），并把条目指过去。
-/// 身份使用与内容无关的私有串，模拟修复前「identity 不随 body 变」的行。
-fn install_legacy_readability_row(
-    conn: &Connection,
-    article_id: i64,
-    html: &str,
-    wrong_body: &str,
-    articles_to_point: &[i64],
-) -> i64 {
-    conn.execute(
-        "INSERT INTO contents
-            (identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
-         VALUES (?1, NULL, ?2, ?3, 'readability', 1)",
-        params![format!("h|legacy-mismatch-{article_id}"), html, wrong_body],
-    )
-    .unwrap();
-    let cid = conn.last_insert_rowid();
-    for aid in articles_to_point {
-        conn.execute(
-            "UPDATE articles SET content_id = ?1 WHERE id = ?2",
-            params![cid, aid],
-        )
-        .unwrap();
-    }
-    cid
+fn checked_extract(conn: &Connection, id: i64, html: &str) -> (i64, i64) {
+    let (token, _) = db::article_content_commit_token(conn, id).unwrap().unwrap();
+    db::replace_article_content_checked(conn, id, &token, html)
+        .unwrap()
+        .unwrap()
 }
 
-/// OPT-008C 裁决 a（重算 identity + 同等价合并）：修复受保护提取行的 body
-/// 后，新身份命中已有等价行——全部引用条目重指目标行、目标 revision 递增、
-/// 原行删除；不留下「身份与字节不一致」的孤儿。
+fn content_snapshot(conn: &Connection, id: i64) -> (String, Option<String>, String, i64, i64) {
+    conn.query_row("SELECT identity,content_html,body_text,revision,fulltext_extracted FROM contents WHERE id=?1", [id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap()
+}
+
 #[test]
-fn repair_recomputes_identity_and_merges_equivalent_references() {
-    let tmp = TempDb::new("contents_identity_merge");
+fn protected_readability_refresh_preserves_shared_content_and_independent_rss() {
+    let tmp = TempDb::new("contents_immutable_shared");
     let conn = tmp.open();
-    let f = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = seed_feed(&conn, f, "https://a.example/rss", "A");
-
-    // 等价目标行：合法的 readability 提取行（同 source + 同 HTML + 同纯文本）。
-    let (control_aid, _) = db::upsert_article_with_feed(
+    let folder = db::create_folder(&conn, "F", "article").unwrap();
+    let left = seed_feed(&conn, folder, "https://a.example/rss", "A");
+    let right = seed_feed(&conn, folder, "https://b.example/rss", "B");
+    let (a, _) = db::upsert_article_with_feed(
         &conn,
-        feed,
-        &new_article("ctrl", "https://a.example/ctrl", "控制", "<p>控制 RSS</p>"),
+        left,
+        &new_article("a", "https://a.example/a", "A", "<p>RSS A</p>"),
         false,
     )
     .unwrap();
-    let (token, _) = db::article_content_commit_token(&conn, control_aid)
-        .unwrap()
-        .unwrap();
-    let (target_id, target_rev_before) =
-        db::replace_article_content_checked(&conn, control_aid, &token, "<p>提取正文</p>")
-            .unwrap()
-            .unwrap();
-
-    // 两条条目引用同一历史错配行（合并必须重指全部引用，不只当前条目）。
-    let (aid1, _) = db::upsert_article_with_feed(
+    let (b, _) = db::upsert_article_with_feed(
         &conn,
-        feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>甲 RSS</p>"),
+        right,
+        &new_article("b", "https://b.example/b", "B", "<p>RSS B</p>"),
         false,
     )
     .unwrap();
-    let (aid2, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g2", "https://a.example/p2", "乙", "<p>乙 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let legacy_id = install_legacy_readability_row(
-        &conn,
-        aid1,
-        "<p>提取正文</p>",
-        "旧 RSS 错配正文",
-        &[aid1, aid2],
+    let (shared, revision) = checked_extract(&conn, a, "<p>shared extracted article</p>");
+    assert_eq!(
+        checked_extract(&conn, b, "<p>shared extracted article</p>"),
+        (shared, revision)
     );
-    assert_ne!(
-        legacy_id, target_id,
-        "夹具：错配行与等价目标行必须是两行（否则无合并可测）"
-    );
-
-    // RSS 刷新命中受保护行 → 历史错配修复。
+    let before = content_snapshot(&conn, shared);
     db::upsert_article_with_feed(
         &conn,
-        feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>短 RSS 摘要</p>"),
+        left,
+        &new_article("a", "https://a.example/a", "A", "<p>new RSS A</p>"),
         false,
     )
     .unwrap();
-
+    db::backfill_article_content(
+        &conn,
+        b,
+        "<p>backfill B</p>",
+        "backfill B",
+        Some("https://b.example/cover.png"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(content_id_of(&conn, a), Some(shared));
+    assert_eq!(content_id_of(&conn, b), Some(shared));
     assert_eq!(
-        content_id_of(&conn, aid1),
-        Some(target_id),
-        "当前条目必须重指等价目标行"
+        content_snapshot(&conn, shared),
+        before,
+        "refresh/backfill cannot change a shared extracted identity, bytes, revision or flag"
     );
+    let rss: (i64, String) = conn.query_row("SELECT c.id,c.body_text FROM articles a JOIN contents c ON c.id=a.rss_content_id WHERE a.id=?1", [a], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_ne!(rss.0, shared);
     assert_eq!(
-        content_id_of(&conn, aid2),
-        Some(target_id),
-        "共享同一错配行的其他引用也必须重指（不得指向已删除行）"
+        rss.1, "new RSS A",
+        "RSS revision is independent from protected display content"
     );
-    let legacy_exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM contents WHERE id = ?1",
-            [legacy_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(legacy_exists, 0, "合并后原错配行必须删除");
-    let target_rev_after: i64 = conn
-        .query_row(
-            "SELECT revision FROM contents WHERE id = ?1",
-            [target_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(
-        target_rev_after > target_rev_before,
-        "合并必须递增目标行 revision（所有引用感知内容版本变化）：{target_rev_before} -> {target_rev_after}"
-    );
-    let equivalent_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM contents
-             WHERE extraction_source = 'readability' AND content_html = '<p>提取正文</p>'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(equivalent_rows, 1, "同等价内容只允许一行");
 }
 
-/// OPT-008C 反例：修复后 identity 必须与字节一致——后续以同字节调用
-/// `ensure_content`（经真实提取提交入口）必须复用修复行，而不是新建一行。
-/// 修前：body 被就地改写但 identity 未重算 → 新内容算出的身份查不到旧行，
-/// 产生第二条同字节 readability 行（欠共享）。
 #[test]
-fn ensure_content_after_repair_reuses_fixed_row() {
-    let tmp = TempDb::new("contents_identity_reuse");
+fn repeated_checked_extraction_reuses_canonical_bytes_without_revision_churn() {
+    let tmp = TempDb::new("contents_current_reuse");
     let conn = tmp.open();
-    let f = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = seed_feed(&conn, f, "https://a.example/rss", "A");
-
-    let (aid, _) = db::upsert_article_with_feed(
+    let folder = db::create_folder(&conn, "F", "article").unwrap();
+    let feed = seed_feed(&conn, folder, "https://a.example/rss", "A");
+    let (a, _) = db::upsert_article_with_feed(
         &conn,
         feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>甲 RSS</p>"),
+        &new_article("a", "https://a.example/a", "A", "<p>RSS A</p>"),
         false,
     )
     .unwrap();
-    let legacy_id =
-        install_legacy_readability_row(&conn, aid, "<p>修复后正文</p>", "旧 RSS 错配", &[aid]);
-
-    // 修复
-    db::upsert_article_with_feed(
+    let (b, _) = db::upsert_article_with_feed(
         &conn,
         feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>短 RSS</p>"),
+        &new_article("b", "https://a.example/b", "B", "<p>RSS B</p>"),
         false,
     )
     .unwrap();
-    let fixed_id = content_id_of(&conn, aid).unwrap();
+    // Production extraction sanitizes before submitting checked content. The
+    // stored text derives from exactly this canonical HTML, not raw source HTML.
+    let html =
+        app_lib::sanitize::sanitize("<p>canonical text</p><script>hidden script</script>", None);
+    let first = checked_extract(&conn, a, &html);
+    assert_eq!(checked_extract(&conn, a, &html), first);
+    assert_eq!(checked_extract(&conn, b, &html), first);
+    let snapshot = content_snapshot(&conn, first.0);
+    assert_eq!(snapshot.1.as_deref(), Some(html.as_str()));
+    assert_eq!(snapshot.2, app_lib::sanitize::html_to_text(&html));
+    assert!(!snapshot.2.contains("hidden script"));
+    assert_eq!(snapshot.3, first.1);
+    assert_eq!(snapshot.4, 1);
     assert_eq!(
-        fixed_id, legacy_id,
-        "无等价行时修复就地更新原行（不得新建内容行）"
-    );
-    let (fixed_body, fixed_rev): (String, i64) = conn
-        .query_row(
-            "SELECT body_text, revision FROM contents WHERE id = ?1",
-            [fixed_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        fixed_body,
-        app_lib::sanitize::html_to_text("<p>修复后正文</p>"),
-        "body 必须按保留 HTML 同源修复"
-    );
-
-    // 后续同字节内容：ensure_content 必须命中修复行的身份。
-    // （修前此断言先红：身份仍与旧 body 绑定 → 新建第二行。）
-    let (aid2, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g2", "https://a.example/p2", "乙", "<p>乙 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let (token, _) = db::article_content_commit_token(&conn, aid2)
-        .unwrap()
-        .unwrap();
-    let (reused_id, reused_rev) =
-        db::replace_article_content_checked(&conn, aid2, &token, "<p>修复后正文</p>")
-            .unwrap()
-            .unwrap();
-    assert_eq!(
-        reused_id, fixed_id,
-        "修复后同字节 ensure_content 必须复用修复行（修前：新建第二行）"
-    );
-    assert_eq!(reused_rev, fixed_rev, "复用不改 revision（同一内容版本）");
-    let fixed_identity: String = conn
-        .query_row(
-            "SELECT identity FROM contents WHERE id = ?1",
-            [fixed_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_ne!(
-        fixed_identity,
-        format!("h|legacy-mismatch-{aid}"),
-        "修复必须重算 identity（修前：identity 保持与旧字节绑定的值）"
-    );
-    let same_bytes_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM contents
-             WHERE extraction_source = 'readability' AND content_html = '<p>修复后正文</p>'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(same_bytes_rows, 1, "同字节 readability 行只能有一条");
-}
-
-/// 造「旧实现修复态」：body 已等于 `html_to_text(html)`（旧版修过 body），但
-/// identity 仍是旧 body 的规范哈希（`h|...`、无 `|c` 盐）——旧版只改 body
-/// 不改 identity 的存量行。返回内容行 id。
-fn install_old_repaired_row(
-    conn: &Connection,
-    article_id: i64,
-    html: &str,
-    old_body: &str,
-    articles_to_point: &[i64],
-) -> i64 {
-    let body = app_lib::sanitize::html_to_text(html);
-    // 旧 body 的规范身份（哈希段用条目 id 占位保证唯一；长度取旧 body，
-    // 足以与修复后的 expected 身份区分）。
-    let stale_identity = format!("h|{:032x}|{}|{}", article_id, html.len(), old_body.len());
-    conn.execute(
-        "INSERT INTO contents
-            (identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
-         VALUES (?1, NULL, ?2, ?3, 'readability', 1)",
-        params![stale_identity, html, body],
-    )
-    .unwrap();
-    let cid = conn.last_insert_rowid();
-    for aid in articles_to_point {
-        conn.execute(
-            "UPDATE articles SET content_id = ?1 WHERE id = ?2",
-            params![cid, aid],
-        )
-        .unwrap();
-    }
-    cid
-}
-
-/// OPT-008C 返工 P2：旧实现已修过 body、identity 仍指向旧 body 的存量行，
-/// 再次进入修复路径必须收敛 identity（不改 body、不 bump revision）；随后
-/// 同字节 `ensure_content` 复用该行。
-///
-/// 修前（早退只看 body）此用例红于 identity 未收敛；再以同字节提取提交会
-/// 新建第二行（欠共享）。
-#[test]
-fn stale_identity_after_old_repair_converges_and_reuses_row() {
-    let tmp = TempDb::new("contents_stale_identity_reuse");
-    let conn = tmp.open();
-    let f = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = seed_feed(&conn, f, "https://a.example/rss", "A");
-
-    let (aid, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>甲 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let stale_id =
-        install_old_repaired_row(&conn, aid, "<p>旧修复态正文</p>", "旧 RSS 错配正文", &[aid]);
-    let (identity_before, body_before, rev_before): (String, String, i64) = conn
-        .query_row(
-            "SELECT identity, body_text, revision FROM contents WHERE id = ?1",
-            [stale_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        body_before,
-        app_lib::sanitize::html_to_text("<p>旧修复态正文</p>"),
-        "夹具：body 必须是旧实现已修好的同源文本"
-    );
-
-    // 再次触达修复路径（受保护行的 RSS 刷新）。
-    db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>短 RSS</p>"),
-        false,
-    )
-    .unwrap();
-
-    let fixed_id = content_id_of(&conn, aid).unwrap();
-    assert_eq!(fixed_id, stale_id, "无等价行：就地收敛，不新建/不重指");
-    let (identity_after, body_after, rev_after): (String, String, i64) = conn
-        .query_row(
-            "SELECT identity, body_text, revision FROM contents WHERE id = ?1",
-            [stale_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_ne!(
-        identity_after, identity_before,
-        "旧实现修复态的 identity 必须在再次触达时收敛到新字节"
-    );
-    assert_eq!(body_after, body_before, "身份收敛不得改 body");
-    assert_eq!(
-        rev_after, rev_before,
-        "字节未变：身份收敛不得 bump revision"
-    );
-
-    // 同字节 ensure_content 必须命中收敛后的身份。
-    let (aid2, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g2", "https://a.example/p2", "乙", "<p>乙 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let (token, _) = db::article_content_commit_token(&conn, aid2)
-        .unwrap()
-        .unwrap();
-    let (reused_id, reused_rev) =
-        db::replace_article_content_checked(&conn, aid2, &token, "<p>旧修复态正文</p>")
-            .unwrap()
-            .unwrap();
-    assert_eq!(
-        reused_id, stale_id,
-        "收敛后同字节 ensure_content 必须复用该行（修前：新建第二行）"
-    );
-    assert_eq!(reused_rev, rev_after, "复用不改 revision");
-}
-
-/// OPT-008C 返工 P2（合并支）：存量旧修复态行的 expected 身份已存在等价行时，
-/// 必须合并——全部引用重指目标、目标 revision+1、原行删除。
-///
-/// 修前（早退只看 body）此用例红于引用仍指向陈旧行。
-#[test]
-fn stale_identity_merges_into_equivalent_row() {
-    let tmp = TempDb::new("contents_stale_identity_merge");
-    let conn = tmp.open();
-    let f = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = seed_feed(&conn, f, "https://a.example/rss", "A");
-
-    // 等价目标行：合法 readability 行（同 source + 同 HTML + 同 body）。
-    let (control_aid, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("ctrl", "https://a.example/ctrl", "控制", "<p>控制 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let (token, _) = db::article_content_commit_token(&conn, control_aid)
-        .unwrap()
-        .unwrap();
-    let (target_id, target_rev_before) =
-        db::replace_article_content_checked(&conn, control_aid, &token, "<p>存量正文</p>")
-            .unwrap()
-            .unwrap();
-
-    let (aid1, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>甲 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let (aid2, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g2", "https://a.example/p2", "乙", "<p>乙 RSS</p>"),
-        false,
-    )
-    .unwrap();
-    let stale_id = install_old_repaired_row(
-        &conn,
-        aid1,
-        "<p>存量正文</p>",
-        "旧 RSS 错配正文",
-        &[aid1, aid2],
-    );
-    assert_ne!(stale_id, target_id, "夹具：陈旧行与等价目标必须是两行");
-
-    // 触发第一条目的修复路径 → 应合并（全部引用重指）。
-    db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article("g1", "https://a.example/p1", "甲", "<p>短 RSS</p>"),
-        false,
-    )
-    .unwrap();
-
-    assert_eq!(
-        content_id_of(&conn, aid1),
-        Some(target_id),
-        "陈旧行必须合并到等价目标"
-    );
-    assert_eq!(
-        content_id_of(&conn, aid2),
-        Some(target_id),
-        "共享陈旧行的其他引用也必须重指"
-    );
-    let stale_exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM contents WHERE id = ?1",
-            [stale_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(stale_exists, 0, "合并后陈旧行必须删除");
-    let target_rev_after: i64 = conn
-        .query_row(
-            "SELECT revision FROM contents WHERE id = ?1",
-            [target_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(
-        target_rev_after > target_rev_before,
-        "合并必须递增目标 revision：{target_rev_before} -> {target_rev_after}"
-    );
-    let equivalent_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM contents
-             WHERE extraction_source = 'readability' AND content_html = '<p>存量正文</p>'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(equivalent_rows, 1, "同等价内容只允许一行");
-}
-
-/// OPT-008C tidy P3-1：非规范身份（私有 `e|<article_id>` / 加盐
-/// `h|...|c<n>`）即使 body 已同源，也不得被存量身份收敛误改——
-/// identity、body_text、revision、content_id 全部保持不变。
-#[test]
-fn non_canonical_identity_rows_are_left_untouched() {
-    let tmp = TempDb::new("contents_noncanonical_identity");
-    let conn = tmp.open();
-    let f = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = seed_feed(&conn, f, "https://a.example/rss", "A");
-
-    let (private_aid, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article(
-            "g-private",
-            "https://a.example/private",
-            "私有",
-            "<p>私有 RSS</p>",
-        ),
-        false,
-    )
-    .unwrap();
-    let (salted_aid, _) = db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article(
-            "g-salted",
-            "https://a.example/salted",
-            "加盐",
-            "<p>加盐 RSS</p>",
-        ),
-        false,
-    )
-    .unwrap();
-
-    // 私有身份行：e|<article_id>，body 已与 HTML 同源。
-    let private_html = "<p>私有身份正文</p>";
-    let private_body = app_lib::sanitize::html_to_text(private_html);
-    let private_identity = format!("e|{private_aid}");
-    conn.execute(
-        "INSERT INTO contents
-            (identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
-         VALUES (?1, NULL, ?2, ?3, 'readability', 1)",
-        params![private_identity, private_html, private_body],
-    )
-    .unwrap();
-    let private_cid = conn.last_insert_rowid();
-    conn.execute(
-        "UPDATE articles SET content_id = ?1 WHERE id = ?2",
-        params![private_cid, private_aid],
-    )
-    .unwrap();
-
-    // 加盐身份行：h|<hash>|<len>|<len>|c<n>，body 同样已同源。
-    let salted_html = "<p>加盐身份正文</p>";
-    let salted_body = app_lib::sanitize::html_to_text(salted_html);
-    let salted_identity = format!(
-        "h|{:032x}|{}|{}|c7",
-        salted_aid,
-        salted_html.len(),
-        salted_body.len()
-    );
-    conn.execute(
-        "INSERT INTO contents
-            (identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
-         VALUES (?1, NULL, ?2, ?3, 'readability', 1)",
-        params![salted_identity, salted_html, salted_body],
-    )
-    .unwrap();
-    let salted_cid = conn.last_insert_rowid();
-    conn.execute(
-        "UPDATE articles SET content_id = ?1 WHERE id = ?2",
-        params![salted_cid, salted_aid],
-    )
-    .unwrap();
-
-    let snapshot = |cid: i64| -> (String, String, i64) {
         conn.query_row(
-            "SELECT identity, body_text, revision FROM contents WHERE id = ?1",
-            [cid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            "SELECT COUNT(*) FROM contents WHERE identity=?1",
+            [&snapshot.0],
+            |r| r.get::<_, i64>(0)
         )
-        .unwrap()
-    };
-    let before_private = snapshot(private_cid);
-    let before_salted = snapshot(salted_cid);
-
-    // 通过真实保护路径触发修复（RSS 刷新命中受保护提取行）。
-    db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article(
-            "g-private",
-            "https://a.example/private",
-            "私有",
-            "<p>短 RSS 一</p>",
-        ),
-        false,
-    )
-    .unwrap();
-    db::upsert_article_with_feed(
-        &conn,
-        feed,
-        &new_article(
-            "g-salted",
-            "https://a.example/salted",
-            "加盐",
-            "<p>短 RSS 二</p>",
-        ),
-        false,
-    )
-    .unwrap();
-
-    assert_eq!(
-        content_id_of(&conn, private_aid),
-        Some(private_cid),
-        "私有身份行不得被重指"
-    );
-    assert_eq!(
-        content_id_of(&conn, salted_aid),
-        Some(salted_cid),
-        "加盐身份行不得被重指"
-    );
-    assert_eq!(
-        snapshot(private_cid),
-        before_private,
-        "私有身份行的 identity/body/revision 必须全部不变"
-    );
-    assert_eq!(
-        snapshot(salted_cid),
-        before_salted,
-        "加盐身份行的 identity/body/revision 必须全部不变"
+        .unwrap(),
+        1
     );
 }
 
+#[test]
+fn current_hash_collision_forks_and_refresh_preserves_salted_identity() {
+    let tmp = TempDb::new("contents_current_collision");
+    let conn = tmp.open();
+    let folder = db::create_folder(&conn, "F", "article").unwrap();
+    let feed = seed_feed(&conn, folder, "https://a.example/rss", "A");
+    let (control, _) = db::upsert_article_with_feed(
+        &conn,
+        feed,
+        &new_article(
+            "control",
+            "https://a.example/control",
+            "Control",
+            "<p>RSS control</p>",
+        ),
+        false,
+    )
+    .unwrap();
+    let (owner, _) = db::upsert_article_with_feed(
+        &conn,
+        feed,
+        &new_article(
+            "owner",
+            "https://a.example/owner",
+            "Owner",
+            "<p>other body</p>",
+        ),
+        false,
+    )
+    .unwrap();
+    let desired = "<p>new extracted body</p>";
+    let canonical = checked_extract(&conn, control, desired).0;
+    let expected_identity = content_snapshot(&conn, canonical).0;
+    conn.execute("DELETE FROM articles WHERE id=?1", [control])
+        .unwrap();
+    let original = content_id_of(&conn, owner).unwrap();
+    // Inject only a lookup-key collision to exercise byte verification. This is
+    // not an old-format migration fixture; neither row may be silently repaired.
+    conn.execute(
+        "UPDATE contents SET identity=?1 WHERE id=?2",
+        params![expected_identity, original],
+    )
+    .unwrap();
+    let original_snapshot = content_snapshot(&conn, original);
+    let (target, _) = db::upsert_article_with_feed(
+        &conn,
+        feed,
+        &new_article(
+            "target",
+            "https://a.example/target",
+            "Target",
+            "<p>RSS target</p>",
+        ),
+        false,
+    )
+    .unwrap();
+    let (salted, revision) = checked_extract(&conn, target, desired);
+    assert_ne!(salted, original);
+    let salted_snapshot = content_snapshot(&conn, salted);
+    assert!(salted_snapshot
+        .0
+        .starts_with(&format!("{expected_identity}|c")));
+    assert_eq!(salted_snapshot.1.as_deref(), Some(desired));
+    db::upsert_article_with_feed(
+        &conn,
+        feed,
+        &new_article(
+            "target",
+            "https://a.example/target",
+            "Target",
+            "<p>RSS update</p>",
+        ),
+        false,
+    )
+    .unwrap();
+    db::backfill_article_content(
+        &conn,
+        target,
+        "<p>backfill</p>",
+        "backfill",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(checked_extract(&conn, target, desired), (salted, revision));
+    assert_eq!(content_snapshot(&conn, original), original_snapshot);
+    assert_eq!(content_snapshot(&conn, salted), salted_snapshot);
+    assert_eq!(content_id_of(&conn, owner), Some(original));
+    assert_eq!(content_id_of(&conn, target), Some(salted));
+}
 /* ============================================================
 三、引用生命周期：删源/删最后引用、搜索索引同步
 ============================================================ */

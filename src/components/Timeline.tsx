@@ -22,7 +22,8 @@ import {
 import { Icons } from './icons';
 import { formatRelativeTime, formatDuration } from '../lib/format';
 import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
-import { proxyImageUrl } from '../lib/imageProxy';
+import { useImageResource } from './useImageResource';
+import { canProxyImages, needsImageProxy } from '../lib/imageProxy';
 import { galleryMediaKey } from '../lib/galleryMedia';
 import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
@@ -1425,9 +1426,9 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
             const target = e.target as HTMLElement;
             if (target.tagName === 'IMG') {
               const src = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
-              if (src && !src.startsWith('data:')) {
+              if (src && /^https?:\/\//.test(src)) {
                 e.preventDefault();
-                openLightbox(src);
+                openLightbox(src, undefined, item.url);
               }
               return;
             }
@@ -1584,33 +1585,20 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
   const pendingGallery = useAppStore((s) => s.lightboxGallery?.entryId === item.id && !s.lightboxUrl
     ? s.lightboxGallery.status : null);
   const mediaKey = galleryMediaKey(item);
-  /* 代理结果绑定源快照；条目修订后首帧也不能复用上一张图的 data URL。 */
-  const [proxied, setProxied] = useState<{ key: string; url: string | null } | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const src = item.imageUrl;
-    if (!src) return;
-    void proxyImageUrl(src, item.url).then((dataUrl) => {
-      if (!alive) return;
-      setProxied({ key: mediaKey, url: dataUrl });
-    });
-    return () => { alive = false; };
-  }, [item.imageUrl, item.url, mediaKey]);
-  const [failure, setFailure] = useState<{ key: string; src: string } | null>(null);
-  const imgSrc = (proxied?.key === mediaKey ? proxied.url : null) ?? item.imageUrl;
-  const imgFailed = failure?.key === mediaKey && failure.src === imgSrc;
+  const busy = useAppStore(s => s.libraryRestoreBusy);
+  const generation = useAppStore(s => s.libraryGeneration);
+  const { lease, snapshot, retry } = useImageResource(item.imageUrl, item.url, !busy, 1, `${generation}:${mediaKey}`);
+  const direct = !item.imageUrl || !canProxyImages() || !needsImageProxy(item.imageUrl);
+  const imgSrc = snapshot.status === 'ready' ? snapshot.src : direct ? item.imageUrl : null;
+  const imgFailed = snapshot.status === 'failed';
   const openImage = (target: HTMLElement) => {
     // 图片失败/换源时触发节点也不卸载；useFocusTrap 归还同一卡片且 preventScroll。
     target.focus({ preventScroll: true });
+    if (imgFailed) retry();
     selectArticle(item.id);
     openGalleryLightbox(item.id);
   };
-  const onImgError = () => {
-    if (imgSrc) {
-      // 首图来自条目 images，可能不同于封面；局部占位不污染封面失败缓存。
-      setFailure({ key: mediaKey, src: imgSrc });
-    }
-  };
+  const onImgError = () => lease?.failDecode();
   const imageCount = item.imageCount ?? (item.imageUrl ? 1 : 0);
   return (
     <div className={`gallery-card ${item.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`} data-ctx="article" data-id={item.id}>
@@ -1644,7 +1632,7 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
           ) : (
             <div className={`gallery-no-image${imgFailed ? ' cover-fallback' : ''}`}
               data-cover-state={imgFailed ? 'failed' : 'empty'}>
-              {pendingGallery === 'loading' ? '加载图片…'
+              {pendingGallery === 'loading' || (!direct && !imgFailed && !imgSrc) ? '加载图片…'
                 : pendingGallery === 'error' ? '图片加载失败，点击重试'
                 : pendingGallery === 'empty' ? '暂无图片，点击重试'
                 : imgFailed ? <span>图片加载失败，点击重试</span> : '无图'}
@@ -2017,3 +2005,5 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
     </div>
   );
 });
+
+

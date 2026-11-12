@@ -307,32 +307,35 @@ fn record_recent_refreshes(
 async fn read_refresh_config(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> (bool, i64, bool, usize) {
-    let conn = db.lock().await;
-    let raw = crate::db::get_setting(&conn, "app_settings").ok().flatten();
-    let mut enabled = true;
-    let mut interval = 30i64;
-    let mut dedup = false;
-    let mut concurrency = DEFAULT_CONCURRENCY;
-    if let Some(json) = raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-    {
-        if let Some(v) = json.get("autoRefresh").and_then(|v| v.as_bool()) {
-            enabled = v;
-        }
-        if let Some(v) = read_refresh_interval(&json) {
-            interval = v;
-        }
-        if let Some(v) = json.get("smartDedup").and_then(|v| v.as_bool()) {
-            dedup = v;
-        }
-        if let Some(v) = json.get("fetchConcurrency").and_then(|v| v.as_i64()) {
-            if (1..=MAX_CONCURRENCY as i64).contains(&v) {
-                concurrency = v as usize;
+    crate::state::database_work(db.clone(), |conn| {
+        let raw = crate::db::get_setting(conn, "app_settings").ok().flatten();
+        let mut enabled = true;
+        let mut interval = 30i64;
+        let mut dedup = false;
+        let mut concurrency = DEFAULT_CONCURRENCY;
+        if let Some(json) = raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        {
+            if let Some(v) = json.get("autoRefresh").and_then(|v| v.as_bool()) {
+                enabled = v;
+            }
+            if let Some(v) = read_refresh_interval(&json) {
+                interval = v;
+            }
+            if let Some(v) = json.get("smartDedup").and_then(|v| v.as_bool()) {
+                dedup = v;
+            }
+            if let Some(v) = json.get("fetchConcurrency").and_then(|v| v.as_i64()) {
+                if (1..=MAX_CONCURRENCY as i64).contains(&v) {
+                    concurrency = v as usize;
+                }
             }
         }
-    }
-    (enabled, interval, dedup, concurrency)
+        Ok((enabled, interval, dedup, concurrency))
+    })
+    .await
+    .unwrap_or((true, 30, false, DEFAULT_CONCURRENCY))
 }
 
 /// refreshInterval 的数值读取单点（OPT-011）：只接受 5–720 的**整数**。
@@ -472,25 +475,26 @@ async fn refresh_feeds_inner_with_concurrency(
     use tokio::sync::Semaphore;
     let runtime = crate::sync::runtime::for_db(db);
     runtime.ensure_running()?;
-    let selected: Vec<crate::db::FeedRefreshCandidate> = {
-        let conn = db.lock().await;
-        match due_filter {
-            // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
-            Some(interval_min) => {
-                let include_remote = read_sync_mode_conn(&conn) != "hybrid";
-                crate::db::feeds_due_for_refresh_candidates(&conn, interval_min, include_remote)
+    let selected: Vec<crate::db::FeedRefreshCandidate> =
+        crate::state::database_work(db.clone(), move |conn| {
+            match due_filter {
+                // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
+                Some(interval_min) => {
+                    let include_remote = read_sync_mode_conn(conn) != "hybrid";
+                    crate::db::feeds_due_for_refresh_candidates(conn, interval_min, include_remote)
+                }
+                // 手动/托盘全量：hybrid（跟随服务端）排除 origin='remote'，保留
+                // local 及其它非 remote 来源——服务端源内容由后端同步提供，直连抓取
+                // 会产生 source='direct' 文章与已有 remote 文章重复（guid 不同 +
+                // 智能去重默认关），导致文章翻倍、状态错乱、未读数对不齐。
+                // direct 模式则全部直连（旧行为）。
+                None => {
+                    let include_remote = read_sync_mode_conn(conn) != "hybrid";
+                    crate::db::feeds_all_candidates(conn, include_remote)
+                }
             }
-            // 手动/托盘全量：hybrid（跟随服务端）排除 origin='remote'，保留
-            // local 及其它非 remote 来源——服务端源内容由后端同步提供，直连抓取
-            // 会产生 source='direct' 文章与已有 remote 文章重复（guid 不同 +
-            // 智能去重默认关），导致文章翻倍、状态错乱、未读数对不齐。
-            // direct 模式则全部直连（旧行为）。
-            None => {
-                let include_remote = read_sync_mode_conn(&conn) != "hybrid";
-                crate::db::feeds_all_candidates(&conn, include_remote)
-            }
-        }?
-    };
+        })
+        .await?;
     // 手动/托盘是用户的显式刷新请求，必须绕过短期 footprint；调度 due 批才是
     // 自动去重入口。并发 manual 仍由 full-refresh flight 复用同一结果。
     let selected = if force {
@@ -584,10 +588,10 @@ pub fn spawn_scheduler(app: AppHandle) {
         let runtime = crate::sync::runtime::for_db(&db);
         // Recover durable intent once at startup. Periodic polls must not keep
         // waking the mailbox and bypassing its exponential failure backoff.
-        let pending = {
-            let conn = db.lock().await;
-            crate::db::sync_queue_stats(&conn).map(|stats| stats.waiting > 0)
-        };
+        let pending = crate::state::database_work(db.clone(), |conn| {
+            crate::db::sync_queue_stats(conn).map(|stats| stats.waiting > 0)
+        })
+        .await;
         match pending {
             Ok(true) => crate::commands::schedule_state_push_for_db(&db, &http),
             Ok(false) => {}
@@ -628,21 +632,21 @@ pub fn spawn_scheduler(app: AppHandle) {
             _ = runtime.wait_for_stop() => return,
             _ = tokio::time::sleep(Duration::from_secs(8)) => {},
         }
+        let mut retention_cursor = crate::db::body_retention::RetentionCursor::default();
         loop {
             if runtime.is_stopped() {
                 return;
             }
             let (enabled, _interval, _dedup, _concurrency) = read_refresh_config(&db).await;
+            let mut changed = false;
+            let mut new_articles = 0;
+            let mut failed_feeds = 0;
             if enabled {
                 match refresh_due_feeds(&db, &http).await {
                     Ok(report) if report.data_changed || report.failed_feeds > 0 => {
-                        let _ = app.emit(
-                            "feeds-updated",
-                            serde_json::json!({
-                                "new_articles": report.new_articles,
-                                "failed_feeds": report.failed_feeds
-                            }),
-                        );
+                        changed = true;
+                        new_articles = report.new_articles;
+                        failed_feeds = report.failed_feeds;
                         // 新文章系统通知（notifyOnNewArticles 开关，默认关；
                         // 窗口隐藏/失焦时才发——正在看应用时不打扰）
                         if report.new_articles > 0 && should_notify(&db, &app).await {
@@ -658,6 +662,36 @@ pub fn spawn_scheduler(app: AppHandle) {
                         }));
                     }
                 }
+            }
+
+            // Local maintenance shares this minute loop but is independent of
+            // autoRefresh. Foreground or SQLite writer contention skips a tick.
+            let mut next_cursor = retention_cursor.clone();
+            match crate::state::try_database_work(db.clone(), move |conn| {
+                let report = crate::db::body_retention::retire_read_bodies_slice(
+                    conn,
+                    chrono::Utc::now().timestamp(),
+                    &mut next_cursor,
+                )?;
+                Ok((report, next_cursor))
+            })
+            .await
+            {
+                Ok(Some((report, next_cursor))) => {
+                    retention_cursor = next_cursor;
+                    changed |= report.released > 0;
+                }
+                Ok(None) => {}
+                Err(error) => log::debug!("scheduler: 正文保留维护本轮跳过: {error}"),
+            }
+            if changed {
+                let _ = app.emit(
+                    "feeds-updated",
+                    serde_json::json!({
+                        "new_articles": new_articles,
+                        "failed_feeds": failed_feeds
+                    }),
+                );
             }
 
             tokio::select! {
@@ -681,22 +715,24 @@ async fn auto_sync_backend(
 async fn state_sync_enabled(
     db: &Arc<tokio::sync::Mutex<Connection>>,
 ) -> crate::error::AppResult<bool> {
-    let conn = db.lock().await;
-    let settings = crate::db::get_setting(&conn, "app_settings")?
-        .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
-        .transpose()?;
-    if settings
-        .as_ref()
-        .and_then(|value| value.get("autoSync"))
-        .and_then(serde_json::Value::as_bool)
-        == Some(false)
-    {
-        return Ok(false);
-    }
-    if crate::sync::current_account(&conn)?.is_none() {
-        return Ok(false);
-    }
-    crate::db::has_remote_feed_binding(&conn)
+    crate::state::database_work(db.clone(), move |conn| {
+        let settings = crate::db::get_setting(conn, "app_settings")?
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()?;
+        if settings
+            .as_ref()
+            .and_then(|value| value.get("autoSync"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            return Ok(false);
+        }
+        if crate::sync::current_account(conn)?.is_none() {
+            return Ok(false);
+        }
+        crate::db::has_remote_feed_binding(conn)
+    })
+    .await
 }
 
 /// No content cursor, subscription discovery or outbox is a prerequisite for a
@@ -739,9 +775,8 @@ async fn backend_sync_plan(
     focus: bool,
 ) -> crate::error::AppResult<Option<BackendSyncPlan>> {
     let now = chrono::Utc::now().timestamp();
-    let (on, interval_min, connected, last_sync, has_binding, discovery_due, outbox_pending) = {
-        let conn = db.lock().await;
-        let settings = crate::db::get_setting(&conn, "app_settings")?
+    let snapshot = crate::state::database_work(db.clone(), move |conn| {
+        let settings = crate::db::get_setting(conn, "app_settings")?
             .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
             .transpose()?;
         let on = settings
@@ -759,27 +794,27 @@ async fn backend_sync_plan(
             .as_ref()
             .and_then(read_refresh_interval)
             .unwrap_or(30);
-        let (connected, account_key) = match crate::sync::current_account(&conn)? {
+        let (connected, account_key) = match crate::sync::current_account(conn)? {
             Some(ctx) => (true, Some(ctx.key)),
             None => (false, None),
         };
         if !connected {
             return Ok(None);
         }
-        let last = crate::db::last_sync_ts(&conn)?;
-        let has_binding = crate::db::has_remote_feed_binding(&conn)?;
+        let last = crate::db::last_sync_ts(conn)?;
+        let has_binding = crate::db::has_remote_feed_binding(conn)?;
         let discovery_due = match account_key.as_deref() {
-            Some(key) => crate::db::zero_binding_discovery_due(&conn, key, now)?,
+            Some(key) => crate::db::zero_binding_discovery_due(conn, key, now)?,
             None => false,
         };
         // A-P2-2：订阅 outbox 是否有待推行（本地查询，零网络成本）。有 pending
         // 才值得构建会话执行写回；无 pending 不发任何请求，后台同步保持便宜。
         // key 屏障与执行器一致；读取失败由活动终态呈现，不把未知当无待办。
         let outbox_pending = match account_key.as_deref() {
-            Some(key) => crate::db::outbox_has_pending(&conn, key)?,
+            Some(key) => crate::db::outbox_has_pending(conn, key)?,
             None => false,
         };
-        (
+        Ok(Some((
             on,
             interval,
             connected,
@@ -787,7 +822,13 @@ async fn backend_sync_plan(
             has_binding,
             discovery_due,
             outbox_pending,
-        )
+        )))
+    })
+    .await?;
+    let Some((on, interval_min, connected, last_sync, has_binding, discovery_due, outbox_pending)) =
+        snapshot
+    else {
+        return Ok(None);
     };
     if !on || !connected {
         return Ok(None);
@@ -968,11 +1009,16 @@ async fn should_notify(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     app: &AppHandle,
 ) -> bool {
-    let on = {
-        let conn = db.lock().await;
+    let on = crate::state::database_work(db.clone(), |conn| {
         /* TASK-069：notifyOnNewArticles 布尔读取收口为类型化助手（默认值语义不变） */
-        crate::db::app_settings_bool(&conn, "notifyOnNewArticles", false)
-    };
+        Ok(crate::db::app_settings_bool(
+            conn,
+            "notifyOnNewArticles",
+            false,
+        ))
+    })
+    .await
+    .unwrap_or(false);
     if !on {
         return false;
     }
@@ -1285,16 +1331,16 @@ pub async fn cover_backfill_round(
     }
     // 目标按URL分组，同轮同URL只请求一次；窗外/后新增同URL候选在后续扫描中
     // 复用已缓存的成功图，不为了填全部同URL条目做额外全库扫描。
-    let targets: Vec<(String, Vec<i64>)> = {
-        let conn = db.lock().await;
-        let mut state = state.lock().await;
+    let scan_state = state.clone();
+    let targets = crate::state::database_work(db.clone(), move |conn| {
+        let mut state = scan_state.blocking_lock();
         let mut picked: Vec<(String, Vec<i64>)> = Vec::new();
         let mut picked_urls: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         // 从上次游标继续；读到空页 = 到达候选集末尾 → 回绕。
         let mut offset = state.scan_offset;
         for _ in 0..COVER_BACKFILL_SCAN_PAGES {
-            let page = match crate::db::articles_without_cover(&conn, COVER_BACKFILL_BATCH, offset)
+            let page = match crate::db::articles_without_cover(conn, COVER_BACKFILL_BATCH, offset)
             {
                 Ok(page) => page,
                 Err(e) => {
@@ -1337,7 +1383,14 @@ pub async fn cover_backfill_round(
         }
         // 游标按已扫描行数写回（负缓存命中 / 重复 URL / 批次已满都算扫描过）。
         state.scan_offset = offset;
-        picked
+        Ok(picked)
+    }).await;
+    let targets = match targets {
+        Ok(targets) => targets,
+        Err(error) => {
+            log::warn!("scheduler: 封面补全候选数据库工作失败，本轮跳过: {error}");
+            return 0;
+        }
     };
     if targets.is_empty() {
         return 0;
@@ -1491,12 +1544,17 @@ async fn fill_cover(
     url: &str,
     image: &str,
 ) -> CoverAttempt {
-    let conn = db.lock().await;
-    let mut cache = state.lock().await;
-    if cache.attempts().contains(url) && cache.attempts().image(url).is_none() {
+    let state = state.clone();
+    let aids = aids.to_owned();
+    let url = url.to_owned();
+    let image = image.to_owned();
+    match crate::state::database_work(db.clone(), move |conn| {
+    let mut cache = state.blocking_lock();
+    if cache.attempts().contains(&url) && cache.attempts().image(&url).is_none() {
         // 请求在途期间失败上报已清掉该图；不能把刚失败的结果重新填回。
-        return CoverAttempt::Cancelled;
+        return Ok(CoverAttempt::Cancelled);
     }
+    let _writer = crate::db::writer_guard(conn)?;
     let mut filled = 0;
     for aid in aids {
         match conn.execute(
@@ -1507,14 +1565,21 @@ async fn fill_cover(
             Err(e) => {
                 // 写失败不得压成 0 后把 URL 当作已处理：不记负缓存，下轮重试。
                 log::error!("scheduler: 封面补全写库失败（不记已尝试，下轮重试）{url}: {e}");
-                return CoverAttempt::DbWriteFailed;
+                return Ok(CoverAttempt::DbWriteFailed);
             }
         }
     }
     cache
         .attempts_mut()
         .remember(url.to_string(), CachedCover::Image(image.to_string()));
-    CoverAttempt::Filled(filled)
+    Ok(CoverAttempt::Filled(filled))
+    }).await {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!("scheduler: 封面补全数据库工作失败（下轮重试）: {error}");
+            CoverAttempt::DbWriteFailed
+        }
+    }
 }
 
 /* ============================================================

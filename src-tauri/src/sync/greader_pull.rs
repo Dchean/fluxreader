@@ -48,7 +48,6 @@ enum ContentFetch {
 /// 内按串行版原样完成，这里只表达「继续 / 代际失配终止 / 重建失败终止」）。
 enum ChunkMerge {
     Continue,
-    Stale,
     Abort,
 }
 
@@ -110,14 +109,14 @@ async fn fetch_chunk_batch(
 async fn merge_content_chunk(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
-    entries: &[greader::ItemContent],
+    entries: Vec<greader::ItemContent>,
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
     chunk_failures: &mut usize,
     binding_failures: &mut usize,
-) -> ChunkMerge {
+) -> AppResult<ChunkMerge> {
     let mut unbound_feeds = BTreeSet::new();
-    for e in entries {
+    for e in &entries {
         if let Some(feed_id) = entry_unbound_feed(e, maps) {
             unbound_feeds.insert(feed_id);
         }
@@ -133,25 +132,30 @@ async fn merge_content_chunk(
     // R2：entries 的合并链路 Result 化——DB 写失败不得吞。本块中途失败即计数
     // （时间戳游标不推进，下一轮重拉同一窗口），已处理条目留库（GR 无页事务，
     // 细粒度恢复仍归 OPT-007）。错误信息带条目 URL（TASK-056 可定位性契约）。
-    let mut merge_error: Option<(String, AppError)> = None;
-    {
-        let conn = db.lock().await;
-        // OPT-006：合并是回写边界——响应在途期间换号则整块丢弃。
-        if session.ensure_current(&conn).is_err() {
-            return ChunkMerge::Stale;
-        }
-        for e in entries {
-            if let Err(err) = merge_pulled_entry(&conn, e, maps, report) {
-                let url = e
-                    .alternate
-                    .first()
-                    .map(|a| a.href.clone())
-                    .unwrap_or_default();
-                merge_error = Some((url, err));
-                break;
+    let generation = session.generation;
+    let merge_error =
+        pull_database_work(db, generation, maps, report, move |conn, maps, report| {
+            let mut merge_error: Option<(String, AppError)> = None;
+            // OPT-006：合并是回写边界——响应在途期间换号则整块丢弃。
+            for e in &entries {
+                let _writer = db::writer_guard(conn)?;
+                SyncSession::ensure_generation(conn, generation)?;
+                if let Err(err) = merge_pulled_entry(conn, e, maps, report) {
+                    if err.code == "staleSession" {
+                        return Err(err);
+                    }
+                    let url = e
+                        .alternate
+                        .first()
+                        .map(|a| a.href.clone())
+                        .unwrap_or_default();
+                    merge_error = Some((url, err));
+                    break;
+                }
             }
-        }
-    }
+            Ok(merge_error)
+        })
+        .await??;
     if let Some((url, err)) = merge_error {
         *chunk_failures += 1;
         report
@@ -164,24 +168,25 @@ async fn merge_content_chunk(
         // 字段版本快照经 keep_field_versions_from **保持轮内原值**：重建
         // 不回刷版本，否则「pull 起点 ~ 重建点」的本地写入会被洗成「起点
         // 无变化」，后续块的旧远端状态即可回滚用户意图。
-        let conn = db.lock().await;
-        if session.ensure_current(&conn).is_err() {
-            return ChunkMerge::Stale;
-        }
-        match db::sync_match_maps(&conn) {
+        let rebuilt = crate::state::database_work(db.clone(), move |conn| {
+            SyncSession::ensure_generation(conn, generation)?;
+            Ok(db::sync_match_maps(conn))
+        })
+        .await?;
+        match rebuilt {
             Ok(mut m) => {
                 m.keep_field_versions_from(maps);
                 *maps = m;
             }
             Err(e) => {
-                report.errors.push(format!(
-                    "合并失败后重建匹配映射失败（本轮终止，游标保留）: {e}"
-                ));
-                return ChunkMerge::Abort;
+                record_pull_apply_failure(e, report, |e| {
+                    format!("合并失败后重建匹配映射失败（本轮终止，游标保留）: {e}")
+                })?;
+                return Ok(ChunkMerge::Abort);
             }
         }
     }
-    ChunkMerge::Continue
+    Ok(ChunkMerge::Continue)
 }
 
 /// greader pull 的「现在」（unix 秒）：未注入时即系统墙钟。
@@ -218,18 +223,16 @@ pub(super) async fn pull_entries_greader(
     full: bool,
     versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
-    {
-        let conn = db.lock().await;
-        if !pull_admitted(&conn, session, report)? {
-            return Ok(());
-        }
+    let generation = session.generation;
+    if !pull_admitted(db, session, report).await? {
+        return Ok(());
     }
 
-    let since_s = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        db::last_sync_ts(&conn)?
-    };
+    let since_s = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        db::last_sync_ts(conn)
+    })
+    .await?;
 
     // OPT-007 字段版本快照：必须在**任何 HTTP 请求之前**抓取（任务卡「版号快照在
     // HTTP 前抓」）。快照是「pull 起点该字段无本地写入」的判据；若晚抓（如放在
@@ -240,15 +243,18 @@ pub(super) async fn pull_entries_greader(
     // 构建失败**不得退化成空映射继续**——空 feed 映射会让 merge 全部「合法跳过」，
     // 而 chunk_failures 保持 0、游标照常推进，整个窗口被静默跳过（与 Fever R3-P1
     // 同口径；错误可见 + 游标保留，下一轮重拉同一窗口）。
+    let snapshot = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(db::sync_match_maps(conn))
+    })
+    .await?;
     let mut maps = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::sync_match_maps(&conn) {
+        match snapshot {
             Ok(m) => m,
             Err(e) => {
-                report.errors.push(format!(
-                    "同步匹配映射构建失败，本轮不合并条目（游标保留）: {e}"
-                ));
+                record_pull_apply_failure(e, report, |e| {
+                    format!("同步匹配映射构建失败，本轮不合并条目（游标保留）: {e}")
+                })?;
                 return Ok(());
             }
         }
@@ -396,19 +402,15 @@ pub(super) async fn pull_entries_greader(
                     match merge_content_chunk(
                         db,
                         session,
-                        &entries,
+                        entries,
                         &mut maps,
                         report,
                         &mut chunk_failures,
                         &mut binding_failures,
                     )
-                    .await
+                    .await?
                     {
                         ChunkMerge::Continue => {}
-                        ChunkMerge::Stale => {
-                            stale = true;
-                            batch_abort = true;
-                        }
                         // 重建映射失败：本轮终止（游标已因 chunk_failures 保留）。
                         ChunkMerge::Abort => batch_abort = true,
                     }
@@ -497,13 +499,14 @@ pub(super) async fn pull_entries_greader(
         + authority_cursor_failures
         + usize::from(report.binding_incomplete);
     if failures == 0 && !report.states_incomplete {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
+        crate::state::database_work(db.clone(), move |conn| {
+            SyncSession::ensure_generation(conn, generation)
+        })
+        .await?;
         // 审计（2026-11-01）：写失败此前静默吞掉——窗口已拿全却没留下游标痕迹，
         // 用户与日志都无从区分「推进成功」与「写入失败」。改为 warn + report
         // 可见；游标不前进的语义不变（本轮没写上，下一轮窗口起点不变）。
         report.content_cursor_candidate = Some(cursor_candidate);
-        drop(conn);
     } else {
         log::warn!(
             "greader pull: {id_failures} id-listing + {chunk_failures} chunk + {binding_failures} binding failure(s); keeping last_sync_ts（下一轮重拉同一窗口）"
@@ -568,13 +571,15 @@ pub(super) async fn pull_states_greader(
     report: &mut SyncReport,
     versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
-    let mut maps = {
-        let conn = db.lock().await;
-        if !pull_admitted(&conn, session, report)? {
-            return Ok(());
-        }
-        db::sync_match_maps(&conn)?
-    };
+    let generation = session.generation;
+    if !pull_admitted(db, session, report).await? {
+        return Ok(());
+    }
+    let mut maps = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        db::sync_match_maps(conn)
+    })
+    .await?;
     if let Some(versions) = versions {
         maps.keep_field_versions_from(versions);
         maps.pending_read_ids.extend(&versions.pending_read_ids);
@@ -585,33 +590,51 @@ pub(super) async fn pull_states_greader(
     }
     let previous = report.authority_snapshot.clone();
     let authority = load_greader_authority(client, previous.as_deref(), report).await;
+    let generation = session.generation;
     let curr_unread = authority.unread.as_ref();
     let starred_for_reconcile = authority.starred.as_ref();
-    {
-        let conn = db.lock().await;
-        if !pull_admitted(&conn, session, report)? {
-            return Ok(());
-        }
-        collect_unverified_state_ids(&conn, &maps, &authority, report)?;
+    let checked_authority = authority.clone();
+    let admitted = pull_database_work(
+        db,
+        generation,
+        &mut maps,
+        report,
+        move |conn, maps, report| {
+            if !pull_admitted_generation(conn, generation, report)? {
+                return Ok(false);
+            }
+            collect_unverified_state_ids(conn, maps, &checked_authority, report)?;
+            Ok(true)
+        },
+    )
+    .await??;
+    if !admitted {
+        return Ok(());
     }
     // Complete collection only; missing identities are left to the content lane.
     if let Some(curr_unread_ids) = curr_unread {
-        let unread_apply_result = {
-            let conn = db.lock().await;
-            if !pull_admitted(&conn, session, report)? {
-                return Ok(());
-            }
-            (|| -> AppResult<()> {
-                for remote_id in curr_unread_ids {
+        let ids = curr_unread_ids.clone();
+        let unread_apply_result = pull_database_work(
+            db,
+            generation,
+            &mut maps,
+            report,
+            move |conn, maps, report| {
+                if !pull_admitted_generation(conn, generation, report)? {
+                    return Ok(false);
+                }
+                for remote_id in &ids {
+                    let _writer = db::writer_guard(conn)?;
+                    SyncSession::ensure_generation(conn, generation)?;
                     let Some(&aid) = maps.mf_id_to_article.get(remote_id) else {
                         continue;
                     };
-                    if !maps.state_binding_is_current(&conn, aid, *remote_id)? {
+                    if !maps.state_binding_is_current(conn, aid, *remote_id)? {
                         continue;
                     }
                     let version = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0)).0;
                     let rows = conflict_policy::apply_read_by_policy(
-                        &conn,
+                        conn,
                         conflict_policy::GR_READ_DIRECTION,
                         false,
                         aid,
@@ -621,45 +644,75 @@ pub(super) async fn pull_states_greader(
                     report.entries_data_changed |= rows > 0;
                     report.merged_states += rows;
                 }
-                Ok(())
-            })()
-        };
-        if let Err(e) = unread_apply_result {
-            report.errors.push(format!(
-                "unread 状态对账中断：本地写入失败（{e}），下一轮重放"
-            ));
-        }
-        let candidates =
-            collect_unread_diff_candidates(db, session, curr_unread_ids, &maps).await?;
-        let confirmed = probe_unread_diff_candidates(client, &candidates, report).await;
-        if !confirmed.is_empty() {
-            let conn = db.lock().await;
-            // OPT-006：差分落地是回写边界——代际失配丢弃整份确认集。
-            if !pull_admitted(&conn, session, report)? {
-                return Ok(());
-            }
-            if let Err(e) = apply_unread_diff_marks(&conn, &confirmed, &candidates, &maps, report) {
-                report.errors.push(format!(
-                    "read 差分落地中断：本地写入失败（{e}），下一轮重放"
-                ));
-            }
-            drop(conn);
-        }
-    }
-    if starred_for_reconcile.is_some() {
-        let conn = db.lock().await;
-        // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
-        if !pull_admitted(&conn, session, report)? {
+                Ok(true)
+            },
+        )
+        .await?;
+        if matches!(unread_apply_result, Ok(false)) {
             return Ok(());
         }
-        if let Some(ids) = starred_for_reconcile {
-            if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
-                report.errors.push(format!(
-                    "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
-                ));
+        if let Err(error) = unread_apply_result {
+            record_pull_apply_failure(error, report, |error| {
+                format!("unread 状态对账中断：本地写入失败（{error}），下一轮重放")
+            })?;
+        }
+        let candidates =
+            collect_unread_diff_candidates(db, session, curr_unread_ids, &mut maps, report).await?;
+        let confirmed = probe_unread_diff_candidates(client, &candidates, report).await;
+        if !confirmed.is_empty() {
+            let applied = pull_database_work(
+                db,
+                generation,
+                &mut maps,
+                report,
+                move |conn, maps, report| {
+                    // OPT-006：差分落地是回写边界——代际失配丢弃整份确认集。
+                    if !pull_admitted_generation(conn, generation, report)? {
+                        return Ok(false);
+                    }
+                    if let Err(error) = apply_unread_diff_marks(
+                        conn,
+                        generation,
+                        &confirmed,
+                        &candidates,
+                        maps,
+                        report,
+                    ) {
+                        record_pull_apply_failure(error, report, |error| {
+                            format!("read 差分落地中断：本地写入失败（{error}），下一轮重放")
+                        })?;
+                    }
+                    Ok(true)
+                },
+            )
+            .await??;
+            if !applied {
+                return Ok(());
             }
         }
-        drop(conn);
+    }
+    if let Some(ids) = starred_for_reconcile.cloned() {
+        pull_database_work(
+            db,
+            generation,
+            &mut maps,
+            report,
+            move |conn, maps, report| {
+                // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
+                if !pull_admitted_generation(conn, generation, report)? {
+                    return Ok(());
+                }
+                if let Err(error) =
+                    reconcile_reader_state_at(conn, generation, None, Some(&ids), maps, report)
+                {
+                    record_pull_apply_failure(error, report, |error| {
+                        format!("starred 状态对账中断：本地写入失败（{error}），下一轮重放")
+                    })?;
+                }
+                Ok(())
+            },
+        )
+        .await??;
     }
     Ok(())
 }
@@ -683,28 +736,33 @@ async fn backfill_authority_collection(
     report: &mut SyncReport,
 ) -> AppResult<bool> {
     let progress_key = format!("greader_backfill_{collection}");
-    let (mut needed_ids, previous_id) = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        let with_body: HashSet<i64> = db::remote_ids_with_body(&conn, ids)?.into_iter().collect();
-        let needed: BTreeSet<i64> = ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                if collection == "origin" {
-                    !maps.verified_remote_ids.contains(id)
-                        && !report.content_requested_ids.contains(id)
-                } else {
-                    !with_body.contains(id)
-                }
-            })
-            .collect();
-        let previous = db::get_setting(&conn, &progress_key)?
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .filter(|value| value["generation"].as_i64() == Some(session.generation))
-            .and_then(|value| value["last_id"].as_i64());
-        (needed.into_iter().collect::<Vec<_>>(), previous)
-    };
+    let checked_ids = ids.to_vec();
+    let checked_key = progress_key.clone();
+    let generation = session.generation;
+    let (mut needed_ids, previous_id) =
+        pull_database_work(db, generation, maps, report, move |conn, maps, report| {
+            let ids = &checked_ids;
+            let with_body: HashSet<i64> =
+                db::remote_ids_with_body(conn, ids)?.into_iter().collect();
+            let needed: BTreeSet<i64> = ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    if collection == "origin" {
+                        !maps.verified_remote_ids.contains(id)
+                            && !report.content_requested_ids.contains(id)
+                    } else {
+                        !with_body.contains(id)
+                    }
+                })
+                .collect();
+            let previous = db::get_setting(conn, &checked_key)?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .filter(|value| value["generation"].as_i64() == Some(generation))
+                .and_then(|value| value["last_id"].as_i64());
+            Ok((needed.into_iter().collect::<Vec<_>>(), previous))
+        })
+        .await??;
     if needed_ids.is_empty() {
         return Ok(true);
     }
@@ -774,43 +832,53 @@ async fn backfill_authority_collection(
                     unbound_feeds
                 ));
             }
-            let mut merge_error: Option<AppError> = None;
-            {
-                let conn = db.lock().await;
-                // OPT-006：合并是回写边界——响应在途期间换号则本块丢弃。
-                if session.ensure_current(&conn).is_err() {
-                    return Err(SyncSession::stale_error());
-                }
-                for e in &entries {
-                    if let Err(err) = merge_pulled_entry(&conn, e, maps, report) {
-                        merge_error = Some(err);
-                        break;
+            let generation = session.generation;
+            let merge_error =
+                pull_database_work(db, generation, maps, report, move |conn, maps, report| {
+                    let mut merge_error: Option<AppError> = None;
+                    // OPT-006：合并是回写边界——响应在途期间换号则本块丢弃。
+                    for e in &entries {
+                        let _writer = db::writer_guard(conn)?;
+                        SyncSession::ensure_generation(conn, generation)?;
+                        if let Err(err) = merge_pulled_entry(conn, e, maps, report) {
+                            if err.code == "staleSession" {
+                                return Err(err);
+                            }
+                            merge_error = Some(err);
+                            break;
+                        }
                     }
-                }
-            }
+                    Ok(merge_error)
+                })
+                .await??;
             if let Some(err) = merge_error {
                 // GR 逐语句提交：maps 的每次突变都对应已提交的 DB 写；失败条目
                 // 之后的条目未处理——本侧立即停止（不继续消耗预算），按软失败
                 // 跳过该侧对账，游标保留，下一轮重拉同一集合续补。
-                report.errors.push(format!(
-                    "GR {collection} 集合回复合并失败，该侧本轮跳过对账（游标保留）: {err}"
-                ));
+                record_pull_apply_failure(err, report, |err| {
+                    format!("GR {collection} 集合回复合并失败，该侧本轮跳过对账（游标保留）: {err}")
+                })?;
                 return Ok(false);
             }
         }
     }
-    let conn = db.lock().await;
-    session.ensure_current(&conn)?;
-    db::set_setting(
-        &conn,
-        &progress_key,
-        &serde_json::json!({
-            "generation": session.generation,
-            "last_id": needed_ids[budget - 1],
-        })
-        .to_string(),
-    )?;
-    Ok(true)
+    let generation = session.generation;
+    let last_id = needed_ids[budget - 1];
+    crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
+        db::set_setting(
+            conn,
+            &progress_key,
+            &serde_json::json!({
+                "generation": generation,
+                "last_id": last_id,
+            })
+            .to_string(),
+        )?;
+        Ok(true)
+    })
+    .await
 }
 
 /// 分页拉取某 Google Reader stream 的全部条目 id（unread / starred 权威集合）。
@@ -892,27 +960,31 @@ async fn collect_unread_diff_candidates(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     curr_unread: &[i64],
-    maps: &db::SyncMatchMaps,
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
 ) -> AppResult<Vec<(i64, i64)>> {
     let curr_unread_set: HashSet<i64> = curr_unread.iter().copied().collect();
-    let conn = db.lock().await;
-    session.ensure_current(&conn)?;
-    let mut stmt =
-        conn.prepare("SELECT remote_id FROM articles WHERE is_read = 0 AND remote_id IS NOT NULL")?;
-    let unread_remote: HashSet<i64> = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<HashSet<_>, _>>()?;
-    drop(stmt);
-    Ok(maps
-        .mf_id_to_article
-        .iter()
-        .filter(|(remote_id, _)| {
-            maps.verified_remote_ids.contains(remote_id)
-                && unread_remote.contains(remote_id)
-                && !curr_unread_set.contains(remote_id)
-        })
-        .map(|(remote_id, aid)| (*remote_id, *aid))
-        .collect())
+    let generation = session.generation;
+    pull_database_work(db, generation, maps, report, move |conn, maps, _| {
+        let mut stmt = conn.prepare(
+            "SELECT remote_id FROM articles WHERE is_read = 0 AND remote_id IS NOT NULL",
+        )?;
+        let unread_remote: HashSet<i64> = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        drop(stmt);
+        Ok(maps
+            .mf_id_to_article
+            .iter()
+            .filter(|(remote_id, _)| {
+                maps.verified_remote_ids.contains(remote_id)
+                    && unread_remote.contains(remote_id)
+                    && !curr_unread_set.contains(remote_id)
+            })
+            .map(|(remote_id, aid)| (*remote_id, *aid))
+            .collect())
+    })
+    .await?
 }
 
 /// 差分候选的 contents 存在性校验（批块优先，失败逐 id），返回确认仍被远端
@@ -984,6 +1056,7 @@ async fn probe_unread_diff_candidates(
 /// （候选必然 ∉ curr_unread）。
 fn apply_unread_diff_marks(
     conn: &Connection,
+    generation: i64,
     confirmed: &[i64],
     candidates: &[(i64, i64)],
     maps: &db::SyncMatchMaps,
@@ -991,6 +1064,8 @@ fn apply_unread_diff_marks(
 ) -> AppResult<()> {
     let confirmed_set: HashSet<i64> = confirmed.iter().copied().collect();
     for (remote_id, aid) in candidates {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
         if !maps.state_binding_is_current(conn, *aid, *remote_id)? {
             continue;
         }
@@ -1033,8 +1108,27 @@ fn apply_unread_diff_marks(
 /// 传播（调用方记入 `report.errors`），不再像旧的 `unwrap_or(0)` 那样把 DB
 /// 写失败伪装成「0 行变化」。已写入的行不会回滚；剩余未对账的行由下一轮
 /// 同集合对账重放（幂等自愈），但失败本身对用户可见。
+#[cfg(test)]
 fn reconcile_reader_state(
     conn: &Connection,
+    read_ids: Option<&[i64]>,
+    starred_ids: Option<&[i64]>,
+    maps: &db::SyncMatchMaps,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    reconcile_reader_state_at(
+        conn,
+        db::sync_generation(conn)?,
+        read_ids,
+        starred_ids,
+        maps,
+        report,
+    )
+}
+
+fn reconcile_reader_state_at(
+    conn: &Connection,
+    generation: i64,
     read_ids: Option<&[i64]>,
     starred_ids: Option<&[i64]>,
     maps: &db::SyncMatchMaps,
@@ -1045,6 +1139,8 @@ fn reconcile_reader_state(
     let starred_set: Option<HashSet<i64>> = starred_ids.map(|ids| ids.iter().copied().collect());
 
     for (remote_id, aid) in &maps.mf_id_to_article {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
         let aid = *aid;
         if !maps.state_binding_is_current(conn, aid, *remote_id)? {
             continue;

@@ -13,6 +13,11 @@ use std::sync::LazyLock;
 
 use crate::error::AppResult;
 
+mod writer;
+pub(crate) use writer::{
+    try_write_transaction, with_write_cancellation, write_transaction, writer_guard,
+};
+
 /// R3 数据变化判定的共享归一：可空文本字段的**空串 ≡ NULL**（COALESCE/回填
 /// 语义下两者不产生可见差异）。供 articles / sync_map 的前后值比对复用，
 /// 避免各处自写一份归一逻辑。
@@ -26,6 +31,7 @@ fn null_if_empty(v: Option<String>) -> Option<String> {
 mod ai_segments;
 mod articles;
 mod backup;
+pub(crate) mod body_retention;
 mod contents;
 mod feeds;
 mod folders;
@@ -57,11 +63,15 @@ pub use articles::{
     ArticleUpdates, ArticleUpsert, ContentCommitToken, CountsSnapshot, FeedCounts, NewArticle,
     ReadWriteReceipt, ScopeCounts, ScopeCountsDetail, ScopedCounts,
 };
+pub(crate) use backup::take_startup_backup_warning;
 pub use backup::{
     backup_dir_for_db, create_manual_backup, database_path, user_version, BackupInfo,
     BACKUP_RETENTION,
 };
-pub(crate) use backup::{create_mirror_backup, sanitize_log_text, take_startup_backup_warning};
+pub(crate) use contents::{
+    compute_identity as portable_content_identity, ensure_content as portable_ensure_content,
+    ContentInput as PortableContentInput,
+};
 /// OPT-008B 第二阶段：contents 单一正文所有权（常量/判空辅助供 db 各子模块与
 /// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。
 pub use contents::{content_non_empty, SOURCE_READABILITY, SOURCE_RSS};
@@ -82,10 +92,11 @@ pub use feeds::{
     ZERO_BINDING_DISCOVERY_INTERVAL_SECS, ZERO_BINDING_DISCOVERY_KEY_PREFIX,
 };
 pub use folders::{
-    add_folder_tombstone, create_folder, create_folder_with_sync_id, delete_folder, folder_members,
-    folder_name, folder_tombstones, folder_tombstones_for, list_folders, prune_folder_tombstones,
-    rename_folder, set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_ai_modes,
-    set_folder_collapsed, set_folder_sync_id, update_folder_layout, FolderRow, FolderTombstone,
+    add_folder_tombstone, create_folder, create_folder_with_sync_id, create_remote_folder,
+    delete_folder, folder_members, folder_name, folder_tombstones, folder_tombstones_for,
+    list_folders, prune_folder_tombstones, rename_folder, set_folder_ai_flags,
+    set_folder_ai_flags_partial, set_folder_ai_modes, set_folder_collapsed, set_folder_sync_id,
+    update_folder_layout, FolderRow, FolderTombstone,
 };
 pub(crate) use identity::{is_synthetic_guid, weak_observation_guid};
 pub use migrations::open;
@@ -105,22 +116,25 @@ pub use outbox::{
     SubscriptionOutboxStats, ACTION_EDIT, ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING,
     STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY, STATUS_PENDING,
 };
-pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
+pub use settings::{
+    app_settings_bool, app_settings_str, get_setting, set_setting, validate_app_setting,
+    SYNC_SETTING_KEYS,
+};
 /* OPT-014 R1：账号提交事务内核/可注入写入——crate 内部（命令层）使用，
 不是 IPC 面，也不对集成测试开放（测试在同模块单测内做）。 */
 pub(crate) use articles::purge_remote_data_in;
 pub(crate) use settings::set_setting_with;
 pub use sync_map::{
     article_by_remote_id, article_field_versions, backfill_article_content, bump_sync_generation,
-    confirm_article_remote_origin, count_unbound_local_feeds, ensure_uncategorized_folder,
-    export_feeds_with_folders, feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized,
-    fever_history_state, find_folder_by_name, folder_exists, get_article_content_html,
-    get_article_for_summary, get_article_for_translation, get_article_remote_id, get_article_url,
-    get_first_folder_id, last_sync_entry_id, last_sync_ts, list_unbound_local_feeds,
-    list_unread_ids_scoped, match_remote_feed, reset_fever_history_state, set_article_remote_id,
-    set_feed_remote_id, set_fever_history_complete, set_fever_history_pending,
-    set_last_sync_entry_id, set_last_sync_ts, sync_generation, sync_mark_read_if_unread,
-    sync_mark_read_if_unread_at_version, sync_mark_starred_if_unstarred,
+    confirm_article_remote_origin, count_unbound_local_feeds, ensure_remote_uncategorized_folder,
+    ensure_uncategorized_folder, export_feeds_with_folders, feed_exists_by_url, feed_id_by_url,
+    feed_id_by_url_normalized, fever_history_state, find_folder_by_name, folder_exists,
+    get_article_content_html, get_article_for_summary, get_article_for_translation,
+    get_article_remote_id, get_article_url, get_first_folder_id, last_sync_entry_id, last_sync_ts,
+    list_unbound_local_feeds, list_unread_ids_scoped, match_remote_feed, reset_fever_history_state,
+    set_article_remote_id, set_feed_remote_id, set_fever_history_complete,
+    set_fever_history_pending, set_last_sync_entry_id, set_last_sync_ts, sync_generation,
+    sync_mark_read_if_unread, sync_mark_read_if_unread_at_version, sync_mark_starred_if_unstarred,
     sync_mark_starred_if_unstarred_at_version, sync_mark_unread_if_read,
     sync_mark_unread_if_read_at_version, sync_mark_unstarred_if_starred,
     sync_mark_unstarred_if_starred_at_version, sync_match_maps, sync_set_article_status,

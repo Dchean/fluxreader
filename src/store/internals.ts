@@ -10,7 +10,7 @@ import type {
   FeedItem,
   ViewFilterType,
 } from '../types';
-import { getBodyEntry, invalidateContentRevision, reconcileBodyEntities } from './bodyCache';
+import { getBodyEntry, invalidateContentRevision, reconcileBodyEntities, reconcileFulltextLocation } from './bodyCache';
 import type { BodyRowFact } from './bodyCache';
 /* OPT-017F：id 解析单点——原模块内私有同名副本（避免 internals ↔ selectors
    循环依赖）已收敛到共享叶模块，两个层级都只依赖 ./scopeId。 */
@@ -510,6 +510,10 @@ export function mergeSnapshotEntries(
     const nextById = new Map(nextEntries.map((a) => [a.id, a] as const));
     for (const a of entries) {
       const src = nextById.get(a.id);
+      if (src) reconcileFulltextLocation(a.id, {
+        url: src.urlKnown ? src.url ?? null : undefined,
+        anchor: `${src.feedId}|${src.title}`, unavailable: src.unavailable,
+      });
       /* 保护字段的 bump 判据：快照行值 === 保留的本地值 ⇒ 后端已含该值（写已在
          服务端生效）→ 仍 bump，迟到失败回滚不得把已生效值踩回（TASK-107 R2 的
          迟到回滚语义保持）；快照为旧值（后端尚未含）→ 不 bump，写失败时回滚

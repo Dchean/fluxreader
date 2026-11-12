@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { api, articleRowToEntry, extractError, extractErrorCode } from '../../lib/api';
 import type { AiCacheCheckResult, TranslationSegmentPlan } from '../../lib/api';
-import { appendAiDelta, applyAiProduct, applyBodyRow, discardTranslationDraft, getBodyEntry, markBodyLoading } from '../bodyCache';
+import { appendAiDelta, applyAiProduct, applyBodyRow, discardTranslationDraft, getBodyEntry, markBodyLoading, reconcileFulltextTargetRow } from '../bodyCache';
 import type { ArticleEntry } from '../../types';
 import type { AiProductKind } from '../types';
 import type { AppState, AiCacheStatus, AiStatusInput } from '../types';
@@ -238,6 +238,17 @@ function trackAiRequest(key: string, p: Promise<unknown>): void {
 /** 测试专用：清空代次与在途表（frontend-regression 的夹具复位；生产代码不得调用） */
 export function resetAiRequestStateForTests(): void {
   aiRequestGen.clear();
+  aiInFlight.clear();
+  automaticAttempts.clear();
+  manualTargets.clear();
+  aiStatusInFlight.clear();
+  aiStatusMutation.clear();
+  aiStatusLatestRead.clear();
+}
+
+/** 资料库已替换：旧请求失去代次资格；序号不归零，迟到产物不可复活。 */
+export function invalidateAiRequestsForLibraryRestore(): void {
+  for (const [key, generation] of aiRequestGen) aiRequestGen.set(key, generation + 1);
   aiInFlight.clear();
   automaticAttempts.clear();
   manualTargets.clear();
@@ -553,7 +564,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
       }
       manualTargets.set(id, entry);
       const stamp = markBodyLoading(id);
-      applyBodyRow(id, row, stamp, { aiSummary: '', translatedContent: '' });
+      if (applyBodyRow(id, row, stamp, { aiSummary: '', translatedContent: '' })) reconcileFulltextTargetRow(id, row);
       run(id, false);
     }).catch(() => get().showToast('条目读取失败，请稍后重试'));
     trackAiRequest(key, chain);

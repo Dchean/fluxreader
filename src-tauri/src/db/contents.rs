@@ -31,7 +31,7 @@
 use md5::{Digest, Md5};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 /// 内容来源：直连/同步抓取到的 RSS/协议原文。
 pub const SOURCE_RSS: &str = "rss";
@@ -89,6 +89,94 @@ fn input_html(input: &ContentInput) -> Option<&str> {
     input.content_html.as_deref().filter(|s| !s.is_empty())
 }
 
+struct SavepointGuard<'a> {
+    conn: &'a Connection,
+    name: &'a str,
+    recovery: super::writer::RecoveryToken,
+    active: bool,
+}
+
+impl<'a> SavepointGuard<'a> {
+    fn begin(
+        conn: &'a Connection,
+        name: &'a str,
+        recovery: super::writer::RecoveryToken,
+    ) -> rusqlite::Result<Self> {
+        conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        Ok(Self {
+            conn,
+            name,
+            recovery,
+            active: true,
+        })
+    }
+
+    fn release(mut self) -> AppResult<()> {
+        self.active = false;
+        match self.conn.execute_batch(&format!("RELEASE {}", self.name)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.recovery.fail_closed();
+                Err(AppError::new(
+                    "dbWriterRecovery",
+                    format!(
+                        "savepoint {} RELEASE 失败，当前数据库连接已故障关闭，请重启应用后重试: {error}",
+                        self.name
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn rollback(mut self) -> AppResult<()> {
+        self.active = false;
+        match self.conn.execute_batch(&format!(
+            "ROLLBACK TO {name}; RELEASE {name}",
+            name = self.name
+        )) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.recovery.fail_closed();
+                Err(AppError::new(
+                    "dbWriterRecovery",
+                    format!(
+                        "savepoint {} ROLLBACK TO/RELEASE 失败，当前数据库连接已故障关闭，请重启应用后重试: {error}",
+                        self.name
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for SavepointGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if let Err(error) = self.conn.execute_batch(&format!(
+            "ROLLBACK TO {name}; RELEASE {name}",
+            name = self.name
+        )) {
+            self.recovery.fail_closed();
+            log::error!(
+                "savepoint {} RAII rollback failed during unwinding: {error}",
+                self.name
+            );
+        }
+    }
+}
+
+fn preserve_business_error(mut original: AppError, recovery: AppError) -> AppError {
+    let original_message = std::mem::take(&mut original.message);
+    original.message = format!(
+        "{}；内层 savepoint 回滚失败，数据库连接已故障关闭：{recovery}",
+        original_message
+    );
+    original
+}
+
 /// 复合写的原子性守卫（R3 内容重指/条目创建的故障原子性）：把「新 contents 行
 /// 写入 + 条目重指/回填 + 旧行回收」包成可嵌套的 SAVEPOINT——`f` 内任一语句
 /// 失败即整体回滚，「新行已建但条目 UPDATE 失败」的孤儿窗口与「条目已插但
@@ -104,142 +192,32 @@ pub(crate) fn with_write_savepoint<T>(
     name: &str,
     f: impl FnOnce() -> AppResult<T>,
 ) -> AppResult<T> {
-    conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+    let writer = super::writer_guard(conn)?;
+    let recovery = writer.recovery_token();
+    // Standalone callers need a write reservation before the savepoint reads.
+    // Nested callers already own their outer write transaction; preserve the
+    // savepoint rollback boundary rather than opening a nested BEGIN.
+    let outer = if conn.is_autocommit() {
+        Some(super::write_transaction(conn)?)
+    } else {
+        None
+    };
+    let savepoint = SavepointGuard::begin(conn, name, recovery)?;
     match f() {
         Ok(value) => {
-            conn.execute_batch(&format!("RELEASE {name}"))?;
+            savepoint.release()?;
+            if let Some(outer) = outer {
+                outer.commit()?;
+            }
             Ok(value)
         }
         Err(err) => {
-            if let Err(rb) = conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}")) {
-                return Err(crate::error::AppError::internal(format!(
-                    "savepoint {name} 回滚失败（原始错误：{err}；回滚错误：{rb}）"
-                )));
+            if let Err(rb) = savepoint.rollback() {
+                return Err(preserve_business_error(err, rb));
             }
             Err(err)
         }
     }
-}
-
-/// 受保护提取行（`readability` + `fulltext_extracted`）的正文错配修复：
-/// body_text 与保留 HTML 不同源（历史只写 HTML+flag 的旧形态，或 body 缺失）
-/// 时按 HTML 重算修复并 `revision+1`（前端修订失效可感知）。
-/// **不更改来源、不把受保护行降级为 RSS**——RSS 刷新与远端回填不得覆盖既定
-/// 提取（OPT-003 R1 语义在 contents 上的延续）。
-///
-/// OPT-008C 裁决 a：identity 含 body，修复后必须**重算 identity**，否则行身份
-/// 与字节不一致，后续同字节 `ensure_content` 会新建行（欠共享）。重算后若
-/// 命中同 source + 同 HTML + 同 body 的已有行，按等价合并：全部引用条目重指
-/// 目标行、目标行 `revision+1`、原行删除（不留下无引用行）。哈希碰撞/等价
-/// 复核失败时按 `ensure_content` 同一加盐策略收敛，绝不误并。
-/// 目标行提取标志取两行并集（正常情况下同为 1；仅防御性地不弱化保护）。
-///
-/// **存量惰性收敛**：旧实现只改 body、不改 identity 的行（body 已同源但
-/// identity 仍是旧 body 哈希）再次进入本路径时，仅收敛规范的未加盐 `h|`
-/// 身份——无等价行则原地换 identity（**不改 body、不 bump revision**），有
-/// 等价行则按上述合并。私有 `e|` / 已加盐身份不在此路径猜测，保持原样。
-/// 该收敛只覆盖再次触达本函数的行；未触达的存量行不动（发布侧如需一次性
-/// 收敛应另做回填）。
-///
-/// 返回是否发生修复/收敛（合并也计为修复）。
-// Note: 修复重算 identity 与等价合并的裁决 — 见 .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md「OPT-008C 收口」
-pub(crate) fn repair_extracted_body_if_mismatch(
-    conn: &Connection,
-    content_id: i64,
-) -> AppResult<bool> {
-    let row: Option<(String, Option<String>, String, i64, String)> = conn
-        .query_row(
-            "SELECT body_text, content_html, extraction_source, fulltext_extracted, identity
-             FROM contents WHERE id = ?1",
-            params![content_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .optional()?;
-    let Some((body, html, source, extracted, identity)) = row else {
-        return Ok(false);
-    };
-    let Some(html) = html.filter(|h| !h.trim().is_empty()) else {
-        return Ok(false);
-    };
-    let same_source = crate::sanitize::html_to_text(&html);
-    let expected = compute_identity(&source, Some(&html), &same_source);
-    let body_same = body == same_source;
-    if body_same && identity == expected {
-        return Ok(false);
-    }
-    // 旧实现修复态：body 已同源、identity 仍是旧 body 的哈希。只收敛规范
-    // 的未加盐身份；私有/加盐身份不从字节反推（不做运行期猜测）。
-    let stale_identity_only = body_same;
-    if stale_identity_only && !is_canonical_hash_identity(&identity) {
-        return Ok(false);
-    }
-    let base = expected;
-    with_write_savepoint(conn, "contents_repair_identity", || {
-        let mut candidate = base.clone();
-        for _ in 0..16 {
-            let existing: Option<(i64, Option<String>, String, String)> = conn
-                .query_row(
-                    "SELECT id, content_html, body_text, extraction_source
-                     FROM contents WHERE identity = ?1 AND id != ?2",
-                    params![candidate, content_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            match existing {
-                None => {
-                    if stale_identity_only {
-                        // 字节没变，只是身份收敛：不改 body、不推进 revision。
-                        conn.execute(
-                            "UPDATE contents SET identity = ?1 WHERE id = ?2",
-                            params![candidate, content_id],
-                        )?;
-                    } else {
-                        conn.execute(
-                            "UPDATE contents SET identity = ?1, body_text = ?2,
-                                 revision = revision + 1, updated_at = datetime('now')
-                             WHERE id = ?3",
-                            params![candidate, same_source, content_id],
-                        )?;
-                    }
-                    return Ok(true);
-                }
-                Some((target_id, t_html, t_body, t_source)) => {
-                    // 身份哈希命中后再做字节级复核（与 ensure_content 同口径）。
-                    let equivalent = t_html.as_deref().unwrap_or("") == html
-                        && t_body == same_source
-                        && t_source == source;
-                    if equivalent {
-                        // 等价合并：先重指全部引用，再推进目标修订并删除原行。
-                        conn.execute(
-                            "UPDATE articles SET content_id = ?1 WHERE content_id = ?2",
-                            params![target_id, content_id],
-                        )?;
-                        conn.execute(
-                            "UPDATE contents SET revision = revision + 1,
-                                 fulltext_extracted = MAX(fulltext_extracted, ?1),
-                                 updated_at = datetime('now') WHERE id = ?2",
-                            params![extracted, target_id],
-                        )?;
-                        conn.execute("DELETE FROM contents WHERE id = ?1", params![content_id])?;
-                        return Ok(true);
-                    }
-                    // 哈希碰撞/同身份不同字节：加盐新身份（与 ensure_content 的
-                    // 候选收敛策略一致），绝不误并。
-                    candidate = format!("{base}|c{}", candidate.len());
-                }
-            }
-        }
-        Err(crate::error::AppError::internal(format!(
-            "内容身份冲突无法收敛（{base}）：拒绝修复以避免误并"
-        )))
-    })
-}
-
-/// 规范的未加盐内容身份（`h|...`，且不带 `|c<len>` 盐后缀）。
-/// 私有身份 `e|<article_id>` 与加盐碰撞身份都不可从当前字节反推，排除在
-/// 存量惰性收敛之外。
-fn is_canonical_hash_identity(identity: &str) -> bool {
-    identity.starts_with("h|") && !identity.contains("|c")
 }
 
 /// 找到或创建与输入等价的内容行（幂等）。
@@ -252,6 +230,7 @@ pub fn ensure_content(
     input: &ContentInput,
     private_id: Option<i64>,
 ) -> AppResult<(i64, i64, bool)> {
+    let _writer = super::writer_guard(conn)?;
     let base = if content_non_empty(input_html(input), &input.body_text) {
         compute_identity(
             &input.extraction_source,
@@ -317,4 +296,167 @@ pub fn ensure_content(
     Err(crate::error::AppError::internal(format!(
         "内容身份冲突无法收敛（{base}）：拒绝写入以避免误并"
     )))
+}
+
+#[cfg(test)]
+mod savepoint_recovery_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDb(PathBuf);
+
+    impl TestDb {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "fluxreader-savepoint-recovery-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn open(&self) -> Connection {
+            let conn = Connection::open(self.0.join("main.db")).unwrap();
+            conn.execute_batch("CREATE TABLE writes(seq INTEGER PRIMARY KEY,actor TEXT NOT NULL);")
+                .unwrap();
+            conn
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("all test connections must be closed");
+        }
+    }
+
+    fn actors(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT actor FROM writes ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn assert_recovery_poisoned(conn: &Connection) {
+        assert_eq!(
+            super::super::writer::writer_guard(conn).err().unwrap().code,
+            "dbWriterRecovery"
+        );
+    }
+
+    #[test]
+    fn rollback_to_failure_poisons_connection_and_outer_commit_rolls_back() {
+        let dir = TestDb::new();
+        let conn = dir.open();
+        let tx = super::super::write_transaction(&conn).unwrap();
+        tx.execute("INSERT INTO writes(actor) VALUES('outer')", [])
+            .unwrap();
+        let error = with_write_savepoint(&tx, "missing_savepoint", || -> AppResult<()> {
+            tx.execute_batch(
+                "RELEASE missing_savepoint; INSERT INTO writes(actor) VALUES('inner')",
+            )?;
+            Err(AppError::new("businessReplay", "rollback trigger"))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "businessReplay");
+        assert!(error.message.contains("rollback trigger"));
+        assert!(error.message.contains("ROLLBACK TO/RELEASE"));
+        assert_eq!(
+            actors(&tx),
+            ["outer", "inner"],
+            "failed rollback is detected before the outer transaction can commit"
+        );
+
+        let commit_error = tx.commit().unwrap_err();
+        assert_eq!(commit_error.code, "dbWriterRecovery");
+        assert!(conn.is_autocommit());
+        assert!(
+            actors(&conn).is_empty(),
+            "the poisoned outer transaction can never become durable"
+        );
+        assert_recovery_poisoned(&conn);
+        super::super::writer::clear_recovery_for_test(&conn);
+    }
+
+    #[test]
+    fn release_failure_poisons_connection_and_outer_commit_rolls_back() {
+        let dir = TestDb::new();
+        let conn = dir.open();
+        let tx = super::super::write_transaction(&conn).unwrap();
+        tx.execute("INSERT INTO writes(actor) VALUES('outer')", [])
+            .unwrap();
+        let error = with_write_savepoint(&tx, "consumed_elsewhere", || {
+            tx.execute_batch(
+                "INSERT INTO writes(actor) VALUES('inner');
+                 RELEASE consumed_elsewhere",
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "dbWriterRecovery");
+        assert!(error.message.contains("RELEASE"));
+        assert_eq!(
+            actors(&tx),
+            ["outer", "inner"],
+            "failed release is detected before the outer transaction can commit"
+        );
+
+        assert_eq!(tx.commit().unwrap_err().code, "dbWriterRecovery");
+        assert!(conn.is_autocommit());
+        assert!(actors(&conn).is_empty());
+        assert_recovery_poisoned(&conn);
+        super::super::writer::clear_recovery_for_test(&conn);
+    }
+
+    #[test]
+    fn explicit_business_error_survives_rollback_failure_without_second_panic() {
+        let dir = TestDb::new();
+        let conn = dir.open();
+        let tx = super::super::write_transaction(&conn).unwrap();
+        let error = with_write_savepoint(&tx, "business_release", || -> AppResult<()> {
+            tx.execute_batch("RELEASE business_release")?;
+            tx.execute("INSERT INTO writes(actor) VALUES('inner')", [])?;
+            Err(AppError::new("businessReplay", "original business failure"))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "businessReplay");
+        assert!(error.message.contains("original business failure"));
+        assert!(error.message.contains("故障关闭"));
+
+        assert_eq!(tx.commit().unwrap_err().code, "dbWriterRecovery");
+        assert!(conn.is_autocommit());
+        assert!(actors(&conn).is_empty());
+        super::super::writer::clear_recovery_for_test(&conn);
+    }
+
+    #[test]
+    fn panic_payload_survives_rollback_failure_and_connection_stays_closed() {
+        let dir = TestDb::new();
+        let conn = dir.open();
+        let tx = super::super::write_transaction(&conn).unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_write_savepoint(&tx, "panic_release", || -> AppResult<()> {
+                tx.execute_batch("RELEASE panic_release")?;
+                tx.execute("INSERT INTO writes(actor) VALUES('inner-panic')", [])?;
+                panic!("original business panic");
+            })
+        }));
+        let payload = panicked.unwrap_err();
+        let original = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(original, Some("original business panic"));
+
+        assert_eq!(tx.commit().unwrap_err().code, "dbWriterRecovery");
+        assert!(conn.is_autocommit());
+        assert!(actors(&conn).is_empty());
+        assert_recovery_poisoned(&conn);
+        super::super::writer::clear_recovery_for_test(&conn);
+    }
 }

@@ -449,7 +449,7 @@ export async function run(ctx) {
       snippet: 'snippet text', author: 'Fixture Author',
       cover: 'https://e.example/img.png', imageUrl: 'https://e.example/img.png',
       audioUrl: 'https://e.example/audio.mp3', enclosureUrl: 'https://e.example/audio.mp3',
-      durationSec: 1234, url: 'https://e.example/a',
+      durationSec: 1234, url: 'https://e.example/a', urlKnown: true,
       aiSummary: 'fixture summary',
       /* TASK-122：content/rawContent 不再映射进视图行（正文真值源 bodyById） */
       translatedContent: '<p>translated</p>', fulltextExtracted: false,
@@ -480,7 +480,10 @@ export async function run(ctx) {
     const wrong = (actual, expected) => Object.keys(expected).filter(
       (k) => k in actual && !sameValue(actual[k], expected[k]));
 
-    /* 【TASK-122 改动理由】articleRowToEntry 不再映射 content/rawContent 进视图行
+    /* 2026-11-11 门禁适配：R5 新增 urlKnown 区分“已确认无 URL”与“尚未提供 URL”。
+       原完整键表漏了该键，当前非空 fixture 应为 true；仅补全期望，不收窄比较器。
+       null/undefined 的真实恢复行为沿用 reader-body-recovery.test.mjs。
+       【TASK-122 改动理由】articleRowToEntry 不再映射 content/rawContent 进视图行
        （正文真值源 bodyById；with_content 恒 false，映射本就是空转）——期望键集
        同步收窄，其余键逐键取值断言不变。 */
     checkNew('(r) articleRowToEntry 键集合与逐键取值全量一致（缺键/多键/错值/接错源任一即失败；TASK-122 起不含 content/rawContent）',
@@ -498,277 +501,17 @@ export async function run(ctx) {
       missing(brokenEntry, expectEntry).length === 1 && missing(brokenEntry, expectEntry)[0] === 'cover');
     checkNew('(r) 比较器自检：cover 接错数据源（取 imageUrl 之外的值）必须被判定为失败',
       wrong({ ...entry, cover: 'https://wrong.example/x.png' }, expectEntry).includes('cover'));
+    const missingUrlKnown = { ...entry };
+    delete missingUrlKnown.urlKnown;
+    checkNew('(r) 比较器自检：删除 urlKnown 映射必须被判定为失败',
+      missing(missingUrlKnown, expectEntry).length === 1
+      && missing(missingUrlKnown, expectEntry)[0] === 'urlKnown');
+    checkNew('(r) 比较器自检：非空 URL 的 urlKnown 反向为 false 必须被判定为失败',
+      wrong({ ...entry, urlKnown: false }, expectEntry).includes('urlKnown'));
   }
 
-/* ============================================================
-   TASK-092（REQ-106 ③）：封面图片位统一代理 / 失败回退 / 失效上报
-   驱动 src/lib/coverImage.ts（五处图片位共用的状态机，ui-loader 就地转译），
-   fetch_image / report_broken_cover 由本段落临时包一层 __INVOKE__ 可控假后端
-   （段末恢复）。组件是否真的调用这些函数：SSR 渲染 CoverImage + 源码形态断言。
-   ============================================================ */
-{
-  const cov = await import('../../src/lib/coverImage.ts');
-  const ip = await import('../../src/lib/imageProxy.ts');
-  const fsC = await import('node:fs');
-  const readSrc = (p) => fsC.readFileSync(new URL(p, import.meta.url), 'utf8');
-  const prevInvokeC = globalThis.__INVOKE__;
-  const cCalls = [];
-  const fetchPlan = new Map(); // url -> 'png' | 'html' | 'reject' | 'empty'
-  let reportReject = false;
-  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
-  const HTML = Array.from(new TextEncoder().encode('<!doctype html><html><body>请登录</body></html>'));
-  const nCmd = (cmd, url) => cCalls.filter((c) => c.cmd === cmd && (url === undefined || c.args.url === url)).length;
-  const reports = () => cCalls.filter((c) => c.cmd === 'report_broken_cover').map((c) => `${c.args.articleId}|${c.args.url}`);
-  const SSPAI = 'https://cdnfile.sspai.com/2026/09/cover.png?imageView2/2/w/300';
-  const DOUBAN = 'https://img9.doubanio.com/view/photo/l/public/p1.jpg';
-  const PLAIN = 'https://images.example.com/c.jpg';
-  const unhandled = [];
-  const onUnhandled = (e) => { unhandled.push(e); };
-  const warns = [];
-  // R1：临时覆盖统一在 try 内注册、finally 复原（成功/异常都保全；注册本身分步兜底）
-  let restoreInvokeC = null;
-  let restoreWarnC = null;
-  try {
-    restoreInvokeC = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-      if (cmd === 'fetch_image') {
-        cCalls.push({ cmd, args });
-        const plan = fetchPlan.get(args.url) ?? 'png';
-        if (plan === 'reject') return Promise.reject({ code: 'imageFetch', message: 'HTTP 错误: 403' });
-        if (plan === 'empty') return Promise.resolve([]);
-        return Promise.resolve(plan === 'html' ? HTML : PNG);
-      }
-      if (cmd === 'report_broken_cover') {
-        cCalls.push({ cmd, args });
-        return reportReject ? Promise.reject({ code: 'db', message: 'database is locked' }) : Promise.resolve(true);
-      }
-      return prevInvokeC(cmd, args);
-    });
-    restoreWarnC = overrideGlobal(console, 'warn', (...a) => { warns.push(a.map(String).join(' ')); });
-    process.on('unhandledRejection', onUnhandled);
-    cov.resetCoverCacheForTest();
-
-    /* A1/A2：取图路径只由 imageProxy.needsImageProxy 决定 */
-    checkNew('(cov-a1) 取图路径：sspai/doubanio 走代理，普通图床直连，空 cover 为 none（判定来自 imageProxy）',
-      cov.coverRoute(SSPAI) === 'proxy' && cov.coverRoute(DOUBAN) === 'proxy'
-      && cov.coverRoute(PLAIN) === 'direct' && cov.coverRoute('') === 'none'
-      && cov.coverRoute(null) === 'none' && cov.coverRoute(undefined) === 'none'
-      && cov.coverRoute('data:image/png;base64,AA==') === 'direct');
-    {
-      const cs = readSrc('../../src/lib/coverImage.ts');
-      const code = cs.split('\n').filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
-      checkNew('(cov-a1) 判定规则只在 imageProxy.ts 一处：coverImage.ts 调用 needsImageProxy 且代码里不含任何图床域名',
-        code.includes('needsImageProxy(src)') && !/sspai|doubanio/.test(code));
-    }
-
-    /* A1：代理成功 → data: URL，fetch_image 带 pageUrl 只发一次 */
-    cov.driveCover(SSPAI, 'https://sspai.com/post/1', '11');
-    const loadingState = cov.getCoverState(SSPAI).status;
-    await nTick(10);
-    const okState = cov.getCoverState(SSPAI);
-    checkNew('(cov-a1) 代理成功：先 loading，再 ready 为 data:image/png URL；fetch_image 1 次且带 {url,pageUrl}',
-      loadingState === 'loading' && okState.status === 'ready' && okState.src.startsWith('data:image/png;base64,')
-      && nCmd('fetch_image', SSPAI) === 1
-      && cCalls.find((c) => c.cmd === 'fetch_image').args.pageUrl === 'https://sspai.com/post/1');
-    checkNew('(cov-a4) 渲染决策：代理未返回前是占位（pending，不直连防盗链图），返回后是 data: 的 img',
-      cov.coverView(SSPAI, { status: 'loading' }).kind === 'placeholder'
-      && cov.coverView(SSPAI, { status: 'idle' }).kind === 'placeholder'
-      && cov.coverView(SSPAI, okState).kind === 'img' && cov.coverView(SSPAI, okState).direct === false
-      && cov.coverView(SSPAI, okState).src.startsWith('data:'));
-
-    /* A2：直连域名不触发 fetch_image */
-    const fBefore = nCmd('fetch_image');
-    cov.driveCover(PLAIN, 'https://example.com/a', '12');
-    await nTick(10);
-    const plainView = cov.coverView(PLAIN, cov.getCoverState(PLAIN));
-    checkNew('(cov-a2) 不需代理的域名直连：不触发 fetch_image，渲染为原 URL 的直连 img',
-      nCmd('fetch_image') === fBefore && plainView.kind === 'img' && plainView.direct === true && plainView.src === PLAIN);
-
-    /* B5/C8：代理失败 → 占位 + 上报 */
-    fetchPlan.set(DOUBAN, 'reject');
-    cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21');
-    await nTick(10);
-    cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21'); // 组件状态变化后 effect 再跑一次
-    await nTick(10);
-    checkNew('(cov-b5) 代理失败（fetch_image 拒绝）→ failed，渲染为占位而非 img',
-      cov.getCoverState(DOUBAN).status === 'failed'
-      && cov.coverView(DOUBAN, cov.getCoverState(DOUBAN)).kind === 'placeholder');
-    const firstReport = cCalls.find((c) => c.cmd === 'report_broken_cover');
-    checkNew('(cov-c8) 失败即上报 report_broken_cover，参数 {articleId:number, url}（Tauri camelCase 契约）',
-      reports().includes(`21|${DOUBAN}`) && firstReport?.args.articleId === 21
-      && Object.keys(firstReport?.args ?? {}).sort().join(',') === 'articleId,url');
-
-    /* B7：同一会话失败 URL 不再请求；C8 幂等 */
-    for (let i = 0; i < 5; i++) cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21');
-    cov.requestProxiedCover(DOUBAN, 'https://movie.douban.com/x');
-    await nTick(10);
-    checkNew('(cov-b7) 失败的 URL 同会话内不再发 fetch_image（再驱动 6 次后仍只 1 次）',
-      nCmd('fetch_image', DOUBAN) === 1);
-    checkNew('(cov-c8) 同条目同 URL 只上报一次（重复驱动后 report_broken_cover 仍 1 次）',
-      reports().filter((r) => r === `21|${DOUBAN}`).length === 1);
-    /* C9：迷你播放条 + 全屏播放器 + 灯箱展示同一 cover（同一条目 id）→ 共用缓存与去重 */
-    cov.driveCover(DOUBAN, undefined, '21');
-    cov.driveCover(DOUBAN, undefined, '21');
-    cov.driveCover(DOUBAN, undefined, '21');
-    await nTick(10);
-    checkNew('(cov-c9) 播放条/灯箱与卡片展示同一 cover：零新增取图、零新增上报',
-      nCmd('fetch_image', DOUBAN) === 1 && reports().filter((r) => r === `21|${DOUBAN}`).length === 1);
-    cov.driveCover(DOUBAN, undefined, '22');
-    await nTick(10);
-    checkNew('(cov-c8) 另一条目引用同一失效 URL：该条目上报一次，但不重新取图',
-      nCmd('fetch_image', DOUBAN) === 1 && reports().filter((r) => r === `22|${DOUBAN}`).length === 1);
-    checkNew('(cov-c8) 无条目 id（正文图进灯箱）/ data: URL 不上报',
-      cov.reportCoverFailure(null, DOUBAN) === false && cov.reportCoverFailure('', DOUBAN) === false
-      && cov.reportCoverFailure('31', 'data:image/png;base64,AA==') === false);
-
-    /* B5：代理返回空字节 → 占位 */
-    const EMPTYB = 'https://rssfile.sspai.com/empty.jpg';
-    fetchPlan.set(EMPTYB, 'empty');
-    cov.driveCover(EMPTYB, undefined, '41');
-    await nTick(10);
-    checkNew('(cov-b5) 代理返回空字节 → failed（reason=empty）',
-      cov.getCoverState(EMPTYB).status === 'failed' && cov.getCoverState(EMPTYB).reason === 'empty');
-
-    /* D11：字节不是图片 → 占位 + 上报，不注入 DOM */
-    const LOGIN = 'https://cdnfile.sspai.com/login-wall.jpg';
-    fetchPlan.set(LOGIN, 'html');
-    cov.driveCover(LOGIN, undefined, '51');
-    await nTick(10);
-    cov.driveCover(LOGIN, undefined, '51');
-    await nTick(10);
-    checkNew('(cov-d11) 代理字节是 HTML 登录页 → failed(not-image)，不产出 data: URL，渲染占位',
-      cov.getCoverState(LOGIN).status === 'failed' && cov.getCoverState(LOGIN).reason === 'not-image'
-      && cov.coverView(LOGIN, cov.getCoverState(LOGIN)).kind === 'placeholder');
-    checkNew('(cov-d11) 非图片字节同样上报一次', reports().filter((r) => r === `51|${LOGIN}`).length === 1);
-    const strict = await ip.fetchProxiedImage(LOGIN);
-    checkNew('(cov-d11) fetchProxiedImage 对 HTML 字节返回 not-image（严格判定在 imageProxy.ts）',
-      strict.ok === false && strict.reason === 'not-image');
-
-    /* A3：画廊的 proxyImageUrl 行为逐字保留（不做严格判定，仍按 image/jpeg 兜底） */
-    const galleryHtml = await ip.proxyImageUrl(LOGIN);
-    checkNew('(cov-a3) 画廊 proxyImageUrl 行为不变：非图片字节仍按修前逻辑兜底为 data:image/jpeg',
-      typeof galleryHtml === 'string' && galleryHtml.startsWith('data:image/jpeg;base64,'));
-    {
-      const tl = readSrc('../../src/components/Timeline.tsx');
-      const gal = tl.slice(tl.indexOf('const GalleryCard = memo('), tl.indexOf('/* ---------- 播客卡片'));
-      // gallery-media真实挂载域另覆迟到代理与换源；此处保留代理唯一入口接线。
-      checkNew('(cov-a3) 画廊卡片仍走 proxyImageUrl，结果绑定媒体快照后才回退首图，未换成 CoverImage',
-        gal.length > 0 && gal.includes('void proxyImageUrl(src, item.url)')
-        && gal.includes('proxied?.key === mediaKey ? proxied.url : null')
-        && gal.includes('?? item.imageUrl;') && !gal.includes('<CoverImage'));
-    }
-
-    /* 直连失败（img onError）→ 占位 + 上报 + 不再请求 */
-    const DIRECT_BAD = 'https://images.example.com/404.jpg';
-    cov.driveCover(DIRECT_BAD, undefined, '61');
-    const directBefore = cov.coverView(DIRECT_BAD, cov.getCoverState(DIRECT_BAD));
-    cov.onCoverError(DIRECT_BAD);
-    cov.driveCover(DIRECT_BAD, undefined, '61');
-    cov.driveCover(DIRECT_BAD, undefined, '61');
-    await nTick(10);
-    checkNew('(cov-b5) 直连 onError → failed，之后渲染占位（不再挂 img 重新请求）',
-      directBefore.kind === 'img' && cov.getCoverState(DIRECT_BAD).status === 'failed'
-      && cov.coverView(DIRECT_BAD, cov.getCoverState(DIRECT_BAD)).kind === 'placeholder'
-      && nCmd('fetch_image', DIRECT_BAD) === 0);
-    checkNew('(cov-c8) 直连失败上报一次', reports().filter((r) => r === `61|${DIRECT_BAD}`).length === 1);
-
-    /* D10：空 cover 不渲染 img、不代理、不上报 */
-    const beforeEmpty = cCalls.length;
-    cov.driveCover('', 'https://sspai.com/post/2', '71');
-    cov.driveCover(null, undefined, '71');
-    cov.driveCover(undefined, undefined, '71');
-    await nTick(10);
-    checkNew('(cov-d10) 空 cover（空串/null/undefined）：零 fetch_image、零上报、渲染决策为 none',
-      cCalls.length === beforeEmpty && cov.coverView('', { status: 'idle' }).kind === 'none'
-      && cov.coverView(null, { status: 'idle' }).kind === 'none');
-
-    /* 上报本身失败：静默（console.warn），不产生未处理的 rejection */
-    reportReject = true;
-    const RB = 'https://images.example.com/report-fails.jpg';
-    cov.onCoverError(RB);
-    cov.driveCover(RB, undefined, '81');
-    await nTick(30);
-    reportReject = false;
-    checkNew('(cov-c8) report_broken_cover 失败时静默：无 unhandledRejection，仅 console.warn',
-      reports().includes(`81|${RB}`) && unhandled.length === 0 && warns.some((w) => w.includes('report_broken_cover')));
-
-    /* 组件接线：SSR 渲染 CoverImage（组件真的消费 coverView 的决策） */
-    {
-      const { renderToStaticMarkup } = await import('react-dom/server');
-      const { createElement } = await import('react');
-      const { CoverImage } = await import('../../src/components/CoverImage.tsx');
-      const r = (props) => renderToStaticMarkup(createElement(CoverImage, { className: 'card-cover-thumb', alt: 'cover', ...props }));
-      const hEmpty = r({ src: '', articleId: '1' });
-      const hPending = r({ src: 'https://cdnfile.sspai.com/never-requested.png', articleId: '1' });
-      const hReady = r({ src: SSPAI, articleId: '11' });
-      const hFailed = r({ src: DOUBAN, articleId: '21' });
-      const hDirect = r({ src: PLAIN, articleId: '12' });
-      checkNew('(cov-d10) SSR：空 cover 不产出任何 <img>',
-        hEmpty === '' && !r({ src: null }).includes('<img'));
-      checkNew('(cov-a4) SSR：代理未返回时渲染同类名占位（card-cover-thumb cover-fallback，pending），无 <img>',
-        !hPending.includes('<img') && hPending.includes('class="card-cover-thumb cover-fallback"')
-        && hPending.includes('data-cover-state="pending"'));
-      checkNew('(cov-a1) SSR：代理成功渲染 data: 的 <img>（沿用原类名）',
-        /<img[^>]*src="data:image\/png;base64,/.test(hReady) && hReady.includes('class="card-cover-thumb"'));
-      checkNew('(cov-b5) SSR：失败渲染占位（failed）+ 图标，无 <img>（不出破图图标）',
-        !hFailed.includes('<img') && hFailed.includes('data-cover-state="failed"') && hFailed.includes('svg-icon'));
-      checkNew('(cov-a2) SSR：直连渲染原 URL + referrerPolicy=no-referrer（与修前一致）',
-        hDirect.includes(`src="${PLAIN}"`) && /referrerpolicy="no-referrer"/i.test(hDirect));
-    }
-
-    /* 组件与五处图片位的源码接线（SSR 读不到 effect / onError / 真实 store，故以源码形态钉住） */
-    {
-      const ci = readSrc('../../src/components/CoverImage.tsx');
-      checkNew('(cov-wire) CoverImage：effect 调 driveCover(url, pageUrl, articleId)、渲染走 coverView、代理与直连 img 都挂 onCoverError',
-        /useEffect\(\(\) => \{ driveCover\(url, pageUrl, articleId\); \}/.test(ci)
-        && ci.includes('coverView(url, state)')
-        && (ci.match(/onError=\{\(\) => onCoverError\(url\)\}/g) || []).length === 2
-        && /data-cover-route="proxy"[^>]*onError=\{\(\) => onCoverError\(url\)\}/.test(ci)
-        && /data-cover-route="direct"[\s\S]*?onError=\{\(\) => onCoverError\(url\)\}/.test(ci));
-      const tl = readSrc('../../src/components/Timeline.tsx');
-      const pb = readSrc('../../src/components/PlayerBar.tsx');
-      const ov = readSrc('../../src/components/Overlays.tsx');
-      const cut = (s, a, b) => { const i = s.indexOf(a); return i < 0 ? '' : s.slice(i, s.indexOf(b, i)); };
-      const fiveSites = [
-        ['文章卡', cut(tl, 'card-main-content', 'card-footer'), 'src={art.cover}', 'articleId={art.id}'],
-        ['播客卡', cut(tl, 'className={`podcast-card', 'podcast-show-name'), 'src={item.cover}', 'articleId={item.id}'],
-        ['迷你播放条', cut(pb, 'player-track-info', 'player-titles'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
-        ['全屏播放器', cut(pb, 'player-full-cover-wrap', 'player-full-meta'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
-        // 单图公开契约仍用CoverImage；新增画廊正文图有独立重试，不向封面缓存上报。
-        ['单图灯箱', cut(ov, '{lightboxUrl && !gallery && (', '{lightboxUrl && gallery && ('), 'src={lightboxUrl}', 'articleId={lightboxEntryId}'],
-      ];
-      const badSites = fiveSites.filter(([, blk, a, b]) => !(blk.includes('<CoverImage') && blk.includes(a) && blk.includes(b) && !/<img\b/.test(blk)));
-      checkNew(`(cov-wire) 五处原封面/单图图片位保持 CoverImage（带条目 id）且不再有裸 <img>（不合规：${badSites.map((s) => s[0]).join('、') || '无'}）`,
-        badSites.length === 0);
-    }
-
-    /* C9 数据面：播放条 cover 与条目 id 同源；灯箱带条目 id；关闭清空 */
-    {
-      store.getState().playPodcastEpisode('第 A 集', '节目', DOUBAN, 'https://a.example/ea.mp3', '21');
-      const pA = store.getState().player;
-      store.getState().playPodcastEpisode('第 B 集', '节目', '', 'https://a.example/eb.mp3', '22');
-      const pB = store.getState().player;
-      checkNew('(cov-c9) 播放条封面记下所属条目 id；新剧集无 cover 时 cover 与 id 一起沿用（上报对象与显示一致）',
-        pA.cover === DOUBAN && pA.coverEntryId === '21' && pB.cover === DOUBAN && pB.coverEntryId === '21');
-      store.getState().closePodcastBar();
-      store.getState().openLightbox(DOUBAN, '21');
-      const lbOpen = { url: store.getState().lightboxUrl, id: store.getState().lightboxEntryId };
-      store.getState().closeLightbox();
-      store.getState().openLightbox('https://x.example/prose.png');
-      const lbProse = store.getState().lightboxEntryId;
-      store.getState().closeLightbox();
-      checkNew('(cov-c9) 灯箱携带条目 id（画廊）/ 正文图为 null；关闭同时清空 url 与 id',
-        lbOpen.url === DOUBAN && lbOpen.id === '21' && lbProse === null
-        && store.getState().lightboxUrl === null && store.getState().lightboxEntryId === null);
-      // 画廊真实打开携带身份由 component-tests/gallery-virtual.test.mjs 和
-      // entry-actions.test.mjs 断言实际 store 结果，不锁 openImage 的分支文本。
-    }
-  } finally {
-    process.off('unhandledRejection', onUnhandled);
-    if (restoreWarnC) restoreWarnC();
-    if (restoreInvokeC) restoreInvokeC();
-    cov.resetCoverCacheForTest();
-  }
-}
+  const { run: runImageResources } = await import('./image-resources.mjs');
+  await runImageResources(ctx);
 
 /* ============================================================
    TASK-094（REQ-107）：三布局列表可达性 —— 列表查询带 layout、分页游标/视图
@@ -1061,8 +804,7 @@ export async function run(ctx) {
   checkNew('(fix-9) 画廊首图 onError 留局部失败占位，媒体源变化不复用失败且不污染封面状态',
     tlFix.includes('onError={onImgError}')
     && tlFix.includes("imgFailed ? ' cover-fallback' : ''")
-    && tlFix.includes('failure?.key === mediaKey && failure.src === imgSrc')
-    && tlFix.includes('setFailure({ key: mediaKey, src: imgSrc })')
+    && tlFix.includes('const onImgError = () => lease?.failDecode();')
     && !tlFix.includes('onCoverError('));
 
   /* ---------- fix-10：空必填输入禁用主按钮 ---------- */
@@ -1385,12 +1127,13 @@ export async function run(ctx) {
     const baseCss = src100('../../src/styles/base.css');
     const indexHtml = src100('../../index.html');
     const readme = src100('../../README.md');
-    const configSyncSrc = src100('../../src-tauri/src/config_sync.rs');
+    const localSyncModel = src100('../../src-tauri/src/db/settings.rs');
+    const settingAllowlist = localSyncModel.match(/pub const SYNC_SETTING_KEYS:[\s\S]*?= &\[([\s\S]*?)\];/)?.[1] ?? '';
 
     /* D29 契约断言：README 只负责表达「同步什么 / 什么留在本机」，
-       不锁某一句固定文案；跨语言的排除事实由 config_sync 的上传白名单佐证。 */
-    const readmeConfigSyncContract = (markdown) => {
-      const bullet = markdown.match(/^-\s+\*\*配置同步\*\*[：:](.*)$/m)?.[1] ?? '';
+       不锁某一句固定文案；旧配置快照退役后改查 local_sync 设置白名单，保留否定句反例。 */
+    const readmeLocalSyncContract = (markdown) => {
+      const bullet = markdown.match(/^-\s+\*\*本地资料库同步\*\*[：:](.*)$/m)?.[1] ?? '';
       const clauses = bullet.split(/[；;。]/).map((part) => part.trim()).filter(Boolean);
       const localOnly = (clause) =>
         /(?:本机|本地)/.test(clause)
@@ -1400,51 +1143,25 @@ export async function run(ctx) {
         scope: clauses.some((clause) =>
           /订阅源/.test(clause)
           && /客户端设置/.test(clause)
+          && /读藏状态/.test(clause)
+          && /未读\/收藏正文/.test(clause)
           && /同步/.test(clause)
           && !negatedSync.test(clause)),
         aiLocal: clauses.some((clause) =>
-          /AI\s*配置/.test(clause) && /模型/.test(clause) && localOnly(clause)),
+          /AI\s*配置/.test(clause) && /模型/.test(clause) && /AI\s*产物/.test(clause) && localOnly(clause)),
         credentialsLocal: clauses.some((clause) =>
           /(?:API\s*Key|API\s*密钥|密码|凭据)/i.test(clause) && localOnly(clause)),
         noObsoleteModelClaim: !/模型等非敏感配置/.test(bullet),
+        rssExclusive: /与\s*RSS\s*同步服务互斥/.test(bullet),
       };
     };
     const readmePasses = (markdown) => {
-      const contract = readmeConfigSyncContract(markdown);
+      const contract = readmeLocalSyncContract(markdown);
       return contract.scope
         && contract.aiLocal
         && contract.credentialsLocal
+        && contract.rssExclusive
         && contract.noObsoleteModelClaim;
-    };
-    const rustFunctionBody = (source, signature) => {
-      const start = source.indexOf(signature);
-      if (start < 0) return '';
-      const open = source.indexOf('{', start + signature.length);
-      if (open < 0) return '';
-      let depth = 0;
-      for (let i = open; i < source.length; i += 1) {
-        if (source[i] === '{') depth += 1;
-        else if (source[i] === '}') {
-          depth -= 1;
-          if (depth === 0) return source.slice(open + 1, i);
-        }
-      }
-      return '';
-    };
-    const buildPayloadBody = rustFunctionBody(configSyncSrc, 'pub fn build_payload(');
-    const payloadReads = [...buildPayloadBody.matchAll(
-      /db::get_setting\(\s*conn,\s*"([^"]+)"\s*\)/g,
-    )].map((match) => match[1]);
-    const credentialKeys = ['ai_config', 'greader_password', 'config_sync_credentials', 'miniflux_token'];
-    const configSyncContract = {
-      hasBuildPayload: buildPayloadBody.length > 0,
-      whitelistReads: ['app_settings', 'sync_protocol', 'greader_endpoint', 'greader_username']
-        .every((key) => payloadReads.includes(key)),
-      avoidsCredentialLiterals: credentialKeys.every((key) =>
-        !payloadReads.includes(key) && !buildPayloadBody.includes(`"${key}"`)),
-      exclusionDocumented: credentialKeys.every((key) =>
-        new RegExp(`(?:排除|不同步|不参与同步)[^\\r\\n]{0,160}\\b${key}\\b|\\b${key}\\b[^\\r\\n]{0,160}(?:排除|不同步|不参与同步)`)
-          .test(configSyncSrc)),
     };
 
     /* P3-1旧全局计数器形态已被当前请求serial/Set替代。
@@ -1491,23 +1208,21 @@ export async function run(ctx) {
     checkNew('(t100-d29) api.ts 搜索注释更正为 LIKE 子串（FTS5 仅历史遗留提法），不再宣称 FTS5 全文搜索',
       !apiSrc.includes('FTS5 全文搜索')
         && apiSrc.includes('LIKE 子串匹配'));
-    checkNew('(t100-d29) README 配置同步语义：订阅源/客户端设置参与同步；AI 配置（含模型名）与敏感凭据仅保留本机、不参与同步',
+    checkNew('(t100-d29) README 本地WebDAV语义：订阅/设置/读藏/保护正文参与同步，RSS互斥；AI配置/产物和凭据仅本机',
       readmePasses(readme));
-    checkNew('(t100-d29) config_sync 静态直字面量守卫：build_payload 读取白名单键且不出现四个凭据直字面量，排除清单登记四项（别名/真实 payload 由 config_sync_e2e 管理）',
-      configSyncContract.hasBuildPayload
-        && configSyncContract.whitelistReads
-        && configSyncContract.avoidsCredentialLiterals
-        && configSyncContract.exclusionDocumented);
-    const localOnlyTail = 'AI 配置（包括模型名）留在本机，不参与同步。'
+    checkNew('(t100-d29) WebDAV设置白名单含AI行为，排除AI服务配置与凭据（真实payload由local_sync后端套件验证）',
+      settingAllowlist.includes('articleAutoSummary') && settingAllowlist.includes('fontSize')
+        && !/ai_config|password|apiKey|credentials|token/.test(settingAllowlist));
+    const localOnlyTail = '与 RSS 同步服务互斥。AI 配置（包括模型名）及 AI 产物留在本机，不参与同步。'
       + 'API Key 与密码等凭据保留在本地，不同步。';
-    const positiveReadme = '- **配置同步**：订阅源与客户端设置可跨设备同步。'
+    const positiveReadme = '- **本地资料库同步**：通过 WebDAV 在多设备间同步订阅源、客户端设置、读藏状态及未读/收藏正文。'
       + localOnlyTail;
     const negativeReadmes = ['不参与同步', '不同步', '不进行同步'].map((negation) =>
-      '- **配置同步**：通过 Gist 或 WebDAV 在多台设备间同步；'
-      + `订阅源与客户端设置${negation}。${localOnlyTail}`);
-    const singleObjectReadme = '- **配置同步**：通过 Gist 或 WebDAV 同步订阅源。'
+      '- **本地资料库同步**：通过 WebDAV 在多台设备间同步；'
+      + `订阅源、客户端设置、读藏状态及未读/收藏正文${negation}。${localOnlyTail}`);
+    const singleObjectReadme = '- **本地资料库同步**：通过 WebDAV 同步订阅源。'
       + localOnlyTail;
-    const crossClauseReadme = '- **配置同步**：订阅源可同步；客户端设置可同步。'
+    const crossClauseReadme = '- **本地资料库同步**：订阅源可同步；客户端设置、读藏状态及未读/收藏正文可同步。'
       + localOnlyTail;
     const obsoleteModelReadme = positiveReadme + '模型等非敏感配置也会同步。';
     checkNew('(t100-d29) README readmePasses 自检：完整正向样本通过',
@@ -1661,7 +1376,7 @@ export async function run(ctx) {
   const src101 = (p) => fs101.readFileSync(new URL(p, import.meta.url), 'utf8');
 
   const syncTab101 = src101('../../src/components/settings/SyncTab.tsx');
-  const configSync101 = src101('../../src/components/settings/ConfigSyncSection.tsx');
+  const configSync101 = src101('../../src/components/settings/PortableBackupSection.tsx');
   const cacheCleanup101 = src101('../../src/components/settings/CacheCleanupSection.tsx');
   const general101 = src101('../../src/components/settings/GeneralTab.tsx');
 
@@ -1714,19 +1429,15 @@ export async function run(ctx) {
     syncTab101.includes('同步服务生成的 API 用户名；Miniflux 在「集成」页查看（非登录密码）')
     && !syncTab101.includes('页单独配置的用户名')
     && !syncTab101.includes('非 Miniflux 账号密码'));
-  checkNew('(t101-audit-2) ConfigSyncSection Token desc 56→47 字：classic PAT/gist scope/fine-grained 不支持 全保留（TASK-102 ≤48 口径）',
-    configSync101.includes('手动填入；classic PAT 需勾 gist scope，fine-grained 不支持')
-    && !configSync101.includes('手动填入替代网页登录')
-    && !configSync101.includes('fine-grained PAT 不支持 Gist API'));
-  checkNew('(t101-audit-3) ConfigSyncSection WebDAV desc 55→31 字：配置文件名 fluxreader-config.json 保留（示例 URL 由输入框 placeholder 表达，TASK-102 ≤48 口径）',
-    configSync101.includes('配置在服务器存为 fluxreader-config.json')
-    && !configSync101.includes('例如 https://dav.example.com')
-    && !configSync101.includes('dav.example.com/fluxreader（配置存为'));
+  checkNew('(t101-audit-2) 便携恢复明确断开服务和重新输入凭据',
+    configSync101.includes('RSS 与 WebDAV 均会断开') && configSync101.includes('凭据需要重新输入'));
+  checkNew('(t101-audit-3) 便携预览明确缺正文与替换当前资料库',
+    configSync101.includes('缺少正文') && configSync101.includes('替换当前资料库'));
 
   /* ---------- 审计兜底：九个设置组件静态 desc 全量扫描，>60 字清零（修前 63/66/69 三处） ---------- */
   const auditedDescs101 = [
     'GeneralTab', 'ReadingTab', 'AppearanceTab', 'AboutTab', 'FeedsTab',
-    'AiTab', 'ConfigSyncSection', 'DatabaseBackupSection', 'CacheCleanupSection', 'SyncTab',
+    'AiTab', 'LocalSyncSection', 'PortableBackupSection', 'DatabaseBackupSection', 'CacheCleanupSection', 'SyncTab',
   ].flatMap((f) => [...src101(`../../src/components/settings/${f}.tsx`).matchAll(/desc="([^"]+)"/g)])
     .map((m) => m[1]);
   checkNew('(t101-audit-4) 九组件静态 desc 扫描（' + auditedDescs101.length + ' 条）：>60 字长 desc 清零',
@@ -1742,10 +1453,10 @@ export async function run(ctx) {
     && syncTab101.includes('本地直连订阅及其已读/收藏值保留')
     && syncTab101.includes('不会在重连后自动补推')
     && cacheCleanup101.includes('此操作不可撤销')
-    && cacheCleanup101.includes('未读文章不会清理')
+    && cacheCleanup101.includes('未读与收藏正文保留')
     && cacheCleanup101.includes('已读、未收藏且无待同步状态')
     && cacheCleanup101.includes('正文保留')
-    && configSync101.includes('下载先预览：合并保留本地独有；镜像删除本地多出对象，确认后才写入')
+    && configSync101.includes('先校验并预览；确认后替换当前资料库')
     && general101.includes('托盘菜单「退出」才是真正退出'));
 }
 
@@ -1768,7 +1479,7 @@ export async function run(ctx) {
   const general102 = src102('../../src/components/settings/GeneralTab.tsx');
   const reading102 = src102('../../src/components/settings/ReadingTab.tsx');
   const about102 = src102('../../src/components/settings/AboutTab.tsx');
-  const configSync102 = src102('../../src/components/settings/ConfigSyncSection.tsx');
+  const configSync102 = src102('../../src/components/settings/PortableBackupSection.tsx');
   const cacheCleanup102 = src102('../../src/components/settings/CacheCleanupSection.tsx');
   const shared102 = src102('../../src/components/settings/shared.ts');
 
@@ -1811,7 +1522,7 @@ export async function run(ctx) {
   /* ---------- X3：全设置组件文案扫描守卫（新增长文案直接红） ---------- */
   const scanFiles102 = [
     'GeneralTab', 'ReadingTab', 'AppearanceTab', 'AboutTab', 'FeedsTab',
-    'AiTab', 'ConfigSyncSection', 'DatabaseBackupSection', 'CacheCleanupSection', 'SyncTab',
+    'AiTab', 'LocalSyncSection', 'PortableBackupSection', 'DatabaseBackupSection', 'CacheCleanupSection', 'SyncTab',
     'AutoStartSwitch', 'ShortcutsTab', 'SettingsSidebarFooter',
   ];
   /* 去掉注释再取字面量：注释里的引号示例不计入文案；模板串（动态拼接的
@@ -1851,9 +1562,9 @@ export async function run(ctx) {
     && general102.includes('托盘菜单「退出」才是真正退出')
     /* OPT-010：下载覆盖旧文案改为预览/合并/镜像语义（含模型/密钥的 AI 服务
        配置不在同步范围——旧文案与后端白名单矛盾）。 */
-    && configSync102.includes('下载先预览：合并保留本地独有；镜像删除本地多出对象，确认后才写入')
+    && configSync102.includes('先校验并预览；确认后替换当前资料库')
     && cacheCleanup102.includes('此操作不可撤销')
-    && cacheCleanup102.includes('未读文章不会清理')
+    && cacheCleanup102.includes('未读与收藏正文保留')
     && cacheCleanup102.includes('已读、未收藏且无待同步状态'));
   const subtitles102 = [...shared102.matchAll(/subtitle: '([^']+)'/g)].map((m) => m[1]);
   checkNew('(t102-x3d) 侧栏 8 个 tab subtitle（组标题级说明同口径）全部 ≤48 字',
@@ -1874,7 +1585,7 @@ export async function run(ctx) {
     '../../src/components/Reader.tsx',
     '../../src/components/Timeline.tsx',
     '../../src/components/settings/AboutTab.tsx',
-    '../../src/components/settings/ConfigSyncSection.tsx',
+    '../../src/components/settings/PortableBackupSection.tsx',
     '../../src/store/slices/sync.ts',
   ].map((p) => srcCopy(p)).join('\n');
   const copyPolicy = await import('../../dist-test/lib/copyPolicy.js');
@@ -2227,8 +1938,10 @@ export async function run(ctx) {
   const { createElement: ce116 } = await import('react');
   const { Sidebar: Sidebar116 } = await import('../../src/components/Sidebar.tsx');
   const pillBase116 = rsm116(ce116(Sidebar116));
-  checkNew('(t116-x1f) SSR 烟测：Sidebar 组件树可执行，初始态渲染「本地模式」+ 独立灯按钮 + 状态 live region',
-    pillBase116.includes('>本地模式<')
+  checkNew('(t116-x1f) SSR 烟测：WebDAV尚未读取时初始态明确未知，保留独立灯按钮与状态 live region',
+    pillBase116.includes('>同步状态未确认<')
+    && pillBase116.includes('sync-dot--pending')
+    && !pillBase116.includes('sync-dot--success')
     && pillBase116.includes('sync-indicator-button')
     && pillBase116.includes('role="status"')
     && pillBase116.includes('sync-status-pill')
@@ -2489,9 +2202,12 @@ export async function run(ctx) {
      承担，本块用 react-dom/server 的**真实 SSR 输出**取证——不用「源码含
      isRawRenderMode」之类 token 断言代替输出；修前对照见
      tmp/optimization-20261008/OPT-012/probe-before.mjs（复刻旧分支 = 三类标签真实出现）。
-   - 值传递（显示 RSS 原文/提取全文/译文、代理 base64 只进渲染态）无 DOM harness，
-     且 zustand v5 server snapshot 恒读 getInitialState（t116 注），故由 Reader.tsx
-     参数级接线断言钉住（cov-wire/t111-6 先例），行为面由上面 SSR 输出互补。
+   - 2026-11-11 门禁适配：生产图片代理已改为 ReaderProse 内的可见节点租约，
+     Reader 不再拼整篇 proxiedContent。下面 AST 检查实际值传递与唯一 HTML 入口；
+     reader-prose.test.mjs 真实挂载 Reader 验证源码/渲染/流式切换，
+     image-resources.test.mjs 验证 Blob/原 URL、稳定节点与源码零新请求。
+     本块 SSR 不执行 effect，保留原 data URI 呈现兼容断言，但不把它当作租约证据。
+     后端净化仍由读取边界与提取/翻译写入路径承担，图片准备器本身不是净化器。
    ============================================================ */
 {
   const fsOpt12 = await import('node:fs');
@@ -2556,13 +2272,105 @@ export async function run(ctx) {
     && streamSourceOut.includes('&lt;script&gt;') && !streamSourceOut.includes('<script>')
     && !streamSourceOut.includes('<p>') && !streamSourceOut.includes('<img'));
 
-  /* ---- D：值传递接线（源级；SSR 读不到 store 真值——t116 注边界） ---- */
+  /* ---- D：值传递接线（源级；SSR 读不到 store 真值——t116 注边界） ----
+     原 opt012-d1 只因已退役的 proxiedContent 表达式而失败。更新到当前真实链，
+     用 TypeScript 语法树定位实际声明/分支/JSX，注释或无关位置同名字符串不能充数。
+     保留 RSS/全文选择、已净化译文选择、源码原文、流式文本和唯一 HTML sink；
+     后面的反例只变异内存源码，不写产品文件，也不重造一份呈现算法当期望。 */
   const readerSrcOpt12 = fsOpt12.readFileSync(new URL('../../src/components/Reader.tsx', import.meta.url), 'utf8');
-  checkNew('(opt012-d1) Reader 接线：渲染态 HTML = 消毒译文 / 代理命中产物 ?? baseHtml；源码文本 = 译文 / 未经代理的 baseHtml；Reader.tsx 不再有第二处 HTML 创建路径',
-    readerSrcOpt12.includes('const renderHtml = isShowingTranslatedProse')
-    && readerSrcOpt12.includes('proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml')
-    && readerSrcOpt12.includes('const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml')
-    && !/dangerouslySetInnerHTML\s*=\s*\{\{/.test(readerSrcOpt12));
+  const proseSrcOpt12 = fsOpt12.readFileSync(new URL('../../src/components/ReaderProse.tsx', import.meta.url), 'utf8');
+  const imagesSrcOpt12 = fsOpt12.readFileSync(new URL('../../src/components/useProseImages.ts', import.meta.url), 'utf8');
+  const { default: tsOpt12 } = await import('typescript');
+  const printerOpt12 = tsOpt12.createPrinter({ removeComments: true });
+  const proseWiring = (readerText, proseText, imagesText) => {
+    const ts = tsOpt12;
+    const parse = (name, text) => ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const readerFile = parse('Reader.tsx', readerText);
+    const proseFile = parse('ReaderProse.tsx', proseText);
+    const imagesFile = parse('useProseImages.ts', imagesText);
+    if ([readerFile, proseFile, imagesFile].some((file) => file.parseDiagnostics.length)) return false;
+    const code = (node) => node ? printerOpt12.printNode(ts.EmitHint.Unspecified, node, node.getSourceFile()).replace(/\s+/g, '') : '';
+    const fn = (file, name) => file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    const declarations = (fun) => fun?.body?.statements.flatMap((node) => ts.isVariableStatement(node) ? [...node.declarationList.declarations] : []) ?? [];
+    const variable = (fun, name) => declarations(fun).find((node) => ts.isIdentifier(node.name) && node.name.text === name)?.initializer;
+    const nodes = (root, predicate) => {
+      const found = [];
+      const visit = (node) => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
+      if (root) visit(root);
+      return found;
+    };
+    const unwrap = (node) => { while (node && ts.isParenthesizedExpression(node)) node = node.expression; return node; };
+    const returns = (block) => block?.statements?.filter(ts.isReturnStatement) ?? [];
+    const attr = (opening, name) => opening?.attributes.properties.find((node) => ts.isJsxAttribute(node) && node.name.text === name);
+    const attrCode = (opening, name) => { const value = attr(opening, name)?.initializer; return value && ts.isJsxExpression(value) ? code(value.expression) : ''; };
+    const htmlSinks = (root) => nodes(root, (node) => ts.isJsxAttribute(node) && node.name.text === 'dangerouslySetInnerHTML');
+    const textOnly = (element, expression) => {
+      if (!element || !ts.isJsxElement(element)) return false;
+      const content = element.children.filter((node) => !ts.isJsxText(node) || node.text.trim());
+      return content.length === 1 && ts.isJsxExpression(content[0]) && code(content[0].expression) === expression;
+    };
+    const imports = (file, from, name) => file.statements.some((node) => ts.isImportDeclaration(node)
+      && node.moduleSpecifier.text === from && node.importClause?.namedBindings
+      && ts.isNamedImports(node.importClause.namedBindings)
+      && node.importClause.namedBindings.elements.some((item) => item.name.text === name && !item.propertyName));
+    const reader = fn(readerFile, 'Reader');
+    const prose = fn(proseFile, 'ReaderProse');
+    const images = fn(imagesFile, 'useProseImages');
+    const readers = nodes(reader, (node) => ts.isJsxSelfClosingElement(node) && code(node.tagName) === 'ReaderProse');
+    const hook = declarations(prose).find((node) => node.initializer && ts.isCallExpression(node.initializer)
+      && code(node.initializer.expression) === 'useProseImages');
+    const hookArgs = hook?.initializer.arguments ?? [];
+    const imageInput = hookArgs[0];
+    const sourceIf = prose?.body?.statements.find((node) => ts.isIfStatement(node) && code(node.expression) === 'isSourceMode');
+    const streamIf = prose?.body?.statements.find((node) => ts.isIfStatement(node) && code(node.expression) === 'isStreamingTranslation');
+    const sourceReturn = unwrap(returns(sourceIf?.thenStatement)[0]?.expression);
+    const streamReturn = unwrap(returns(streamIf?.thenStatement)[0]?.expression);
+    const sourcePre = nodes(sourceReturn, (node) => ts.isJsxElement(node) && code(node.openingElement.tagName) === 'pre');
+    const rendered = unwrap(returns(prose?.body).at(-1)?.expression);
+    const opening = rendered && ts.isJsxSelfClosingElement(rendered) ? rendered : undefined;
+    const imageMarkup = variable(images, 'markup');
+    const markupFactory = imageMarkup && ts.isCallExpression(imageMarkup) ? imageMarkup.arguments[0] : undefined;
+    const markupObject = markupFactory && ts.isArrowFunction(markupFactory) ? unwrap(markupFactory.body) : undefined;
+    const htmlProperty = markupObject && ts.isObjectLiteralExpression(markupObject)
+      ? markupObject.properties.find((node) => ts.isPropertyAssignment(node) && code(node.name) === '__html') : undefined;
+    return imports(readerFile, './ReaderProse', 'ReaderProse')
+      && imports(proseFile, './useProseImages', 'useProseImages')
+      && code(variable(reader, 'baseHtml')) === 'showFulltext||!body.rawContent?body.content:body.rawContent'
+      && code(variable(reader, 'renderHtml')) === 'isShowingTranslatedProse?body.translatedContent:baseHtml'
+      && code(variable(reader, 'sourceText')) === 'isShowingTranslatedProse?body.translatedContent:baseHtml'
+      && readers.length === 1 && attrCode(readers[0], 'renderHtml') === 'renderHtml'
+      && attrCode(readers[0], 'sourceText') === 'sourceText'
+      && attrCode(readers[0], 'isSourceMode') === 'isRawRenderMode'
+      && attrCode(readers[0], 'isStreamingTranslation') === 'isShowingTranslatedProse&&!!rawStream'
+      && attrCode(readers[0], 'imagePageUrl') === 'art.url'
+      && attrCode(readers[0], 'imagesEnabled') === '!libraryRestoreBusy'
+      && htmlSinks(reader).length === 0
+      && code(hook?.name) === '{ref:imagesRef,markup}'
+      && hookArgs.length === 4 && imageInput && ts.isConditionalExpression(imageInput)
+      && code(imageInput.condition) === 'isSourceMode||isStreamingTranslation'
+      && ts.isStringLiteral(imageInput.whenTrue) && imageInput.whenTrue.text === ''
+      && code(imageInput.whenFalse) === 'renderHtml'
+      && hookArgs.slice(1).map(code).join('|') === 'imagePageUrl|imageOwner|imagesEnabled&&!isSourceMode&&!isStreamingTranslation'
+      && sourcePre.length === 1 && textOnly(sourcePre[0], 'sourceText')
+      && textOnly(streamReturn, 'renderHtml') && htmlSinks(prose).length === 1
+      && rendered && sourceIf.pos < streamIf.pos && streamIf.pos < rendered.pos
+      && attrCode(opening, 'ref') === 'imagesRef' && attrCode(opening, 'dangerouslySetInnerHTML') === 'markup'
+      && code(variable(images, 'prepared')) === 'useMemo(()=>prepare(html),[html])'
+      && imageMarkup && ts.isCallExpression(imageMarkup) && code(imageMarkup.expression) === 'useMemo'
+      && code(htmlProperty?.initializer) === 'prepared.__html'
+      && code(unwrap(returns(images?.body).at(-1)?.expression)) === '{ref,markup}';
+  };
+  checkNew('(opt012-d1) Reader→ReaderProse→图片节点：原文/净化译文选择、源码原文与流式纯文本分离，只有渲染分支消费准备后的 HTML',
+    proseWiring(readerSrcOpt12, proseSrcOpt12, imagesSrcOpt12));
+  const wrongSourceOpt12 = readerSrcOpt12.replace('const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml', 'const sourceText = body.content');
+  checkNew('(opt012-d1-source-negative) 接线负控：源码绕过 RSS/译文选择必须失败',
+    wrongSourceOpt12 !== readerSrcOpt12 && !proseWiring(wrongSourceOpt12, proseSrcOpt12, imagesSrcOpt12));
+  const unsafeStreamOpt12 = proseSrcOpt12.replace('if (isStreamingTranslation)', 'if (false)');
+  checkNew('(opt012-d1-stream-negative) 接线负控：取消流式文本分支、使其落入 HTML 必须失败',
+    unsafeStreamOpt12 !== proseSrcOpt12 && !proseWiring(readerSrcOpt12, unsafeStreamOpt12, imagesSrcOpt12));
+  const unsafeSinkOpt12 = proseSrcOpt12.replace('dangerouslySetInnerHTML={markup}', 'dangerouslySetInnerHTML={{ __html: sourceText }}');
+  checkNew('(opt012-d1-sink-negative) 接线负控：HTML 入口绕过图片节点准备链必须失败',
+    unsafeSinkOpt12 !== proseSrcOpt12 && !proseWiring(readerSrcOpt12, unsafeSinkOpt12, imagesSrcOpt12));
   checkNew('(opt012-d2) Reader 接线：三个模式开关与内容按名传入 ReaderProse（isSourceMode=isRawRenderMode；isStreamingTranslation=译文+rawStream；renderHtml/sourceText/onClick）',
     readerSrcOpt12.includes('isSourceMode={isRawRenderMode}')
     && readerSrcOpt12.includes('isStreamingTranslation={isShowingTranslatedProse && !!rawStream}')
@@ -2858,3 +2666,5 @@ export async function run(ctx) {
   const { run: runManualSyncStatus } = await import('./manual-sync-status.mjs');
   await runManualSyncStatus(ctx);
 }
+
+

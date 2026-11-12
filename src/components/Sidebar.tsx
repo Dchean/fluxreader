@@ -62,6 +62,9 @@ export function Sidebar() {
   const syncFailure = useAppStore((s) => s.syncFailure);
   const backgroundSyncing = useAppStore((s) => s.backgroundSyncing);
   const syncConnected = useAppStore((s) => s.syncConnected);
+  const localSync = useAppStore((s) => s.localSyncState);
+  const localSyncBusy = useAppStore((s) => s.localSyncBusy);
+  const localSyncError = useAppStore((s) => s.localSyncError);
   const syncAccount = useAppStore((s) => s.syncAccount);
   const syncProtocol = useAppStore((s) => s.syncProtocol);
   const syncLastSync = useAppStore((s) => s.syncLastSync);
@@ -125,6 +128,7 @@ export function Sidebar() {
     syncStatus,
     backgroundSyncing,
     syncConnected,
+    localSync, localSyncBusy, localSyncError,
     account: syncAccount,
     protocol: syncProtocol,
     lastSync: syncLastSync,
@@ -361,7 +365,16 @@ export function Sidebar() {
           <button
             type="button"
             className="sync-indicator-button"
-            onClick={() => { void triggerManualSync(); }}
+            onClick={() => {
+              const state = useAppStore.getState();
+              if (!state.syncConnected && state.localSyncState?.connected) void state.runLocalSync();
+              else if (!state.syncConnected && state.localSyncState === null) {
+                void state.refreshLocalSyncStatus().then((status) => {
+                  if (status.connected) void useAppStore.getState().runLocalSync();
+                  else void triggerManualSync();
+                }).catch(() => { state.openSettingsTab('sync'); });
+              } else void triggerManualSync();
+            }}
             disabled={syncView.busy}
             aria-label={syncView.syncAriaLabel}
             aria-busy={syncView.busy}

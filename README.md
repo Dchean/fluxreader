@@ -10,7 +10,7 @@ FluxReader 是一款本地优先的 Windows 桌面 RSS 客户端：全部数据�
 - **全文提取与 OPML**：对订阅源条目抓取全文，支持 OPML 订阅列表导入导出。
 - **播客播放**：内置音视频播放器，直接收听订阅的播客节目。
 - **桌面集成**：系统托盘、SMTC 媒体键控制、系统通知、开机自启与窗口状态记忆。
-- **配置同步**：通过 Gist 或 WebDAV 在多台设备间同步订阅源与客户端设置；AI 配置（含模型名）以及 API Key、密码等敏感凭据始终保留在本机，不参与同步。
+- **本地资料库同步**：纯本地模式通过 WebDAV 持续同步订阅源、分类、客户端设置、读藏状态及未读/收藏正文；与 RSS 同步服务互斥。AI 配置（含模型名）、AI 产物以及 API Key、密码等凭据保留在本机，不参与同步。
 
 尚未关闭的问题、已接受的兼容边界与桌面集成的验证范围，见[当前缺口与已知限制](docs/roadmap.md)；开发分支的修复与验收状态由该页链接的验收入口维护。
 
@@ -70,7 +70,7 @@ Rust 侧命令在 `src-tauri/` 下执行，本地须运行 `cargo fmt --all -- -
 | 文档 | 内容 |
 | --- | --- |
 | [docs/sync-compat-matrix.md](docs/sync-compat-matrix.md) | Google Reader / Fever 协议与 FreshRSS、Miniflux 的兼容矩阵，及冲突政策与已知实现差异 |
-| [docs/backup.md](docs/backup.md) | 数据库快照、保留策略、备份安全边界与手动恢复步骤 |
+| [docs/backup.md](docs/backup.md) | 便携备份与换机、WebDAV边界及本机数据库故障恢复 |
 | [docs/roadmap.md](docs/roadmap.md) | 当前缺口与已知限制 |
 | [docs/release.md](docs/release.md) | 发布序列、tag 附注结构与提交信息约定 |
 | [.agents/notes/](.agents/notes/) | 各项设计决定的记录：为什么这样做、当时放弃了哪些方案 |

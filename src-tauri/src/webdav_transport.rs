@@ -178,8 +178,9 @@ pub struct Batch {
 const BATCH_LIMIT: usize = 256 * 1024;
 const MAX_INTENTS: usize = 256;
 const MAX_ACTORS: usize = 64;
-const MAX_FIELDS: usize = 16_384;
-const MAX_ACTIVE_INTENTS: usize = 4096;
+// Complete application checkpoints are transported as bounded shards.
+const MAX_FIELDS: usize = 1_000_000;
+pub(crate) const MAX_ACTIVE_INTENTS: usize = 4096;
 
 fn validate_frontier(frontier: &Frontier) -> Result<()> {
     if frontier.len() > MAX_ACTORS
@@ -330,6 +331,48 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
+    /// Incrementally assemble bounded pages under one validated header. This uses
+    /// the exact same register join as merge(), without cloning all prior pages.
+    /// The caller validates the complete checkpoint after the last page.
+    pub fn join_fields(
+        &mut self,
+        fields: std::collections::BTreeMap<String, Register>,
+    ) -> Result<()> {
+        // Preflight the whole page so an invalid same-stamp field cannot leave a
+        // partially joined page observable to its caller.
+        for (key, register) in &fields {
+            if self
+                .fields
+                .get(key)
+                .is_some_and(|old| old.stamp == register.stamp && old.value != register.value)
+            {
+                return Err(error(
+                    ErrorKind::Conflict,
+                    "same operation stamp has different field contents",
+                ));
+            }
+        }
+        let additions = fields
+            .keys()
+            .filter(|key| !self.fields.contains_key(*key))
+            .count();
+        if self.fields.len() + additions > MAX_FIELDS {
+            return Err(error(
+                ErrorKind::TooLarge,
+                "checkpoint field capacity exceeded",
+            ));
+        }
+        for (key, register) in fields {
+            join_register(&mut self.fields, &key, &register)?;
+        }
+        if self.fields.len() > MAX_FIELDS {
+            return Err(error(
+                ErrorKind::TooLarge,
+                "checkpoint field capacity exceeded",
+            ));
+        }
+        Ok(())
+    }
     pub fn empty(library_id: &str) -> Result<Self> {
         if !valid_id(library_id) {
             return Err(error(ErrorKind::InvalidInput, "invalid library identity"));
@@ -389,7 +432,35 @@ impl Checkpoint {
     /// Field tombstones participate, so a removed setting cannot reappear from
     /// an older checkpoint. A frontier alone is not state domination evidence.
     pub fn dominates(&self, other: &Self) -> Result<bool> {
-        Ok(self.merge(other)? == *self)
+        self.validate()?;
+        other.validate()?;
+        if self.library_id != other.library_id {
+            return Err(error(ErrorKind::Conflict, "different libraries"));
+        }
+        // Equivalent to merge(other)==self without cloning a large checkpoint.
+        // Preserve merge's same-stamp conflict even if coverage already differs.
+        for (key, incoming) in &other.fields {
+            if self
+                .fields
+                .get(key)
+                .is_some_and(|old| old.stamp == incoming.stamp && old.value != incoming.value)
+            {
+                return Err(error(
+                    ErrorKind::Conflict,
+                    "same operation stamp has different field contents",
+                ));
+            }
+        }
+        Ok(self.max_lamport >= other.max_lamport
+            && other
+                .covered
+                .iter()
+                .all(|(actor, seq)| frontier_seq(&self.covered, actor) >= *seq)
+            && other.fields.iter().all(|(key, incoming)| {
+                self.fields
+                    .get(key)
+                    .is_some_and(|old| old.stamp >= incoming.stamp)
+            }))
     }
 }
 
@@ -777,6 +848,178 @@ fn object_id(name: &str, kind: &str) -> Option<String> {
 }
 
 impl Transport {
+    /// Persistent library resources are confined to a reserved child namespace.
+    /// These primitives never follow redirects and never recursively delete it.
+    fn library_resource(&self, path: &str, directory: bool) -> Result<Url> {
+        if !path.starts_with(".fluxreader-v3/")
+            || path.len() > 1024
+            || path.trim_end_matches('/').split('/').any(|part| {
+                part.is_empty()
+                    || part == "."
+                    || part == ".."
+                    || part.len() > 180
+                    || !part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            })
+        {
+            return Err(error(
+                ErrorKind::InvalidInput,
+                "invalid library resource path",
+            ));
+        }
+        let path = if directory {
+            format!("{}/", path.trim_end_matches('/'))
+        } else {
+            path.trim_end_matches('/').to_owned()
+        };
+        self.base
+            .join(&path)
+            .map_err(|_| error(ErrorKind::InvalidInput, "invalid library resource URL"))
+    }
+
+    pub async fn library_mkdir(&self, path: &str) -> Result<()> {
+        let url = self.library_resource(path, true)?;
+        let response = self
+            .request("MKCOL", url)?
+            .send()
+            .await
+            .map_err(|_| error(ErrorKind::OutcomeUnknown, "library MKCOL result unknown"))?;
+        require_status(
+            response.status(),
+            &[StatusCode::CREATED, StatusCode::METHOD_NOT_ALLOWED],
+        )?;
+        read_bounded(response, XML_LIMIT).await?;
+        Ok(())
+    }
+
+    pub async fn library_get(&self, path: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+        if limit == 0 || limit > 4 * 1024 * 1024 {
+            return Err(error(
+                ErrorKind::InvalidInput,
+                "invalid library object budget",
+            ));
+        }
+        let response = self
+            .request("GET", self.library_resource(path, false)?)?
+            .send()
+            .await
+            .map_err(|_| error(ErrorKind::Network, "library GET failed"))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        require_status(response.status(), &[StatusCode::OK])?;
+        Ok(Some(read_bounded(response, limit).await?))
+    }
+
+    /// Conditional creation plus exact readback. A response is storage evidence,
+    /// never a field-winner acknowledgement. The caller persists sealed bytes.
+    pub async fn library_store(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        self.library_store_guarded(path, bytes, || async { Ok(()) })
+            .await
+    }
+
+    /// Caller-owned session checks run before each necessary HTTP step. The
+    /// immutable bytes/readback contract is identical to library_store.
+    pub async fn library_store_guarded<F, Fut>(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        mut check: F,
+    ) -> Result<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(error(ErrorKind::TooLarge, "library object exceeds 4 MiB"));
+        }
+        check().await?;
+        if let Some(existing) = self.library_get(path, 4 * 1024 * 1024).await? {
+            return if existing == bytes {
+                Ok(())
+            } else {
+                Err(error(
+                    ErrorKind::Conflict,
+                    "immutable library resource already has different bytes",
+                ))
+            };
+        }
+        check().await?;
+        let response = self
+            .request("PUT", self.library_resource(path, false)?)?
+            .header(header::IF_NONE_MATCH, "*")
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes.to_owned())
+            .send()
+            .await
+            .map_err(|_| {
+                error(
+                    ErrorKind::OutcomeUnknown,
+                    "library PUT result unknown; retain sealed bytes",
+                )
+            })?;
+        require_status(
+            response.status(),
+            &[StatusCode::CREATED, StatusCode::PRECONDITION_FAILED],
+        )?;
+        read_bounded(response, XML_LIMIT).await?;
+        check().await?;
+        match self.library_get(path, 4 * 1024 * 1024).await? {
+            Some(actual) if actual == bytes => Ok(()),
+            _ => Err(error(
+                ErrorKind::OutcomeUnknown,
+                "library exact readback incomplete",
+            )),
+        }
+    }
+
+    pub async fn library_list(&self, path: &str) -> Result<Vec<String>> {
+        let url = self.library_resource(path, true)?;
+        // Collections need not have an ETag. Request only resourcetype, otherwise
+        // real servers legitimately return two propstat blocks (200 + 404).
+        let response = self
+            .request("PROPFIND", url.clone())?
+            .header("Depth", "1")
+            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+            .body("<D:propfind xmlns:D=\"DAV:\"><D:prop><D:resourcetype/></D:prop></D:propfind>")
+            .send()
+            .await
+            .map_err(|_| error(ErrorKind::Network, "library PROPFIND failed"))?;
+        require_status(response.status(), &[StatusCode::MULTI_STATUS])?;
+        parse_listing_with_limit(&read_bounded(response, XML_LIMIT).await?, &url, 256, true)
+    }
+
+    /// Only exact files in the reserved library. No root/directory DELETE API.
+    pub async fn library_remove(&self, path: &str) -> Result<()> {
+        if path.ends_with('/')
+            || !path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.ends_with(".json") || name.ends_with(".bin"))
+        {
+            return Err(error(
+                ErrorKind::InvalidInput,
+                "library removal requires an exact object",
+            ));
+        }
+        let response = self
+            .request("DELETE", self.library_resource(path, false)?)?
+            .send()
+            .await
+            .map_err(|_| error(ErrorKind::OutcomeUnknown, "library DELETE result unknown"))?;
+        require_status(
+            response.status(),
+            &[
+                StatusCode::OK,
+                StatusCode::NO_CONTENT,
+                StatusCode::NOT_FOUND,
+            ],
+        )?;
+        read_bounded(response, XML_LIMIT).await?;
+        Ok(())
+    }
+
     pub fn new(base: &str, credentials: Option<Credentials>, timeout: Duration) -> Result<Self> {
         let mut base = Url::parse(base)
             .map_err(|_| error(ErrorKind::InvalidInput, "invalid WebDAV collection URL"))?;
@@ -1627,12 +1870,29 @@ fn parse_lock(bytes: &[u8], token: &str, collection: &Url) -> Result<Duration> {
     let seconds = timeout
         .strip_prefix("Second-")
         .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|&seconds| (1..=3600).contains(&seconds))
+        .filter(|&seconds| seconds <= 3600)
         .ok_or_else(|| error(ErrorKind::InvalidXml, "finite lock timeout required"))?;
+    // WebDAV servers may floor their remaining lease to Second-0. This is a
+    // valid, unusable lease response, not malformed XML; never publish with it.
+    if seconds == 0 {
+        return Err(error(
+            ErrorKind::LeaseExpired,
+            "server returned an expired lock; acquire and re-read before publishing",
+        ));
+    }
     Ok(Duration::from_secs(seconds))
 }
 
 fn parse_listing(bytes: &[u8], collection: &Url) -> Result<Vec<String>> {
+    parse_listing_with_limit(bytes, collection, 128, false)
+}
+
+fn parse_listing_with_limit(
+    bytes: &[u8],
+    collection: &Url,
+    limit: usize,
+    allow_collections: bool,
+) -> Result<Vec<String>> {
     let doc = parse_xml(bytes)?;
     let root = doc.root("multistatus")?;
     let mut names = std::collections::BTreeSet::new();
@@ -1658,20 +1918,78 @@ fn parse_listing(bytes: &[u8], collection: &Url) -> Result<Vec<String>> {
         if url == *collection {
             continue;
         }
-        let name = url
+        let relative = url
             .path()
             .strip_prefix(collection.path())
+            .map(|name| {
+                if allow_collections {
+                    name.trim_end_matches('/')
+                } else {
+                    name
+                }
+            })
             .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('%'))
             .ok_or_else(|| error(ErrorKind::InvalidXml, "listing is not Depth:1"))?;
+        let name = relative;
         if !name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
         {
             return Err(error(ErrorKind::InvalidXml, "invalid listed file name"));
         }
-        let propstat = doc.child(index, "propstat")?;
-        let status = doc.text(doc.child(propstat, "status")?)?;
-        if !matches!(status, "HTTP/1.1 200 OK" | "HTTP/1.0 200 OK") {
+        let good = if allow_collections {
+            let mut resource_type = None;
+            for &child in &doc.nodes[index].children {
+                let node = &doc.nodes[child];
+                if node.namespace != DAV {
+                    return Err(error(
+                        ErrorKind::InvalidXml,
+                        "foreign response child namespace",
+                    ));
+                }
+                if node.name == "href" {
+                    continue;
+                }
+                if node.name != "propstat" {
+                    return Err(error(
+                        ErrorKind::InvalidXml,
+                        "unexpected listing response child",
+                    ));
+                }
+                let status = doc.text(doc.child(child, "status")?)?;
+                let pieces: Vec<_> = status.split_whitespace().collect();
+                if pieces.len() < 2
+                    || !matches!(pieces[0], "HTTP/1.0" | "HTTP/1.1")
+                    || pieces[1]
+                        .parse::<u16>()
+                        .ok()
+                        .map_or(true, |n| !(100..=599).contains(&n))
+                {
+                    return Err(error(ErrorKind::InvalidXml, "invalid property status line"));
+                }
+                let prop = doc.child(child, "prop")?;
+                for &property in &doc.nodes[prop].children {
+                    let property = &doc.nodes[property];
+                    if property.namespace == DAV && property.name == "resourcetype" {
+                        if resource_type.is_some() {
+                            return Err(error(
+                                ErrorKind::InvalidXml,
+                                "duplicate resourcetype across propstat blocks",
+                            ));
+                        }
+                        resource_type = Some(pieces[1] == "200");
+                    }
+                }
+            }
+            resource_type == Some(true)
+        } else {
+            let propstat = doc.child(index, "propstat")?;
+            matches!(
+                doc.text(doc.child(propstat, "status")?)?,
+                "HTTP/1.1 200 OK" | "HTTP/1.0 200 OK"
+            )
+        };
+        if !good {
             return Err(error(
                 ErrorKind::InvalidXml,
                 "listing property request failed",
@@ -1680,7 +1998,7 @@ fn parse_listing(bytes: &[u8], collection: &Url) -> Result<Vec<String>> {
         if !names.insert(name.to_owned()) {
             return Err(error(ErrorKind::InvalidXml, "duplicate listing href"));
         }
-        if names.len() > 128 {
+        if names.len() > limit {
             return Err(error(
                 ErrorKind::TooLarge,
                 "listing resource budget exceeded",
@@ -1693,6 +2011,63 @@ fn parse_listing(bytes: &[u8], collection: &Url) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn legitimate_zero_remaining_lock_is_expired_not_invalid_xml() {
+        let collection = Url::parse("http://127.0.0.1/sample-7/").unwrap();
+        let xml=b"<D:prop xmlns:D='DAV:'><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope><D:depth>infinity</D:depth><D:timeout>Second-0</D:timeout><D:locktoken><D:href>opaquelocktoken:test</D:href></D:locktoken><D:lockroot><D:href>/sample-7/</D:href></D:lockroot></D:activelock></D:lockdiscovery></D:prop>";
+        assert_eq!(
+            parse_lock(xml, "opaquelocktoken:test", &collection)
+                .unwrap_err()
+                .kind,
+            ErrorKind::LeaseExpired
+        );
+    }
+
+    #[test]
+    fn library_listing_accepts_split_property_status_but_rejects_duplicate_required_property() {
+        let collection = Url::parse("http://example.test/.fluxreader-v3/actors/").unwrap();
+        let body="<D:multistatus xmlns:D='DAV:'><D:response><D:href>abc/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat><D:propstat><D:prop><D:getetag/></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>";
+        assert_eq!(
+            parse_listing_with_limit(body.as_bytes(), &collection, 256, true).unwrap(),
+            vec!["abc"]
+        );
+        assert!(parse_listing_with_limit(
+            body.replace("<D:getetag/>", "<D:resourcetype/>").as_bytes(),
+            &collection,
+            256,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn page_join_conflict_is_atomic_and_domination_matches_full_merge() {
+        let mut first = merged(&[batch(
+            1,
+            1,
+            1,
+            patch("read", FieldValue::Set(serde_json::json!(true))),
+        )]);
+        let before = first.clone();
+        let mut bad = before.fields.clone();
+        bad.get_mut("read").unwrap().value = FieldValue::Set(serde_json::json!(false));
+        bad.insert("a-first".into(), before.fields["read"].clone());
+        assert!(first.join_fields(bad).is_err());
+        assert_eq!(first, before);
+        let next = merged(&[batch(
+            2,
+            1,
+            2,
+            patch("star", FieldValue::Set(serde_json::json!(true))),
+        )]);
+        assert_eq!(
+            before.dominates(&next).unwrap(),
+            before.merge(&next).unwrap() == before
+        );
+        let joined = before.merge(&next).unwrap();
+        assert!(joined.dominates(&before).unwrap());
+    }
 
     fn actor(n: u8) -> String {
         format!("{n:02x}").repeat(16)

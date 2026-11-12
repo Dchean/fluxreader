@@ -132,7 +132,9 @@ componentTest('F5：设置内 Ctrl+K/Escape 返回设置触发点；触发点卸
   const { default: App } = await import('../../src/App.tsx');
   const entry = await mount(createElement(App));
   await flush(4);
-  await act(async () => useAppStore.getState().openSettings());
+  // 本用例需要一个随后可因切页卸载的真实input；明确建立通用页前置，
+  // 不继承前面About用例的页签，也不依赖已退役OAuth套件偶然切到sync。
+  await act(async () => useAppStore.getState().openSettingsTab('general'));
   const settingsPanel = entry.container.querySelector('[role="dialog"][aria-label="设置"]');
   const trigger = settingsPanel.querySelector('button');
   trigger.focus();
@@ -145,7 +147,7 @@ componentTest('F5：设置内 Ctrl+K/Escape 返回设置触发点；触发点卸
   assert.equal(useAppStore.getState().settingsOpen, true);
   assert.equal(document.activeElement, trigger);
   const disappearing = settingsPanel.querySelector('input');
-  assert.ok(disappearing);
+  assert.ok(disappearing, `F5卸载目标前置：tab=${useAppStore.getState().settingsTab}; title=${settingsPanel.querySelector('.settings-pane-title')?.textContent}; pane=${settingsPanel.querySelector('.settings-content-pane')?.innerHTML.slice(0, 900)}`);
   disappearing.focus();
   await key('k', true);
   await act(async () => useAppStore.getState().switchSettingsTab('shortcuts'));

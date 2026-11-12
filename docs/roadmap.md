@@ -1,6 +1,6 @@
 # 当前缺口与已知限制
 
-本轮路线起点为 `dev@16fb0bb987c80c355357879b4c4f771607f04942`。截至2026-11-10，motion六文件批已推送为 `e36d1e8482066f2102a92a1d8afa570fcb41b5be`，该SHA的[CI 42652508812](https://github.com/Dchean/fluxreader/actions/runs/42652508812)三个job通过；后端、阅读、AI、transport原语、多图及FND schema3基础156路径随后独立签收并提交推送为`40389fa1ed58b3b566dd6a2369b9da9e3ac5ad99`，该SHA的[CI 42732377557](https://github.com/Dchean/fluxreader/actions/runs/42732377557)前端、Edge与Rust全部成功。stateLane根22路径已获原审绑定签收并推送为`eb82ebc93eb9e9569b43d39a9471e11ab3121a67`，精确[CI 42739921419](https://github.com/Dchean/fluxreader/actions/runs/42739921419)前端/Edge成功、Rust完整测试7项失败；当前来源凭据与集合复用修复已完成本地完整Rust1146通过/0失败/8ignored与fmt/alltarget clippy；独立复审最终绑定及后继精确CI仍待完成，不能按旧定向绿灯判整体通过。localSync与syncUI仍隔离。2026-11-09 用户已确认五分区阅读、源内身份与双向状态、退订保收藏、AI触发和纯本地WebDAV持续多端目标，并授权分批实施、独审、提交推送及最终发布。**这些新要求尚未整体完成，现有产品不能判整体验收通过。** 批次状态、负责人边界、原始失败与退出条件统一在[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md#2026-11-09-已确认重构路线与退出条件)，本页维护产品差距和验证边界。
+本轮路线起点为 `dev@16fb0bb987c80c355357879b4c4f771607f04942`。截至2026-11-12，motion、后端/阅读/AI/多图基础及stateLane来源守卫已分批独审并提交；当前根为`5dc3b6f0e4e3f6f1880d1ccc41ee51930f5afc55`，其[CI42791084492](https://github.com/Dchean/fluxreader/actions/runs/42791084492)全部成功。原eb82的Rust七失败、full2和AO-1反例仍保留，不改写历史。localSync642E、syncUI、媒体预算与R5正文恢复已在唯一隔离候选组合；Node22下lint、类型检查与production构建通过，首次完整前端的重试清单失配与完整组件的生命周期看门狗失败保留；后继static02-doc01冻结版本已完成默认整套复验与组件分组/e9限定独审，不等于组合UI或整版独审通过；正文保留后端与旧repair退役已按限定独审的16项差异静态接入；自动保留控件及两处真实门禁适配已按5项差异限定独审并静态合入；旧重试清单已按实际共用失败处理修为精确数量并获单域通过；组件自检独立诊断完成，业务/自检分组默认357+2=359和完整frontend1516/1516已通过，两mjs lint、父边界13项及坏参数5项完成，act warning162/0保留；最终UI final02已用真实headless Edge复验五布局、retention键盘和完整布局矩阵。writer/async 48项及本地同步baseline修复已进入新的隔离组合候选；独立审计发现的pending逻辑查询全表面和正文hold代次问题已修复，当前源码的fmt、all-targets check、clippy、50k exact、完整单线程与默认并行测试均自然exit 0，尚待后续独立复审。GC17、body远端DELETE和bool/dedup清理仍明确取除。native WebView2、真实后端与最终组合仍不能判整体验收通过。2026-11-09用户已确认五分区阅读、源内身份与双向状态、退订保收藏、AI触发和纯本地WebDAV持续多端目标，并授权分批实施、独审、提交推送及最终发布。**这些新要求尚未整体完成。** 批次状态、负责人边界、原始失败与退出条件统一在[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md#2026-11-09-已确认重构路线与退出条件)，本页维护产品差距和验证边界。
 
 [核心契约](../.agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md)记录已确认方向与实施约束，`proposed` 不代表全部子段尚未落地；各子段当前实现与验收以本页及验收入口为准。11月7日各批限定通过保留为历史证据，不能覆盖11月8日基线的新反例，也不能证明11月9日新需求已满足。最新基线审计与对标在本机忽略目录 `tmp/audit-2026-11-08-product/`、`tmp/research-rss-2026-11-09/`，不随仓库分发。
 
@@ -9,23 +9,23 @@
 
 | 当前实现与仍有差距 | 已确认目标与关闭条件 |
 | --- | --- |
-| GR/Fever三通道已提交，来源修复本地完整门禁通过，待独审最终绑定 | eb82已关闭原A1/A2并获原审根绑定，原本地82次Rust与120前端/265组件通过仍是对应输入事实。新CI完整Rust1123通过、7失败、8ignored：裸ID绕过来源信任、绑定失败仍请求权威集合、同轮异常continuation重复请求及Fever旧正文写flags预期暴露缺口。当前修复把真实Content origin作为State/Push共同准入，身份或source变化清证；冷绑定有限补证，保队列/字段版本/账号generation/ACK。同轮Content复用集合ID、失败侧不重复请求、成功侧后置新读；Fever已绑定flags仍State唯一写入。r3定向160项已过；full2的1130通过/12失败/8ignored及独审AO-1 token等待后误发反例保留。逐例稳态前置与双层发送守卫修复后，原审3反例原文件重放3/3、正式订阅POST屏障通过；full4当前完整Rust1146通过/0失败/8ignored，fmt/alltarget clippy均0，135输入无漂移。独立复审最终40路径绑定及后继精确CI尚待完成；GR已有已读存在性探测仍占State许可，0新增origin补证不等于0正文HTTP；真实服务与宿主链仍未验。 |
+| GR/Fever三通道、Content来源证明和token后发送守卫已完成5dc3基线限定独审与精确CI | 5dc3的[CI42791084492](https://github.com/Dchean/fluxreader/actions/runs/42791084492)全部成功；原eb82七失败、full2失败与AO-1反例保留。基础FreshRSS/Miniflux各7项已在5dc真实重跑通过，原8个binding/dual与补证4个slow已获5dc限定独审，RSS-S1关闭，合计12场景；不能宣布全部状态时延或真实宿主通过。当前localSync组合改变共同事务/schema，需新组合门禁，不能借基线CI放行。 |
 | 跨源广播已移除，源内非空内容分组及弱身份持久键已落根候选并限定独审 | 不同源独立；同源同内容分组、异内容独立，每个远端身份独立确认。弱空观察与后来非空输入没有确证时保留各自实体，不转移旧读藏；真实GUID/remote ID可原实体补正文。后继集成不能恢复URL猜配。 |
-| 本机提前抓取的晚绑定已要求同源与非空内容确证；真实服务端新链未验 | 保留提前抓取；先读/收藏再绑定后，正文与本机意图不丢、不误绑另一篇。需在当前版本真实FreshRSS/Miniflux链验证，不以旧live结果或loopback替代。 |
+| 本机提前抓取晚绑定保持同源非空内容确证，5dc真实binding/dual已有受测证据 | 不借URL猜配另一篇，读藏意图与逐成员ACK继续独立。当前组合保留5dc生产guard，但还须对新的SQLite写预留和localSync装配重验；真实慢内容专项已在5dc范围补证，native链及当前组合另行承担。 |
 | Fever有意排除/未知绑定分支、单消费者推送邮箱已有受控HTTP/数据库回归 | 排除源不阻断其他源；未知绑定失败继续保守拒绝。持久队列、字段版本、逐目标ACK与退出交接继续保留；三通道隔离已有受控HTTP反例和修后证据，当前根组合另行验收，不外推真实部署时延。 |
 | 零新增真实变化已有回执与生产消费路径，真实宿主事件连续性未验 | 新增数只用于新增通知；正文/媒体/错误恢复仍通知。需由真实宿主到ReadingSession消费闭合验证，DB marker不能替代窗口保位。 |
 | 目录名称与退订收藏等根候选已纳入本批修复，仍须最终组合验证 | 名称约束不改变跨设备稳定身份；删除/配置应用必须沿同一保留规则，不能按名称全表合并。 |
 
-11月8日以上旧缺陷最初来自静态追踪；此后根后端B1–B5及弱空观察R3已限定独审通过，当前作者586条定向和fmt/all-target clippy/check有对应结果，首审/R1/R2失败仍保留。精确范围在验收入口与 `tmp/refactor-2026-11-09/audit-backend-product/REPORT.md` 末段；这不批准同步整体或发布。现行[兼容矩阵](sync-compat-matrix.md)已同步双向、源内身份和媒体规则；快状态/慢内容分离已落根并进入组合验收，真实新版协议全链仍是明确缺口。
+11月8日以上旧缺陷最初来自静态追踪；此后根后端B1–B5及弱空观察R3已限定独审通过，当前作者586条定向和fmt/all-target clippy/check有对应结果，首审/R1/R2失败仍保留。精确范围在验收入口与 `tmp/refactor-2026-11-09/audit-backend-product/REPORT.md` 末段；这不批准同步整体或发布。现行[兼容矩阵](sync-compat-matrix.md)已同步双向、源内身份和媒体规则；快状态/慢内容分离已落根并进入组合验收，5dc真实协议基础与binding/dual/slow十二场景已有对应限定证据，当前新组合全链仍是明确缺口。
 
 <a id="reader-and-state"></a>
 ## 阅读正文与本地状态
 
 | 当前差距 | 已确认目标与关闭条件 |
 | --- | --- |
-| ReadingSession、五分区会话成员、日期失效及位置模块已形成根候选，RS1–4限定独审通过 | 属性/计数更新与当前成员保留已有纯逻辑/真实挂载证据；当前含多图组合的265项组件与Windows Edge headless双模式完整门禁通过。真实WebView2宿主事件与连续阅读链未验，不能把jsdom或浏览器门禁外推为原生宿主结果。 |
+| ReadingSession、五分区会话成员、日期失效及位置模块已形成根候选，RS1–4限定独审通过 | 属性/计数更新与当前成员保留已有纯逻辑/真实挂载证据；前序基础含多图组合的265项组件与Windows Edge headless双模式完整门禁通过。新组合及真实WebView2宿主事件与连续阅读链未验，不能把历史jsdom或浏览器门禁外推为当前组合或原生宿主结果。 |
 | 退订保留收藏、来源布局及稳定身份已有后端限定证据 | 继续闭合真实界面列出/阅读/计数、新设备恢复与配置删除组合；保留收藏不能只是当前库单次查询可见。 |
-| 正文释放保留轻身份和状态已落根候选；持久保留策略与恢复入口尚未整合完成 | 未读与收藏长期保护，已读未收藏按短期/永久设置管理；普通已读不传正文仍传播状态。隔离候选已有保留天数设置与控件，但自动期限清理未实施；bodyMissing恢复、前端明确状态与实际换机链仍待完成集成验收。 |
+| 正文保留后端、R5缺正文/手动恢复与旧repair退役已静态接入；自动控件候选已启用 | 后端本机起点、L/队项/hold保护、有界维护、媒体保留、恢复续期及合法import不可变正文已获16项差异限定独审；首次作者18项自测通过时held反例仍失败，原失败保留。修后47次执行加独审要求33次补验通过，不映射为80个独立功能。控件提供默认永久或1–3650天，沿用原子设置保存、草稿校验和失败回滚。控件5项差异专项已限定通过；真实Edge的Tab/ShiftTab、方向键/Enter、错误长值与980窄窗，以及完整组合、native和原站/调度可观察链仍待验。 |
 
 正文实体缓存2000条、视图缓存8组每组1000条与画廊DOM有界已经存在，不再列作“无界正文/DOM”新缺陷。新需求的保留规则也不能被这些缓存上限替代：缓存淘汰与持久数据删除是两个生命周期。
 
@@ -36,7 +36,7 @@
 
 文章打开后按有效开关触发摘要/翻译；社交只翻译，通知可摘要/翻译，二者在视觉中心停顿后触发；画廊与播客不运行AI。动作子段已限制 Reader 仅在文章分区挂载。布局/组/源三层有效策略按实际展示布局能力钳制；中心停顿及迟到意图撤销的R1候选已获原审限定通过，AI-A1/A2关闭。38文件已按精确差异集成根，其画廊加入前组合的通用前端与浏览器布局门禁通过。真实中心停顿的自动触发链、原生宿主与收费服务仍未验证，不能把一般布局通过当作AI专项通过；首审失败保留。
 
-最终批审FND-1曾确认本版本配置快照丢失组`summary_mode/translate_mode`并漏掉预览版本保护。R2已限定复审通过并精确落根：当前schema3强制携带分组三态，导出/预览/应用/双签名完整保留，旧bool独立恢复；真正缺字段的schema1/2包先得到明确版本拒绝，schema3缺字段仍严格报结构错误。原缺口和首轮候选遗漏保留，正式配置38项、会话13项、相关lib18项与原探针2项支持当前修复；基础156路径根绑定及40389fa精确CI已完成，不以本基础批通过替代后继同步或整版发布验收。
+最终批审FND-1曾确认基础批配置快照丢失组`summary_mode/translate_mode`并漏掉预览版本保护。R2已限定复审通过并精确落根：当时schema3强制携带分组三态，导出/预览/应用/双签名完整保留，旧bool独立恢复；真正缺字段的schema1/2包先得到明确版本拒绝，schema3缺字段仍严格报结构错误。当前组合按已确认目标退役该手动入口和后端，历史schema3修复仍保留；便携v4须沿自己的格式与恢复契约验收。原缺口和首轮候选遗漏保留，正式配置38项、会话13项、相关lib18项与原探针2项支持当前修复；基础156路径根绑定及40389fa精确CI已完成，不以本基础批通过替代后继同步或整版发布验收。
 
 11月8日真实组件加受控IPC确认的 AI 设置初读覆盖草稿与测试/保存身份错配，已由动作子段 R3 统一字段归属和写入前沿修复并独审通过：初始快照只补当前挂载未接管字段，测试固定已测端点，提示词/模型仍串行合并，读取或格式失败有重试入口。首审及 R2 的真实失败保留在验收入口链接的原始报告中；此结论不代表新的自动 AI 触发策略已完成。
 
@@ -45,7 +45,7 @@
 <a id="import-and-backup"></a>
 ## WebDAV、换机与新数据基线
 
-当前根产品仍以手动配置快照为用户入口，现行格式为schema3并明确拒绝schema1/2。独立传输模块R3已限定独审通过，覆盖不可变批、逐字段checkpoint合并及相关反例；它尚不是完整WebDAV产品。隔离localSync候选包含状态/正文lane、分块正文archive与便携v4，正在改造大批接收、应用和回收。已有小阶段证据不构成T1–T5/R1–R4、当前HTTP或50k全部验证。旧F75B的50k共享正文对照通过、distinct正文ACK锁失败，以及后继52A产品/790E夹具的三次前台锁失败、约985MiB峰值均保留；后者自然结束为exit101，不能据小测试关闭容量缺陷。该候选完整门禁、独审、容量与原生窗口/恢复仍未闭合，旧结果不能背书新全链。
+根发布基线5dc3仍保留旧手动配置模块；当前隔离组合已接入syncUI、媒体、R5正文恢复与冻结642E localSync后端，退役Gist/手动配置同步/GitHub OAuth，保留Releases更新检查。localSync采用F+C共同逻辑赢家、显式意图、分批接受/物化、独立快意图/正文通道和便携v4；A1–A6、B3及三点热点各有对应限定审计，不能合成整体通过。远端物理DELETE仍关闭；旧F75B distinct ACK锁失败和52A/790E三次前台锁失败、约985MiB峰值保留。单次129固定输入后测改善不关闭50k、前台SLO、当前HTTP或native缺口。
 
 | 必须交付 | 可观察验收 |
 | --- | --- |
@@ -53,28 +53,29 @@
 | 稳定身份、正文版本、持久意图、不可变操作批与删除记录 | 并发写入按已确认规则收敛；断网/重启后继续；旧设备或旧快照不能复活已删除订阅；断开后迟到任务不能复活凭据或覆盖新连接。缺对象/损坏包/请求失败不当成空远端。 |
 | WebDAV能力验证与明确状态 | 验证目标对象操作语义和协议必需能力；不满足时明确拒绝自动同步，不能盲写后显示成功。LOCK/ETag支持不能单独证明唯一提交或多端安全。分别说明已确认状态与正文尚待补齐。 |
 | 新版本可实际使用的换机备份/恢复 | 恢复订阅、组、全部收藏正文和设置，退订收藏也能打开；失败保留原可读数据。DPAPI凭据仍需新设备重新输入，OPML不冒充完整备份。 |
-| 明确新库/新快照格式 | 使用独立新库空间并保留旧库，旧库发现提示前端仍待接线；误放旧格式到新空间只读拒绝，旧云快照失败不能当空库。新版本自身导出的备份必须能在新设备恢复，不能静默清库或覆盖旧文件。 |
+| 明确新库/新快照格式 | 使用独立新库空间并保留旧库，旧库发现提示前端已接入、真实宿主仍待验证；误放旧格式到新空间只读拒绝，旧云快照失败不能当空库。新版本自身导出的备份必须能在新设备恢复，不能静默清库或覆盖旧文件。 |
 
-隔离syncUI候选现为59路径，包含WebDAV、便携恢复、正文缺失/新库提示、原子设置与Gist/GitHub OAuth入口退役。SUI-A1“恢复后旧正文请求重建可操作错误”已由R2定向独审关闭；原全量前端和组件失败及后续定向组合证据仍保留，不能改写为新一轮全量全绿。候选未根集成，当前后端/真实HTTP/原生窗口接线仍待验；恢复时还须接根当前`closeLightbox()`的请求失效与busy防迟到标读。保留天数仍仅预备控件，自动期限清理未实施。Gist退役须随前后端及凭据边界交付，现行[备份说明](backup.md)的手工恢复也不代表便携v4换机目标已完成。
+syncUI最终60路径已含恢复busy同步关闭灯箱/请求失效、成功换库generation以及失败保原库；media预算和R5轻目标ticket继续守住恢复期间的迟到响应。当前候选已接真实localSync IPC、白名单、事件和宿主运行装配，旧“无后端白名单”依赖已消除，完整ui-contracts、类型与production构建已通过；首次完整前端1515/1516失败及完整组件120秒看门狗exit3、无最终清理的失败保留；后继static02-doc01完整frontend1516/1516、默认components357+2=359及分组/e9限定独审通过。2026-11-11后继真实Edge组合exit0、224.9秒，双motion、五布局、社交、画廊与三档键盘全过；retention专项exit0，真实Tab/ShiftTab、方向键、Enter/Esc、Enter/blur提交、非法提示恢复及980×640长值无页面横向溢出均过，五布局空态另有真实截图。浏览器UI组合仍不等于原生WebView2、真实后端或整版发布；Rust和真实恢复尚未运行当前组合。正文自动保留与旧repair退役已从790B/7A3F冻结源接入；设置控件5项已限定独审并静态合入，永久/1–3650天草稿、有效Enter/blur、恢复忙态/代次守卫与回读保草稿已有专项证据；手动清理语义保持。两处过时门禁失败保留，映射urlKnown与实际ReaderProse AST负控已适配；完整前端及组件的新证据限定于上述冻结版本；本轮仅说明小字删除按影响复用，旧bool/dedup清理仍留后继单owner，GC首段A1/A2/A3已于独立R3关闭但未取入本组合。Gist/OAuth退役为前后端实际删除，不把它当换机已验收。
 
 <a id="interface-and-media"></a>
 ## 界面与媒体
 
 五分区体验必须完整保留或实现：文章长文、社交短卡/长文折叠、画廊瀑布流首图/张数/同条多图循环、播客底部播放器/进度/续播、通知release。后端有序图片集合、画廊首图/张数与mediaRevision已接前端多图灯箱；条目/索引/版本、首末循环、失败重试及返回同卡已有定向证据。F1修复保持加载期间导航按钮原生焦点，并阻止不可翻页时的点击和方向键；原审7项及新增3项通过，真实Edge原3场景经独立核对复用。第一次native-disabled修法的浏览器失败保留。多图14路径限定审计与当前基础组合本地门禁已完成，真实宿主后台/返回连续性仍待验。
 
-原[CI 42476145135](https://github.com/Dchean/fluxreader/actions/runs/42476145135)社交重叠、后继42519067493画廊159px漂移及诊断`87119b2`的[CI 42602153277](https://github.com/Dchean/fluxreader/actions/runs/42602153277)失败均保留。有效trace与同Edge偏好对照定位reduce非零transition激活默认all；motion批统一reduce transition0s并保留animation0.01ms，门禁使用本地原生媒体与显式video/poster阶段屏障。六文件批已限定独审通过并提交e36，其精确CI三个job全绿，双模式UI的八波画廊漂移与社交重叠均为0。e36的CI只覆盖当时六文件；后继40389fa的精确CI已覆盖后端/阅读/AI/多图基础组合，当前stateLane新差异另行验收，WebView2仍未验。原Space失败时点未知、poster顺序失败和额外404探针超时均保留，不改阈值或倒写旧结果。
+原[CI 42476145135](https://github.com/Dchean/fluxreader/actions/runs/42476145135)社交重叠、后继42519067493画廊159px漂移及诊断`87119b2`的[CI 42602153277](https://github.com/Dchean/fluxreader/actions/runs/42602153277)失败均保留。有效trace与同Edge偏好对照定位reduce非零transition激活默认all；motion批统一reduce transition0s并保留animation0.01ms，门禁使用本地原生媒体与显式video/poster阶段屏障。六文件批已限定独审通过并提交e36，其精确CI三个job全绿，双模式UI的八波画廊漂移与社交重叠均为0。e36的CI只覆盖当时六文件；后继40389fa的精确CI已覆盖后端/阅读/AI/多图基础组合，后继5dc3的stateLane/来源guard已完成精确CI，当前localSync新组合另行验收，WebView2仍未验。原Space失败时点未知、poster顺序失败和额外404探针超时均保留，不改阈值或倒写旧结果。
 
-设置浮层上 Ctrl+S/Alt+J 穿透修改背后文章已修复并独审通过；分发先尊重控件消费，再匹配已声明组合键，其他修饰组合不进入普通单键动作。图片代理全局在途请求/字节预算仍是未实测的资源放大风险，当前仅单图25MiB上限及局部缓存；批5用实际负载判断，不宣称已经发生OOM或已证明滚动瓶颈。
+设置浮层上 Ctrl+S/Alt+J 穿透修改背后文章已修复并独审通过；分发先尊重控件消费，再匹配已声明组合键，其他修饰组合不进入普通单键动作。当前候选已接共享代理、并发/排队/租约/字节预算、raw Channel注册取消及Blob生命周期；M1/M2与Edge专项有限定证据。真实Tauri raw/fallback、生产CSP、解码释放、可见锚和预算压力仍未验，不把受控IPC和普通HTTP图片布局外推为native性能或OOM结论。
 
 <a id="verification-boundaries"></a>
 ## 未完成验证与条件风险
 
-- **当前基础批与整版门禁**：FND修复前的152路径完成lint169文件/116规则、force TypeScript、build、pure1540/1540、components265/265、完整双模式Edge及Rust fmt/all-target check/clippy/full test，均exit0；Rust1107通过、0失败、8live忽略，组件154条body act与513.30kB构建提示保留。FND R2五路径精确落根后实际为156路径，全部154项Rust相关输入与获审候选相同；受影响配置38项、会话13项、lib18项、原探针2项及all-target check/clippy/fmt由R2证据承担，其余未变前端/Edge/完整Rust范围承接原结果，没有声称重跑修后全量。原组件失败、FND首审/首候选缺口均保留；FND-1候选与基础156路径原审根绑定已通过、FND-2文档已纠正；40389fa精确CI三个job全部成功。当前stateLane根20路径加两处状态文档为后继22路径，新增本地根组合已完成fmt/check/clippy与七个Rust target共82次执行、TypeScript编译、三个同步前端域120/120及完整components265/265，均exit0；根22路径后获原审签收并提交eb82；该SHA精确CI前端与Edge成功、fmt/check/clippy成功，完整Rust1123通过/7失败/8ignored且--no-fail-fast执行完剩余target。原失败日志完整保留；来源凭据修复后，full4当前完整Rust1146通过/0失败/8ignored及fmt/alltarget clippy均0，原token3和新增订阅guard均实跑通过；full2与新测试返回/断开outbox两次错误前提的失败仍保留。独立复审最终40路径与后继精确CI另行承担，旧82定向通过不覆盖新差异。基础结果不批准整版发布。
-- **真实协议部署**：历史隔离FreshRSS1.30.4、Miniflux2.3.5各有7项限定live证据，见[实测矩阵](sync-compat-matrix.md#live-deployments)。FreshRSS显式`/api/greader.php`与`/api/fever.php`通过，但PHP内置服务根地址302后200HTML导致自动发现失败仍保留。历史结果不证明新双向政策、本机先到绑定、多设备或全部部署兼容。
-- **新WebDAV多端**：transport限定HTTP/公共API证据已存在，当前完整应用多端、最新正文archive、50k规模与恢复仍未完成。本机WsgiDAV旧配置往返不证明当前持续多端冲突/删除/正文完整性，也不外推第三方托管服务。
+- **基线与当前组合门禁**：基础40389fa及后继5dc3均已完成对应独审/精确CI；原组件、eb82 Rust、full2和AO-1失败作为历史保留在验收入口。当前组合新增localSync、syncUI、媒体和正文恢复，已执行首轮lint、app/node/test TypeScript与production构建并成功，保留SyncTab既有warning和536.13kB（>500kB）提示；完整frontend为1515/1516、exit1，e9入口清单30→28后仅error-center单域38/38、exit0；原完整components触发120秒watchdog、exit3，已完成358项但未到最终TAP汇总、teardown与账本终检。2026-11-11后继static02-doc01（INPUTS480 SHA9FD93A…B21D6、DELTA152 SHA706A60…E16AF）已有新默认完整components357业务+2selfcheck=359、完整frontend1516/1516，两mjs显式lint、父边界13场景与坏参数5项均符合预期；分组/e9/CGS-DOC-1限定独审通过，证据见本机tmp/refactor-2026-11-09/audit-component-gate-split/REPORT.md及evidence/final01。两组act warning162/0保留，新证据不覆盖原1515/1516与watchdog失败。当前UI批仅删除CacheCleanupSection保留天数的用途/计时小字，按影响承接这些证据；完整Edge与retention专项已在2026-11-11真实headless Edge/CDP中通过，五布局空态及正常/无效控件截图均已保存。浏览器边界仍不冒充native WebView2、真实后端或整版发布。专项通过与新组合可构建、可用、独审通过、可发布必须分开。
+- **真实协议部署**：5dc客户端FreshRSS1.30.4、Miniflux2.3.5基础各7项已有运行证据；RSS专项由原8个binding/dual加新4个slow组成，RSS-S1经原独审复核关闭，12场景限定通过。原失败与旧同值slow证据不足仍保留，不累计成16场景；native、物理两机、当前localSync/retention组合需各自验证。历史和版本边界见[实测矩阵](sync-compat-matrix.md#live-deployments)及验收入口。
+- **新WebDAV多端**：localSync642E与retention已静态接入，B3及三点性能有对应限定证据。整库 state 应用窗口另有生产边界，三条路径必须分开：生产便携恢复走 `backup::restore`（自有独占锁、界面不可操作、`clear_for_restore` 后 `capture=0`）；生产同步状态应用走 runtime 的 `begin_receive → stage_page → preflight → accept`；测试里的整库应用到新库走 `merge_apply` 测试入口。后两条都要求候选折叠期间逻辑修订稳定，持续前台写入只会得到可重试的 `localSyncPending`，停写后同一条 receive 收敛（生产入口回归 `production_receive_path_reports_retryable_pending_and_converges_after_the_writer_stops`，测试入口回归 `merge_apply_reports_retryable_pending_under_concurrent_writes`）；连续增量 state 远小于整库、不受该窗口影响。容量测试因此只在源半程保留持续前台写者，整库应用阶段不并存写者，这不是把恢复路径的独占锁套用到测试入口。SLO-A03仅原冻结128×4KiB两盘/正文暂停场景通过；B01前提失败保留，后继B02以真实portable建立有效前提，局部acceptance→可见323.067/357.603ms满足500ms，但bulk3锁失败且其他后台任务报锁，整体不通过。后续诊断独立star在BEGIN阶段5/5证实饥饿，writer-fairness已由单owner实施，未合本组合。GC第一段独审A1/A2/A3已在2026-11-11独立R3中关闭，另有持续append限定正控通过（audit-local-gc/REPORT.md末节及run-03）；该GC修复未集成本候选，不外推长期空间/SLO。当前候选body路径及远端DELETE继续关闭。
 - **原生Windows**：历史隔离实机17项中15通过、1部分（通知横幅/点击）、1未执行（物理拔插/真实注销登录自启），精确条件在`tmp/repair-2026-11-06/environment/evidence/native-verify-r1/checklist.md`。MSI/NSIS安装器、动态DPI/物理拔屏、用户冷启跳位仍未完成；SMTC AUMID当时为未打包`app.exe`，不等于安装版结果。
-- **启动与设置时序**：NF4受控`get_setting`延迟反例已有防御证据，原生IPC可达性未证，不列确证产品缺陷；About更新请求未完成时关闭/切页的迟到回包仍待定向补查。清理成功后reload失败现报“清理失败”的阶段混淆需随设置操作结果收口，不能暗示数据没删。
-- **性能与资源**：当前Windows/WebView2长会话、真实规模同步时延、滚动p95及图片总预算未测。历史SQLite合成数和短时浏览器rAF不填补这些空缺。
+- **本地门禁环境**：本次完整 serial/parallel 在本机非提权会话运行；该会话里由 Rust 构建的进程（含其子进程）无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314，最小复现见证据日志），`automatic_backup_retention_preserves_symlinks` 改用目录 junction 作为等价 reparse-point 夹具（`mklink /J`，无需特权；std `file_type().is_symlink()` 返回 true），retention 断言保持原意图。因此本次**本地没有验证真实文件 symlink 的 retention 保护**，该路径由 CI（windows-latest）覆盖，本地不冒充已覆盖；生产代码零改动。另：`merge_apply_reports_retryable_pending_under_concurrent_writes` 的漂移注入改为测试专用 `AFTER UPDATE ON local_sync_work` 触发器，原因是 `touch()` 在 fold 窗口走 ON CONFLICT UPDATE 路径，INSERT 触发器不触发；断言与产品行为不变。
+- **启动与设置时序**：NF4受控延迟已有防御证据，原生IPC可达性未证。F5/About迟到结果与成功后刷新失败已有相应前端专项保护；当前恢复和清理结果文案区分事务提交与界面回读，不将已提交操作再次执行。真实宿主链仍待验证。
+- **性能与资源**：此前无探针50k local-sync exact自然exit 0（墙钟272.985秒、累计CPU269.906秒、峰值单进程695,832,576字节，`fast_apply_us=3,412,283`、`idle_us=2,035`）保留为历史，20k/50k列表、搜索与scope计划回归也通过。2026-11-12 r9 复测（同一隔离Windows Rust窗口、bundled SQLite、**debug 构建的 cargo test**：opt-level=0、无内联、无优化；发布给用户的是 release 构建，同一路径通常快一个数量级，不能用这些数字推算用户换机恢复或首同步体验）：10k distinct-body exact（4KiB 不同正文、全部相位与 2 秒断言）自然 exit 0，wall 1,442,330 ms、preflight 46,242 ms、retention 排空 306,998 ms、9 个源前台阶段单次最大 358,782 µs（全部 <2s）；50k 状态 exact（小 delta，非整库 apply）自然 exit 0：wall 63.47 s、initialize 27,912 ms、seal 15,004 ms、click 14,347 µs、delta 1,619 ms、preflight 3,139 ms、`fast_apply_us=3,184,493`、`idle_us=1,530`；导出截止点改为读快照（队列非空也可导出），50k 导出 141,445 ms/480,327,791 B；WAL 时间序列见 performance（r9-i1-10k-02 采样 4,825 点：10k 导出期间 −wal 93,610,552 B 恒定不增长，连接正常关闭才归 0，导出结束本身不回落）。**范围裁定（2026-11-13）**：本版 v0.19.0 的规模验证标准正式定为 10k distinct 4KiB 全流程（4KiB 正文、全部相位、全部断言、2 秒门槛不变、仍 ignored）；50k distinct-body 记为本版开放边界，不写成通过或已验证（`r9-i1-50k-03/04` 证据保留）。依据：用户口径“以实际使用为参考，不需要考虑太多极端情况”；50k 在 debug 构建下整库应用约 2 小时量级，且 state-only 50k 主测已通过；连续两轮向用户确认范围未得到回复，按已给出的推荐继续。该裁定不降低任何测试强度。**已知规模瓶颈（既有缺陷，本轮未修）**：现象是整库 state 应用到新库时每条被应用的 read/star 字段会生成一个 `retention/` 工作键（10k 库约 20,001 个），debug 构建下 10k 实测排空 306,998 ms；50k（约 100,002 个）在 60 分钟硬上限内整库 apply 未完成，故 **50k distinct-body 未验证**。范围：只影响“一次性整库应用”（换机恢复/首次合并整库）的耗时；不影响便携导出、不影响前台延迟（10k 前台 max 358,782 µs，9 个源相位全部 <2s）、不影响正确性（10k 自然 exit 0，全部断言通过）。前提与后续方向（不承诺）：数字来自 debug 测试构建与合成数据；retention 只在整库 state 应用时成批产生，日常增量 state 只覆盖变化条目、数量级不同；它是既有行为而非本轮引入，修复需 schema 索引+迁移与旧库兼容验证，本轮不做；若后续优化，方向是 `articles(guid)` 索引或把 retention 的按 key 查询批量化、去掉 LIKE 前缀扫描。长会话、真实规模响应/滚动p95、图片native预算与完整前台SLO仍未验收；A03的有限max和B02局部500ms达标不抵消前台bulk锁失败。真实持久存储I/O损坏/WAL故障注入仍无安全手段，GC17和远端body DELETE不属该候选。
 - **待观察崩溃**：旧浏览器NotifCard曾见React #185，后续反例阴性；已有ErrorBoundary记录，复发保留现场，不按旧观察声称当前必崩。
 
 <a id="accepted-tradeoffs"></a>

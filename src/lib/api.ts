@@ -40,6 +40,23 @@ export function extractErrorCode(e: unknown): string | null {
   return null;
 }
 
+/** Validate the actual IPC representation before allocating the Blob backing buffer. */
+export function imageBytes(value: unknown): Uint8Array<ArrayBuffer> {
+  const limit = 25 * 1024 * 1024;
+  const invalid = () => new Error('Invalid image IPC byte response');
+  if (value instanceof ArrayBuffer) {
+    if (value.byteLength > limit) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
+    return new Uint8Array(value);
+  }
+  if (value instanceof Uint8Array) {
+    if (value.byteLength > limit) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
+    return new Uint8Array(value);
+  }
+  if (!Array.isArray(value)) throw invalid();
+  if (value.length > limit) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
+  for (const byte of value) if (!Number.isInteger(byte) || byte < 0 || byte > 255) throw invalid();
+  return new Uint8Array(value);
+}
 async function getInvoke(): Promise<Invoke | null> {
   if (!isTauri()) return null;
   if (invokeFn) return invokeFn;
@@ -69,6 +86,18 @@ function runLocalFlagWrite<T>(field: 'read' | 'starred', write: () => Promise<T>
     store 的 UI action 多为 void，故测试不能通过 await action 判断这些 IPC 已结束。 */
 export async function awaitLocalFlagWriteFrontier(): Promise<void> {
   await Promise.all([localFlagWriteFrontiers.read, localFlagWriteFrontiers.starred]);
+}
+
+// PlayerBar 的时间事件/关闭 effect 直接写播放进度。资料库恢复先停播放，再等待这些
+// 已登记写结束；恢复期间拒绝迟到事件，不能在新库重新写入旧剧集 URL。
+let playbackWritesPaused = false;
+const playbackWrites = new Set<Promise<null>>();
+export async function runPlaybackRestoreBoundary<T>(op: () => Promise<T>): Promise<T> {
+  playbackWritesPaused = true;
+  try {
+    await Promise.allSettled([...playbackWrites]);
+    return await op();
+  } finally { playbackWritesPaused = false; }
 }
 
 /** 由实际 store 装配注入：成功保存/应用配置、批量清理后使显示验签过时。
@@ -168,23 +197,52 @@ export interface RefreshSummary {
   failed_feeds: number;
 }
 
-/** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。
- * OPT-006：pendingConnection = 配置导入留下的待确认连接建议（协议/地址/用户名，
- * 无密码）——导入不改活动凭据；激活必须在「同步服务」重新输入密码后经
- * sync_save 保存。
- * OPT-010：removedFeeds / removedFolders / affectedArticleCount = 镜像模式
- * 实际删除的对象数与级联文章数（合并模式恒为 0）。 */
-export interface ConfigSyncApplyResult {
-  mode?: 'merge' | 'mirror';
-  imported: number;
-  updated: number;
-  skipped: number;
-  removedFeeds?: number;
-  removedFolders?: number;
-  affectedArticleCount?: number;
-  pendingConnection?: PendingConnection | null;
-  /** 镜像删除前自动创建/复用的可恢复快照（合并或零删除时为 null）。 */
-  backup?: DatabaseBackupInfo | null;
+export type LocalSyncMode = 'realtime' | 'scheduled';
+export interface LocalSyncConnection {
+  endpoint: string;
+  username: string;
+  password: string;
+  mode: LocalSyncMode;
+  intervalMinutes: number;
+}
+/** 后端权威快照；connected 仅表示已存连接，三个时间字段均为 Unix 秒。 */
+export interface LocalSyncStatus {
+  connected: boolean;
+  endpoint: string | null;
+  username: string | null;
+  mode: LocalSyncMode;
+  interval_minutes: number;
+  generation: number;
+  library_id: string;
+  pending_operations: number;
+  pending_bodies: number;
+  pending_publications: number;
+  last_state_sync: number;
+  last_body_sync: number;
+  next_retry_at: number;
+  last_error: string | null;
+}
+export interface PortableBackupInfo {
+  path: string;
+  size_bytes: number;
+  digest: string;
+  sources: number;
+  articles: number;
+  starred: number;
+  missing_bodies: number;
+}
+export interface PortableBackupPreview {
+  digest: string;
+  format: 4;
+  created_at: string;
+  folders: number;
+  sources: number;
+  articles: number;
+  starred: number;
+  protected_bodies: number;
+  missing_bodies: number;
+  replaces_current_library: true;
+  disconnects_services: true;
 }
 
 /** 完整数据库快照（手动备份、迁移前/镜像删除前自动快照共用）。 */
@@ -197,47 +255,6 @@ export interface DatabaseBackupInfo {
   toVersion: number;
   createdAt: string;
   kind: 'manual' | 'migration' | 'mirror' | string;
-}
-
-/** OPT-010 预览条目：kind 区分源/分类（Rust 侧 serde 契约）。
- * feed 的 affectedArticleCount 仅删除项携带；folder 删除项带 feedCount。 */
-export interface ConfigSyncPlanFeedItem {
-  kind: 'feed';
-  url: string;
-  title: string;
-  folder: string;
-  changes?: string[];
-  affectedArticleCount?: number;
-}
-export interface ConfigSyncPlanFolderItem {
-  kind: 'folder';
-  name: string;
-  previousName?: string;
-  changes?: string[];
-  feedCount?: number;
-  affectedArticleCount?: number;
-}
-export type ConfigSyncPlanItem = ConfigSyncPlanFeedItem | ConfigSyncPlanFolderItem;
-
-/** OPT-010 两段式预览结果（config_sync_plan）：
- * additions/updates/removals 为结构化变更清单；snapshotHash 与 currentVersion
- * 是 apply 的 CAS 凭据（任一不符后端返回 stalePreview、零写入）。 */
-export interface ConfigSyncPlanResult {
-  mode: 'merge' | 'mirror';
-  snapshotHash: string;
-  currentVersion: string;
-  affectedArticleCount: number;
-  additions: ConfigSyncPlanItem[];
-  updates: ConfigSyncPlanItem[];
-  removals: ConfigSyncPlanItem[];
-  settingsChangedKeys: string[];
-  settingsRemovedKeys: string[];
-  pendingConnection: boolean;
-  warnings: string[];
-  /** 镜像删除前快照；无删除或创建失败时为 null。 */
-  backup?: DatabaseBackupInfo | null;
-  /** 预览阶段自动备份失败的可见说明；确认后 apply 会重试并阻止无备份删除。 */
-  backupWarning?: string | null;
 }
 
 /** 待确认连接建议（OPT-006 R1）：仅非敏感字段 + 激活 CAS 版本号；
@@ -253,8 +270,8 @@ export interface PendingConnection {
  * degraded=true 时 html 是保留的原文，reason 说明为何没采用提取结果。
  * OPT-008B R3（wire 增字段）：提交成功时携带实际内容身份/修订（Rust 侧
  * camelCase 序列化为 contentId/contentRevision）——前端落 bodyCache 记录，
- * 下一次 reload 不把刚成功提取的正文按「修订变化」清空重取。旧后端缺省/
- * 降级时为 undefined（前端保持记录现值，行为与旧版一致）。 */
+ * 下一次 reload 不把刚成功提取的正文按「修订变化」清空重取。降级可没有提交
+ * 身份；未降级却缺少有效提交身份的响应不能作为前端恢复成功的依据。 */
 export interface ExtractFulltextResult {
   html: string;
   degraded: boolean;
@@ -663,9 +680,23 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('get_setting', { key }) as string | null) : null;
   },
-  async setSetting(key: string, value: string): Promise<null> {
+  /** 后端事务内合并显式键；返回提交后的完整设置，不以本机缓存整包覆盖远端别键。 */
+  async patchAppSettings(patch: Record<string, unknown>): Promise<string> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_setting', { key, value }) as null) : null;
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('patch_app_settings', { patch }) as string;
+  },
+  setSetting(key: string, value: string): Promise<null> {
+    if (key === 'last_playback' && playbackWritesPaused) return Promise.reject(new Error('恢复期间暂停保存播放进度'));
+    const task = (async () => {
+      const inv = await getInvoke();
+      return inv ? await inv('set_setting', { key, value }) as null : null;
+    })();
+    if (key === 'last_playback') {
+      playbackWrites.add(task);
+      void task.then(() => playbackWrites.delete(task), () => playbackWrites.delete(task));
+    }
+    return task;
   },
   /** 创建当前数据库的完整手动快照（不参与自动保留清理）。 */
   async createDatabaseBackup(): Promise<DatabaseBackupInfo> {
@@ -829,22 +860,29 @@ export const api = {
     return inv ? (await inv('extract_fulltext', { articleId }) as ExtractFulltextResult) : null;
   },
 
-  /** 后端抓图（防盗链兼容）：走 Referer 候选链（无→图床 origin→文章 URL）。
-      返回图片字节（Tauri IPC 的 Vec<u8> 序列化为 number[]），用于 webview 自身加载失败时的重试。 */
-  async fetchImage(url: string, pageUrl?: string): Promise<Uint8Array | number[] | null> {
+  /** Raw IPC normally returns ArrayBuffer; Tauri's blocked-protocol fallback can return number[].
+   * Registration is acknowledged before HTTP begins, so cancellation before registration is not lost. */
+  async fetchImage(url: string, pageUrl: string | undefined, requestId: string,
+    registered: () => void, canStart: () => boolean): Promise<Uint8Array<ArrayBuffer> | null> {
     const inv = await getInvoke();
-    if (!inv) return null;
-    return (await inv('fetch_image', { url, pageUrl })) as Uint8Array | number[];
+    if (!inv || !canStart()) return null;
+    const { Channel } = await import('@tauri-apps/api/core');
+    if (!canStart()) return null;
+    const started = new Channel<{ registered: boolean }>();
+    started.onmessage = (event) => { if (event.registered === true) registered(); };
+    return imageBytes(await inv('fetch_image', { url, pageUrl, requestId, started }));
+  },
+  async cancelImage(requestId: string): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('cancel_image', { requestId });
   },
 
-  /** 图片位上报封面失效（TASK-091 后端命令 report_broken_cover(article_id, url)）：
-      后端仅在该行 image_url 仍等于 url 且 source='direct' 时清空，使其重新进入封面补全。
-      Tauri 2 把命令形参 article_id 映射为 camelCase 的 articleId。返回是否真的清空了一行。 */
+  /** Clear only the matching local cover URL, for any source. The caller requires permanent
+   * HTTP evidence and a current cover owner; this never pushes a cover deletion remotely. */
   async reportBrokenCover(articleId: number, url: string): Promise<boolean | null> {
     const inv = await getInvoke();
     return inv ? (await inv('report_broken_cover', { articleId, url }) as boolean) : null;
   },
-
   /* ---- SMTC 系统媒体控制 ---- */
   /** 播放状态/元数据同步到系统媒体控制（PlayerBar 节流调用）。 */
   async mediaUpdateFull(title: string, show: string, durationSec: number, positionSec: number, playing: boolean): Promise<void> {
@@ -858,99 +896,47 @@ export const api = {
     if (inv) await inv('media_stop');
   },
 
-  /* ---- 配置同步（Gist / WebDAV） ---- */
-  /** 同步状态（是否已配置/后端/上次上传时间）。 */
-  async configSyncStatus(): Promise<{ configured: boolean; backend?: string; lastUpload?: string } | null> {
+  /* ---- 本地资料库持续同步 / 便携备份 v4 ---- */
+  async localSyncStatus(): Promise<LocalSyncStatus | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('config_sync_status')) as { configured: boolean; backend?: string; lastUpload?: string } : null;
+    return inv ? await inv('local_sync_status') as LocalSyncStatus : null;
   },
-
-  /** 保存凭据（JSON：backend/token/server/username/gist_id）。 */
-  async configSyncSaveCredentials(credentials: string): Promise<void> {
+  async localSyncConnect(config: LocalSyncConnection): Promise<LocalSyncStatus> {
     const inv = await getInvoke();
-    if (inv) await inv('config_sync_save_credentials', { credentials });
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('local_sync_connect', { ...config }) as LocalSyncStatus;
   },
-
-  /** 上传配置。返回上传时间戳。 */
-  async configSyncUpload(): Promise<string> {
+  async localSyncDisconnect(): Promise<LocalSyncStatus> {
     const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_upload')) as string;
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('local_sync_disconnect') as LocalSyncStatus;
   },
-
-  /** 下载远端配置（不应用）。返回 payload JSON 字符串。 */
-  async configSyncDownload(): Promise<string> {
+  async localSyncRun(): Promise<LocalSyncStatus> {
     const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_download')) as string;
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('local_sync_run') as LocalSyncStatus;
   },
-
-  /** OPT-010：预览下载的配置（只读）——返回结构化新增/更新/删除清单、受影响
-   * 文章数、快照 hash 与本地配置版本签名。取消 = 不调用 configSyncApply。 */
-  async configSyncPlan(payload: string, mode: 'merge' | 'mirror'): Promise<ConfigSyncPlanResult | null> {
+  async choosePortableBackupFile(save: boolean): Promise<string | null> {
     const inv = await getInvoke();
-    if (!inv) return null;
-    return (await inv('config_sync_plan', { payload, mode })) as ConfigSyncPlanResult;
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('choose_portable_backup_file', { save }) as string | null;
   },
-
-  /** 应用下载的配置（OPT-010：必须携带预览返回的两个签名）。
-   * TASK-074：updated=已存在且确有改动、已写库的源数；skipped=已存在但内容
-   * 与远端一致、真的无需改动的源数（此前 skipped 实为已更新数）。
-   * 签名不符后端返回 stalePreview（code）且零写入——调用方应清除预览要求重新预览。 */
-  async configSyncApply(
-    payload: string,
-    mode: 'merge' | 'mirror',
-    expectedSnapshotHash: string,
-    expectedVersion: string,
-    expectedBackupPath?: string | null,
-  ): Promise<ConfigSyncApplyResult> {
+  async exportPortableBackup(path: string): Promise<PortableBackupInfo> {
     const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    const result = (await inv('config_sync_apply', {
-      payload,
-      mode,
-      expectedSnapshotHash,
-      expectedVersion,
-      expectedBackupPath: expectedBackupPath ?? null,
-    })) as ConfigSyncApplyResult;
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('export_portable_backup', { path }) as PortableBackupInfo;
+  },
+  async previewPortableBackup(path: string): Promise<PortableBackupPreview> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    return await inv('preview_portable_backup', { path }) as PortableBackupPreview;
+  },
+  async restorePortableBackup(path: string, expectedDigest: string): Promise<PortableBackupInfo> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Windows 客户端可用');
+    const result = await inv('restore_portable_backup', { path, expectedDigest }) as PortableBackupInfo;
     aiCacheInvalidated?.();
     return result;
-  },
-
-  /* ---- GitHub 设备流登录 ---- */
-  /** 发起 GitHub 登录：返回 user_code + 授权页地址 + 轮询间隔（秒）。 */
-  async githubLoginStart(force?: boolean): Promise<{ user_code: string; verification_uri: string; interval: number }> {
-    const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('github_login_start', { force })) as { user_code: string; verification_uri: string; interval: number };
-  },
-
-  /** 轮询授权状态。返回账户（已批准）或 null（等待用户在浏览器完成授权）。 */
-  async githubLoginPoll(): Promise<{ login: string } | null> {
-    const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('github_login_poll')) as { login: string } | null;
-  },
-
-  /** 取消后端设备流并递增代次；旧 poll 只能返回 cancelled/stale。
-   *  cancelled=false 表示调用时没有可取消的流，不得当作取消成功。 */
-  async githubLoginCancel(): Promise<{ cancelled: boolean }> {
-    const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('github_login_cancel')) as { cancelled: boolean };
-  },
-
-  /** 已登录账户名；未登录返回 null。 */
-  async githubLoginStatus(): Promise<{ login: string } | null> {
-    const inv = await getInvoke();
-    if (!inv) return null;
-    return (await inv('github_login_status')) as { login: string } | null;
-  },
-
-  /** 断开 GitHub 登录（清 Gist 凭据；WebDAV 凭据不受影响）。 */
-  async githubLoginDisconnect(): Promise<void> {
-    const inv = await getInvoke();
-    if (inv) await inv('github_login_disconnect');
   },
 
   /* ---- OPML 导入导出 ---- */
@@ -1199,6 +1185,7 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     enclosureUrl: row.enclosure_url ?? undefined,
     durationSec: row.duration_sec ?? undefined,
     url: row.url ?? undefined,
+    urlKnown: row.url !== undefined,
     aiSummary: row.ai_summary ?? '',
     /* TASK-122：content/rawContent 不再映射进视图行（正文真值源 bodyById；
        with_content 恒 false，列表行的 content_html 恒 NULL，映射本就是空转）。
@@ -1217,3 +1204,4 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     translatedSig: row.translated_sig ?? null,
   };
 }
+

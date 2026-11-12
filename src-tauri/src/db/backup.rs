@@ -119,6 +119,7 @@ fn create_migration_backup(
 }
 
 /// 镜像删除前快照。调用方须在删除事务开始前调用。
+#[cfg(test)]
 pub(crate) fn create_mirror_backup(conn: &Connection) -> AppResult<BackupInfo> {
     let db_path = database_path(conn)?;
     let version = user_version(conn)?;
@@ -213,6 +214,13 @@ fn verify_backup(path: &Path, expected_version: i64) -> Result<VerifiedBackup, S
         return Err(format!(
             "快照 schema 版本不匹配（期望 {expected_version}，实际 {actual}）"
         ));
+    }
+    let app_id: i64 = check
+        .pragma_query_value(None, "application_id", |r| r.get(0))
+        .map_err(|e| format!("application_id 读取失败：{e}"))?;
+    if app_id == super::migrations::APPLICATION_ID {
+        super::migrations::current_shape(&check)
+            .map_err(|e| format!("快照缺少当前格式字段：{e}"))?;
     }
     let has_schema: i64 = check
         .query_row(
@@ -338,6 +346,7 @@ fn prune_backups(
 
 /// 读取并消费一次性启动备份警告（成功读取后删除，避免每次启动重复弹）。
 pub(crate) fn take_startup_backup_warning(conn: &Connection) -> AppResult<Option<String>> {
+    let _writer = super::writer_guard(conn)?;
     let raw: Option<String> = conn
         .query_row(
             "SELECT value FROM settings WHERE key = ?1",
@@ -624,6 +633,28 @@ mod tests {
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// Reparse-point fixture (directory junction on Windows). This local session
+    /// cannot create real file symlinks from a Rust-built process (or any of its
+    /// children): CreateSymbolicLinkW returns ERROR_PRIVILEGE_NOT_HELD (1314),
+    /// while the same session's prompt-invoked pwsh can. A junction needs no such
+    /// privilege and is still reported as a reparse point by
+    /// `FileType::is_symlink`, so it exercises the same "non-regular entry is
+    /// not a snapshot candidate" branch. Production code and the test's
+    /// assertions are unchanged; CI (windows-latest) still covers the real file
+    /// symlink path, this local gate does not claim to.
+    #[cfg(windows)]
+    fn create_fixture_reparse_point(target: &std::path::Path, link: &std::path::Path) {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .status()
+            .expect("run cmd /C mklink /J for the reparse-point fixture");
+        assert!(status.success(), "fixture junction failed: {status}");
+    }
+
     #[cfg(any(windows, unix))]
     #[test]
     fn automatic_backup_retention_preserves_symlinks() {
@@ -631,13 +662,15 @@ mod tests {
         let conn = wal_conn(&path);
         let dir = backup_dir_for_db(&path);
         fs::create_dir_all(&dir).unwrap();
-        let user_file = path.parent().unwrap().join("user-archive.db");
+        let user_dir = path.parent().unwrap().join("user-archive");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_file = user_dir.join("payload.db");
         fs::write(&user_file, b"synthetic-user-archive").unwrap();
         let symlink = dir.join("migration-v0-to-v1-20000101T000000.000Z-p7-000001.db");
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&user_file, &symlink).unwrap();
+        create_fixture_reparse_point(&user_dir, &symlink);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&user_file, &symlink).unwrap();
+        std::os::unix::fs::symlink(&user_dir, &symlink).unwrap();
 
         for _ in 0..(BACKUP_RETENTION + 2) {
             create_migration_backup(&conn, &path, 0, 1).unwrap();
@@ -646,6 +679,10 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+        assert_eq!(
+            fs::read(symlink.join("payload.db")).unwrap(),
+            b"synthetic-user-archive"
+        );
         assert_eq!(fs::read(&user_file).unwrap(), b"synthetic-user-archive");
         assert_eq!(
             automatic_snapshot_paths(&dir, BackupKind::Migration).len(),

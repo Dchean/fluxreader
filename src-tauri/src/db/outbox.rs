@@ -94,6 +94,7 @@ pub fn enqueue_subscribe(
     desired_title: Option<&str>,
     desired_folder: Option<&str>,
 ) -> AppResult<i64> {
+    let _writer = crate::db::writer_guard(conn)?;
     let inherited_prev: Option<String> = conn
         .query_row(
             "SELECT prev_folder FROM subscription_outbox
@@ -164,6 +165,7 @@ pub fn enqueue_unsubscribe(
     remote_id: Option<i64>,
     prev_folder: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let inherited: Option<i64> = conn
         .query_row(
             "SELECT remote_id FROM subscription_outbox
@@ -251,6 +253,7 @@ pub fn enqueue_edit(
     desired_folder: Option<&str>,
     prev_folder: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     // 合并基线：同账号同 URL 的既有 pending 队项（若有）。
     let previous: Option<OutboxMergeBaseline> = conn
         .query_row(
@@ -330,6 +333,7 @@ pub fn update_pending_subscribe_desired(
     folder: Option<&str>,
     prev_folder: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET desired_title = COALESCE(?1, desired_title),
@@ -357,6 +361,7 @@ pub fn adopt_remote_id_for_pending(
     feed_url: &str,
     remote_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET remote_id = ?1,
@@ -415,6 +420,7 @@ pub fn rebind_outbox_generation(
     account_key: &str,
     account_generation: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox SET account_generation = ?1, updated_at = datetime('now')
           WHERE account_key = ?2 AND account_generation <> ?1 AND status = 'pending'",
@@ -431,6 +437,7 @@ pub fn rebind_outbox_generation_for_ids(
     account_generation: i64,
     ids: &[i64],
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let mut n = 0;
     for id in ids {
         n += conn.execute(
@@ -454,6 +461,7 @@ pub fn rebind_outbox_generation_for_ids(
 /// 可能成为无人退订的孤儿（取舍见 Note）。
 // Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
 pub fn abandon_stale_outbox(conn: &Connection, current_key: &str) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "DELETE FROM subscription_outbox WHERE account_key <> ?1",
         params![current_key],
@@ -473,6 +481,7 @@ pub fn advance_subscribe_stage(
     account_generation: i64,
     remote_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET stage = 'remote_created', remote_id = ?1, updated_at = datetime('now')
@@ -496,6 +505,7 @@ pub fn advance_unsubscribe_resolution(
     account_generation: i64,
     resolved_remote_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET resolved_remote_id = ?1, updated_at = datetime('now')
@@ -509,6 +519,7 @@ pub fn advance_unsubscribe_resolution(
 /// 精确确认出队：只删「本轮计划的那一行、代际未变、仍是 pending」。
 /// 中途被合并改写的队项是新 id（AUTOINCREMENT 不复用），旧 id 的确认天然落空。
 pub fn prune_outbox(conn: &Connection, ids: &[i64], account_generation: i64) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let mut n = 0usize;
     for id in ids {
         n += conn.execute(
@@ -539,6 +550,7 @@ pub fn confirm_subscribe_if_desired_unchanged(
     sent_folder: Option<&str>,
     sent_prev: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "DELETE FROM subscription_outbox
           WHERE id = ?1 AND account_generation = ?2 AND action = 'subscribe' AND status = 'pending'
@@ -584,6 +596,7 @@ pub fn rebase_successor_edit_prev(
     feed_url: &str,
     remote_folder_after_send: &str,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET prev_folder = ?1, updated_at = datetime('now')
@@ -616,6 +629,7 @@ pub fn outbox_pending_by_id(conn: &Connection, id: i64) -> AppResult<bool> {
 /// 入参 (id, account_generation)：代际守卫防「过期计划的标记」落到同 id 但代际
 /// 已推进/重绑的行上（与 mark_outbox_failed 同源，R2/P3-2）。
 pub fn mark_outbox_local_only(conn: &Connection, items: &[(i64, i64)]) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let mut n = 0usize;
     for (id, generation) in items {
         n += conn.execute(
@@ -632,6 +646,7 @@ pub fn mark_outbox_local_only(conn: &Connection, items: &[(i64, i64)]) -> AppRes
 /// 入参 (id, account_generation, 摘要)：代际守卫防「过期计划的失败」记到同 id
 /// 但代际已推进的行上（id 不复用盖不住重绑这一维，R2/P3-2）。
 pub fn mark_outbox_failed(conn: &Connection, failed: &[(i64, i64, String)]) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     if failed.is_empty() {
         return Ok(());
     }
@@ -751,6 +766,7 @@ pub fn mark_outbox_session_blocked(
     account_key: &str,
     summary: &str,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET attempts = attempts + 1, last_error = ?1, updated_at = datetime('now')

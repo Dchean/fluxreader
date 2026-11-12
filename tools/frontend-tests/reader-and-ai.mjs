@@ -286,7 +286,7 @@ export async function run(ctx) {
   const opt020FulltextError = store.getState().errors.find(
     (e) => e.key === 'reader:fulltext:101',
   );
-  S.extractResult = { html: '<p>文章 101 全文</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>文章 101 全文</p>', degraded: false, reason: null, contentId: 50101, contentRevision: 1 };
   store.setState({ activeArticleId: '104', showFulltext: false });
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020FulltextError?.id);
@@ -315,7 +315,7 @@ export async function run(ctx) {
     showFulltext: false,
     entries: s.entries.filter((e) => e.id !== '101'),
   }));
-  S.extractResult = { html: '<p>A 仍存在，后端执行</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>A 仍存在，后端执行</p>', degraded: false, reason: null, contentId: 50101, contentRevision: 2 };
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020FulltextGoneError?.id);
   await nTick(20);
@@ -346,7 +346,7 @@ export async function run(ctx) {
   const opt020AutoFulltextError = store.getState().errors.find(
     (e) => e.key === 'reader:fulltext:101',
   );
-  S.extractResult = { html: '<p>自动全文 101</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>自动全文 101</p>', degraded: false, reason: null, contentId: 50101, contentRevision: 1 };
   store.setState({ activeArticleId: '104', showFulltext: false });
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020AutoFulltextError?.id);
@@ -725,7 +725,7 @@ export async function run(ctx) {
   checkNew('(P2-10/TASK-076) 且如实提示降级原因（后端 reason 原文），而不是报成功',
     p210.toasts.some((t) => t.text.includes('未采用全文提取') && t.text.includes('已保留原正文'))
     && !p210.toasts.some((t) => t.text === '全文提取完成'));
-  S.extractResult = { html: '<p>真正的全文正文，明显更长的一段内容。</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>真正的全文正文，明显更长的一段内容。</p>', degraded: false, reason: null, contentId: 50104, contentRevision: 1 };
   store.getState().extractCurrentArticle();
   await nTick(20);
   const p210ok = store.getState();

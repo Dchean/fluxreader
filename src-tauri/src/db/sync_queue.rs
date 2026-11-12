@@ -39,6 +39,7 @@ pub fn enqueue_sync(
     action: &str,
     payload: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     let (kind, field, desired_state, status, unbound_reason) =
         if matches!(action, "read" | "unread" | "star" | "unstar") {
             let field = if matches!(action, "read" | "unread") {
@@ -191,6 +192,7 @@ pub fn take_sync_queue(conn: &Connection) -> AppResult<Vec<SyncQueueItem>> {
 /// sync_queue 为 AUTOINCREMENT，见 db/migrations.rs 的 v18 迁移）。
 // Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
 pub fn prune_sync(conn: &Connection, ids: &[i64]) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     if ids.is_empty() {
         return Ok(());
     }
@@ -214,6 +216,7 @@ pub fn prune_sync(conn: &Connection, ids: &[i64]) -> AppResult<()> {
 /// 清掉历史版本残留的 remove_feed 僵尸队项（该动作从未被 sync 消费；现行
 /// 删除语义为「本地删除不推远端」，见 delete_feed 命令）。返回清除条数。
 pub fn purge_remove_feed_zombies(conn: &Connection) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute("DELETE FROM sync_queue WHERE action = 'remove_feed'", [])?;
     Ok(n)
 }
@@ -223,6 +226,7 @@ pub fn purge_remove_feed_zombies(conn: &Connection) -> AppResult<usize> {
 /// 用户仍能看到「已停止自动重试、本地状态仍在」；add_feed 由 feeds 阶段处理。
 /// `cutoff` 与 created_at 同为 'YYYY-MM-DD HH:MM:SS'（UTC）。返回转态条数。
 pub fn prune_stale_unbound(conn: &Connection, cutoff: &str) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE sync_queue
             SET status = 'expired_unconfirmed',
@@ -256,7 +260,7 @@ pub fn retry_expired_intents(
     conn: &mut Connection,
     expected_account_generation: i64,
 ) -> AppResult<ExpiredRetryResult> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     if sync_generation(&tx)? != expected_account_generation {
         return Err(crate::error::AppError::new(
             "staleAccount",
@@ -328,6 +332,7 @@ pub(super) fn truncate_last_error(err: &str) -> String {
 /// 成功项由 prune_sync 整行删除，attempts/last_error 随之消失（stats 归零）。
 /// 状态变更重新入队（enqueue_sync 删旧插新）也会重置为未失败。
 pub fn mark_push_failed(conn: &Connection, failed: &[(i64, String)]) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     if failed.is_empty() {
         return Ok(());
     }
@@ -354,6 +359,7 @@ pub fn mark_push_failed(conn: &Connection, failed: &[(i64, String)]) -> AppResul
 /// 这类失败不是「没发出去」，所以不能伪装成成功，也不能直接 `prune_sync`；
 /// 下一轮会重新按目标态收敛（GReader 是绝对 tag 语义，Fever 收藏先探测再发送）。
 pub fn mark_push_verification_failed(conn: &Connection, failed: &[(i64, String)]) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     if failed.is_empty() {
         return Ok(());
     }
@@ -379,6 +385,7 @@ pub fn mark_push_verification_failed(conn: &Connection, failed: &[(i64, String)]
 // Note: 该入口只接受可证明的目标不存在；空/短响应走 verification/inconclusive — 见
 // .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
 pub fn mark_queue_target_missing(conn: &Connection, failed: &[(i64, String)]) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     if failed.is_empty() {
         return Ok(());
     }
@@ -405,6 +412,7 @@ pub fn mark_queue_target_missing(conn: &Connection, failed: &[(i64, String)]) ->
 /// 对已删除目标无限刷请求。保留 attempts，清掉上次摘要，失败后重新落
 /// `failed/target_missing`。
 pub fn retry_target_missing(conn: &Connection) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE sync_queue
             SET status = 'bound_pending',
@@ -426,6 +434,7 @@ pub fn retry_target_missing(conn: &Connection) -> AppResult<usize> {
 /// 由 sync::push_block_summary 分类。空队列为 no-op，返回标记行数（调用方据
 /// n>0 决定是否发 sync-queue-changed——统计真变了才发，X3 不制造噪音）。
 pub fn mark_push_blocked(conn: &Connection, summary: &str) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let summary = truncate_last_error(summary);
     let n = conn.execute(
         "UPDATE sync_queue
@@ -449,6 +458,7 @@ pub fn mark_queue_identity_waiting(
     status: &str,
     reason: &str,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE sync_queue
             SET status = ?1,
@@ -466,6 +476,7 @@ pub fn mark_queue_identity_waiting(
 /// 将状态恢复到可推送。正常绑定由 articles.remote_id UPDATE 触发器先行完成；
 /// 此函数同时覆盖升级后遗留的脏状态与直接 SQL 改写的边界。
 pub fn mark_queue_bound_pending(conn: &Connection, id: i64) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE sync_queue
             SET status = 'bound_pending',

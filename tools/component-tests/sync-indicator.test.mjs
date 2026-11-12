@@ -12,6 +12,8 @@ import {
 } from './fixtures.mjs';
 
 const ZERO_OUTBOX = { pending: 0, failed: 0, local_only: 0, last_error: null };
+const LOCAL_DISCONNECTED = { connected: false, endpoint: null, username: null, mode: 'scheduled', interval_minutes: 15, generation: 0, library_id: 'local', pending_operations: 0, pending_bodies: 0, pending_publications: 0, last_state_sync: 0, last_body_sync: 0, next_retry_at: 0, last_error: null };
+const LOCAL_CONNECTED = { ...LOCAL_DISCONNECTED, connected: true, endpoint: 'https://dav.example', username: 'alice', generation: 1 };
 
 async function setInputValue(input, value) {
   const { act } = await import('react');
@@ -112,6 +114,35 @@ componentTest('同步灯：账户名常驻、灯点击调用 triggerManualSync�
   } finally {
     useAppStore.setState({ triggerManualSync: originalTrigger });
   }
+});
+
+componentTest('本地WebDAV灯：首次连接未同步/状态完成正文待补/错误队列与断开均不借RSS成功绿，点击圆点调用local_sync_run', { timeout: 30000 }, async () => {
+  installBackend(); resetPlan(); resetStore(); seedFromRows(defaultRows());
+  let state = { ...LOCAL_CONNECTED };
+  let runs = 0;
+  setPlan({ local_sync_status: () => Promise.resolve(state), local_sync_run: () => { runs += 1; return Promise.resolve(state); } });
+  useAppStore.setState({ syncConnected: false, syncStatus: 'synced', localSyncState: state, localSyncBusy: null, localSyncError: null });
+  const { createElement, act } = await import('react');
+  const { Sidebar } = await import('../../src/components/Sidebar.tsx');
+  const entry = await mount(createElement(Sidebar)); await flush(3);
+  const dot = entry.container.querySelector('.sync-indicator-button');
+  const label = entry.container.querySelector('.sync-status-pill');
+  assert.equal(label.textContent, 'WebDAV');
+  assert.ok(dot.querySelector('.sync-dot--pending'), '已配置但状态正文从未确认不可显示成功绿');
+  assert.match(dot.getAttribute('aria-label'), /正文确认：尚未同步/);
+  state = { ...state, last_state_sync: 1000, pending_bodies: 3, pending_operations: 2, pending_publications: 1 };
+  await act(async () => { useAppStore.setState({ localSyncState: state }); }); await flush(1);
+  assert.ok(dot.querySelector('.sync-dot--pending'));
+  assert.match(dot.title, /状态确认/); assert.match(dot.title, /本机待补正文 3 篇/);
+  state = { ...state, last_body_sync: 1100, pending_bodies: 0, pending_operations: 0, pending_publications: 0 };
+  await act(async () => { useAppStore.setState({ localSyncState: state }); dot.click(); }); await flush(3);
+  assert.equal(runs, 1); assert.ok(dot.querySelector('.sync-dot--success'), '状态/正文均确认且队列清空才显示成功');
+  state = { ...state, last_error: 'HTTP 503', pending_publications: 2 };
+  await act(async () => { useAppStore.setState({ localSyncState: state }); }); await flush(1);
+  assert.ok(dot.querySelector('.sync-dot--error')); assert.match(dot.getAttribute('aria-label'), /HTTP 503/);
+  state = { ...LOCAL_DISCONNECTED, generation: 2 };
+  await act(async () => { useAppStore.setState({ localSyncState: state, localSyncError: null }); }); await flush(1);
+  assert.equal(label.textContent, '本地模式'); assert.ok(dot.querySelector('.sync-dot--local'));
 });
 
 componentTest('SyncTab：44 条等待绑定与订阅 outbox 失败不得显示“本地已保存”', { timeout: 30000 }, async () => {

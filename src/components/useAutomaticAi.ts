@@ -25,7 +25,7 @@ function scope() {
 
 function unobstructed() {
   const s = useAppStore.getState();
-  return focused && document.visibilityState !== 'hidden' && !s.settingsOpen && !s.searchOpen
+  return focused && document.visibilityState !== 'hidden' && !s.libraryRestoreBusy && !s.settingsOpen && !s.searchOpen
     && !s.contextMenuOpen && !s.closeAskVisible && !s.lightboxUrl && !s.playerExpanded
     && !s.newCategoryModalOpen && !s.addFeedModalOpen && !s.editFeedModalOpen
     && !s.renameCatModalOpen && !s.errorCenterOpen;

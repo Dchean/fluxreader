@@ -1,4 +1,5 @@
 import type { CSSProperties, MouseEvent } from 'react';
+import { useProseImages } from './useProseImages';
 
 /* ============================================================
    ReaderProse —— 阅读器正文的「源码 / 渲染」分离呈现（审计 F14 / OPT-012）
@@ -23,8 +24,11 @@ import type { CSSProperties, MouseEvent } from 'react';
    ============================================================ */
 
 export interface ReaderProseProps {
-  /** 渲染态 HTML：RSS 原文 / 提取全文 / 已消毒译文；图片代理命中时为代理产物（data: URL） */
+  /** 渲染态 HTML：RSS 原文 / 提取全文 / 已消毒译文；代理仅改已绑定图片节点的src */
   renderHtml: string;
+  imagePageUrl?: string;
+  imageOwner?: string;
+  imagesEnabled?: boolean;
   /** 源码态展示的原始文本：与 renderHtml 同源，但**不经图片代理**——
       源码要显示原始 src，不能用代理产物的 base64 大块冒充（流式译文即其本文） */
   sourceText: string;
@@ -45,7 +49,9 @@ export function ReaderProse({
   isStreamingTranslation,
   style,
   onClick,
+  imagePageUrl, imageOwner = '', imagesEnabled = true,
 }: ReaderProseProps) {
+  const { ref: imagesRef, markup } = useProseImages(isSourceMode || isStreamingTranslation ? '' : renderHtml, imagePageUrl, imageOwner, imagesEnabled && !isSourceMode && !isStreamingTranslation);
   if (isSourceMode) {
     /* Note: 源码态必须是文本节点插值（React 负责转义）——改回 dangerouslySetInnerHTML
        即恢复 F14（源码被当 HTML 创建/执行）。见 .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
@@ -68,7 +74,11 @@ export function ReaderProse({
       className="article-prose"
       style={style}
       onClick={onClick}
-      dangerouslySetInnerHTML={{ __html: renderHtml }}
+      ref={imagesRef}
+      dangerouslySetInnerHTML={markup}
     />
   );
 }
+
+
+

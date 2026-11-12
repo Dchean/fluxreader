@@ -1,6 +1,86 @@
 use super::*;
 use rusqlite::params;
 
+/// Shared ordinary-setting policy. Synced keys are also portable. autoStart and
+/// closePromptShown are device-local; syncMode is portable but is not sent to
+/// WebDAV because it selects the RSS content source. Credentials/AI configs are
+/// outside app_settings. readBodyRetentionDays defaults to 0 (permanent); this
+/// contract does not itself schedule cleanup.
+pub const SYNC_SETTING_KEYS: &[&str] = &[
+    "autoRefresh",
+    "refreshInterval",
+    "fetchConcurrency",
+    "markReadOnOpen",
+    "markReadOnScrollBottom",
+    "markReadOnScrollOut",
+    "startupView",
+    "hideReadOnStartup",
+    "themeMode",
+    "palette",
+    "fontFamily",
+    "fontSize",
+    "lineHeight",
+    "maxWidth",
+    "listWidth",
+    "showReadTime",
+    "defaultOpenMode",
+    "closeToTray",
+    "notifyOnNewArticles",
+    "autoSync",
+    "articleAutoSummary",
+    "articleAutoTranslate",
+    "socialAutoTranslate",
+    "notificationAutoSummary",
+    "notificationAutoTranslate",
+    "readBodyRetentionDays",
+];
+pub(crate) const PORTABLE_ONLY_SETTING_KEYS: &[&str] = &["syncMode"];
+pub(crate) const DEVICE_SETTING_KEYS: &[&str] = &["autoStart", "closePromptShown"];
+
+pub fn validate_app_setting(key: &str, value: &serde_json::Value) -> AppResult<()> {
+    if !SYNC_SETTING_KEYS.contains(&key)
+        && !PORTABLE_ONLY_SETTING_KEYS.contains(&key)
+        && !DEVICE_SETTING_KEYS.contains(&key)
+    {
+        return Err(crate::error::AppError::new(
+            "validate",
+            format!("未知设置 {key}"),
+        ));
+    }
+    let range = |min: f64, max: f64| {
+        value
+            .as_f64()
+            .is_some_and(|v| v.is_finite() && v >= min && v <= max)
+    };
+    let member = |allowed: &[&str]| value.as_str().is_some_and(|v| allowed.contains(&v));
+    let ok = match key {
+        "autoStart" | "closePromptShown" => value.is_boolean(),
+        "syncMode" => member(&["direct", "hybrid"]),
+        "refreshInterval" => value.as_i64().is_some_and(|n| (5..=720).contains(&n)),
+        "readBodyRetentionDays" => value.as_i64().is_some_and(|n| (0..=3650).contains(&n)),
+        "fetchConcurrency" => range(1.0, 16.0),
+        "fontSize" => range(13.0, 24.0),
+        "lineHeight" => range(130.0, 240.0),
+        "maxWidth" => range(560.0, 1100.0),
+        "listWidth" => range(280.0, 560.0),
+        "startupView" => member(&["unread", "all", "today", "starred"]),
+        "themeMode" => member(&["light", "dark", "auto"]),
+        "palette" => member(&["blue", "zinc", "purple", "emerald", "terracotta"]),
+        "defaultOpenMode" => member(&["rss", "fulltext"]),
+        "fontFamily" => value.as_str().is_some_and(|v| !v.trim().is_empty()),
+        key if SYNC_SETTING_KEYS.contains(&key) => value.is_boolean(),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(crate::error::AppError::new(
+            "validate",
+            format!("设置 {key} 的名称、类型或值无效"),
+        ))
+    }
+}
+
 pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
     let v: Option<String> = conn
         .query_row(
@@ -45,6 +125,7 @@ pub(crate) fn set_setting_with(
     } else {
         value.to_string()
     };
+    let _writer = super::writer_guard(conn)?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",

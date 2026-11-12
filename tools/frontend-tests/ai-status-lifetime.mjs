@@ -123,16 +123,16 @@ export async function run(ctx) {
   await prepare();
   S.aiCacheCheck = status(true); store.getState().ensureAiStatus('101'); await nTick(3);
   original = globalThis.__INVOKE__;
-  globalThis.__INVOKE__ = (cmd, args) => ['save_ai_config', 'config_sync_apply', 'cache_cleanup'].includes(cmd)
+  globalThis.__INVOKE__ = (cmd, args) => ['save_ai_config', 'restore_portable_backup', 'cache_cleanup'].includes(cmd)
     ? Promise.reject(new Error('rejected')) : original(cmd, args);
   const initial = store.getState().aiStatusRevision;
   try {
     await api.saveAiConfig('{}').catch(() => {});
-    await api.configSyncApply('{}', 'merge', 'hash', 'version').catch(() => {});
+    await api.restorePortableBackup('reviewed.flxb', 'hash').catch(() => {});
     await api.cacheCleanup(7, 'ai').catch(() => {});
     checkNew('(f6) 三条失败写路径均不推进已保存配置代次', store.getState().aiStatusRevision === initial && visible() === 'complete');
   } finally { globalThis.__INVOKE__ = original; }
-  await api.configSyncApply('{}', 'merge', 'hash', 'version');
+  await api.restorePortableBackup('reviewed.flxb', 'hash');
   checkNew('(f6) 配置下载应用成功使旧验签过时', store.getState().aiStatusRevision === initial + 1 && visible() === 'stale');
   await api.cacheCleanup(7, 'ai');
   checkNew('(f7) 批量清理 AI 成功使旧分段与完整状态过时', store.getState().aiStatusRevision === initial + 2);

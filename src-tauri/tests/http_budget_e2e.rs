@@ -1,5 +1,8 @@
 //! D7：生产 WebDAV / AI models / AI 错误收体的预算与正常对照。
-use app_lib::{ai, config_sync, ingestion};
+use app_lib::{
+    ai, ingestion,
+    webdav_transport::{ErrorKind, Transport},
+};
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -50,16 +53,6 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
-fn credentials(base: String) -> config_sync::SyncCredentials {
-    config_sync::SyncCredentials {
-        backend: "webdav".into(),
-        token: "synthetic".into(),
-        server: base,
-        username: "test".into(),
-        gist_id: None,
-    }
-}
-
 fn ai_config(base: String) -> ai::AiConfig {
     ai::AiConfig {
         base_url: base,
@@ -70,39 +63,38 @@ fn ai_config(base: String) -> ai::AiConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webdav_body_cap_rejects_length_and_eof_oversize_and_accepts_normal_json() {
+    const LIMIT: usize = 4 * 1024 * 1024;
     for content_length in [true, false] {
-        let (base, server) = response(
-            "200 OK",
-            vec![b'x'; ingestion::MAX_BODY_BYTES + 1],
-            content_length,
-        );
-        let err = config_sync::webdav_get(&client(), &credentials(base), "config.json")
+        let (base, server) = response("200 OK", vec![b'x'; LIMIT + 1], content_length);
+        let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
+        let error = transport
+            .library_get(".fluxreader-v3/test.bin", LIMIT)
             .await
             .unwrap_err();
-        assert_eq!(err.code, "responseTooLarge");
+        assert_eq!(error.kind, ErrorKind::TooLarge);
         server.join().unwrap();
     }
-    let (base, server) = response("200 OK", br#"{"schema":2}"#.to_vec(), true);
+    let (base, server) = response("200 OK", br#"{"format":3}"#.to_vec(), true);
+    let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
     assert_eq!(
-        config_sync::webdav_get(&client(), &credentials(base), "config.json")
-            .await
-            .unwrap(),
-        r#"{"schema":2}"#
-    );
-    server.join().unwrap();
-    let body = format!(
-        r#"{{"padding":"{}"}}"#,
-        "x".repeat(ingestion::MAX_BODY_BYTES - 14)
-    );
-    assert_eq!(body.len(), ingestion::MAX_BODY_BYTES);
-    let (base, server) = response("200 OK", body.into_bytes(), true);
-    assert_eq!(
-        config_sync::webdav_get(&client(), &credentials(base), "config.json")
+        transport
+            .library_get(".fluxreader-v3/test.bin", LIMIT)
             .await
             .unwrap()
+            .unwrap(),
+        br#"{"format":3}"#
+    );
+    server.join().unwrap();
+    let (base, server) = response("200 OK", vec![b'x'; LIMIT], true);
+    let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        transport
+            .library_get(".fluxreader-v3/test.bin", LIMIT)
+            .await
+            .unwrap()
+            .unwrap()
             .len(),
-        ingestion::MAX_BODY_BYTES,
-        "16MiB边界仍可正常读取"
+        LIMIT
     );
     server.join().unwrap();
 }

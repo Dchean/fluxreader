@@ -92,6 +92,24 @@
 /** 正文/AI 记录状态（判别态；语义表见模块头注） */
 export type BodyState = 'loading' | 'ready' | 'cleared' | 'missing' | 'failed';
 
+/** 全文操作属于已水合实体，既不替代正文状态，也不随 Reader 切篇迁移。 */
+export interface FulltextTarget {
+  readonly contentId: number | null;
+  readonly contentRev: number;
+  readonly anchor: string | null;
+  readonly url: string;
+  /** 已知内容接管后不可再用；只由仍持有它的命令/有界错误闭包保留。 */
+  revoked: boolean;
+}
+
+export interface FulltextRequest {
+  readonly stamp: number;
+  readonly target: FulltextTarget;
+  readonly kind: 'extract' | 'verify' | 'media';
+  /** 命令已被结算或后继操作接管；不等同于目标内容已更新。 */
+  retired: boolean;
+}
+
 /** 单篇文章的正文/AI 实体记录（bodyById 的值） */
 export interface BodyEntry {
   state: BodyState;
@@ -130,6 +148,54 @@ export interface BodyEntry {
   aiWrittenAt: number;
   /** missing/failed 的呈现文案（missing = 固定文案；failed = 错误消息） */
   message: string;
+  fulltextRequest?: FulltextRequest;
+  fulltextFailure?: { ticket: FulltextRequest; message: string };
+  /** 成功提交后的媒体回读归属，回读结束即释放；不持有HTML或正文记录。 */
+  fulltextReadback?: FulltextRequest;
+}
+
+function fulltextTickets(rec: BodyEntry | undefined): FulltextRequest[] {
+  return rec ? [rec.fulltextRequest, rec.fulltextFailure?.ticket, rec.fulltextReadback]
+    .filter((ticket): ticket is FulltextRequest => ticket !== undefined) : [];
+}
+
+/** 同身份详情可以换记录对象；媒体变化不参与正文目标资格。 */
+export function matchesFulltextTarget(target: FulltextTarget, actual: {
+  contentId: number | null; contentRev: number; anchor: string | null; url?: string | null;
+}): boolean {
+  return target.contentId === actual.contentId && target.contentRev === actual.contentRev
+    && (target.anchor === null || actual.anchor === null || target.anchor === actual.anchor)
+    && (actual.url === undefined || target.url === actual.url);
+}
+
+/** 唯一正文目标判据；调用方另外检查库代、忙态和其request/failure的命令归属。 */
+export function isFulltextTargetCurrent(rec: BodyEntry, ticket: FulltextRequest): boolean {
+  if (ticket.retired || ticket.target.revoked || rec.contentRevision !== ticket.stamp) return false;
+  // LRU核验创建的loading/failed/missing没有可猜的正文身份；仍由该读取的对象owner守卫。
+  if (ticket.kind === 'verify' && rec.state !== 'ready') return true;
+  return rec.state !== 'missing'
+    && matchesFulltextTarget(ticket.target, { contentId: rec.contentId, contentRev: rec.contentRev, anchor: rec.entryAnchor });
+}
+
+/** 已接受的缓存写可永久撤销旧操作，但不改变普通正文/AI/水合的任何字段。 */
+function reconcileFulltextTickets(previous: BodyEntry | undefined, next: BodyEntry): BodyEntry {
+  const retained = fulltextTickets(next);
+  for (const ticket of fulltextTickets(previous)) {
+    if (!retained.includes(ticket)) ticket.retired = true;
+  }
+  let changed = false;
+  for (const ticket of retained) {
+    if (!isFulltextTargetCurrent(next, ticket)) {
+      if (!ticket.retired) ticket.target.revoked = true;
+      changed = true;
+    }
+  }
+  if (!changed) return next;
+  return { ...next,
+    fulltextRequest: next.fulltextRequest && !isFulltextTargetCurrent(next, next.fulltextRequest) ? undefined : next.fulltextRequest,
+    fulltextFailure: next.fulltextFailure && !isFulltextTargetCurrent(next, next.fulltextFailure.ticket) ? undefined : next.fulltextFailure,
+    fulltextReadback: next.fulltextReadback && !isFulltextTargetCurrent(next, next.fulltextReadback) ? undefined : next.fulltextReadback,
+  };
 }
 
 /** 正文缓存条数上限（LRU）。取值依据见模块头注「内存预算」。 */
@@ -155,6 +221,7 @@ class BodyLru extends Map<string, BodyEntry> {
   }
 
   set(key: string, value: BodyEntry): this {
+    value = reconcileFulltextTickets(super.get(key), value);
     super.delete(key);
     super.set(key, value);
     while (super.size > this.max) {
@@ -360,6 +427,79 @@ export function dropBodyEntry(id: string): void {
   if (bodyById.delete(id)) touch(id);
 }
 
+export function beginFulltextRequest(id: string, url: string): FulltextRequest | undefined {
+  const current = bodyById.get(id);
+  if (!current || current.fulltextRequest) return;
+  const request: FulltextRequest = { stamp: current.contentRevision, retired: false, kind: 'extract',
+    target: { contentId: current.contentId, contentRev: current.contentRev, anchor: current.entryAnchor, url, revoked: false } };
+  bodyById.set(id, { ...current, fulltextRequest: request, fulltextFailure: undefined, fulltextReadback: undefined });
+  touch(id);
+  return request;
+}
+
+/** 只结束自己的操作；失效后不能留下旧错误，也不能清掉后继请求。 */
+export function finishFulltextRequest(id: string, request: FulltextRequest, message?: string): boolean {
+  const current = bodyById.get(id);
+  if (!current || current.fulltextRequest !== request) return false;
+  const accepted = isFulltextTargetCurrent(current, request);
+  bodyById.set(id, { ...current, fulltextRequest: undefined,
+    fulltextFailure: accepted && message ? { ticket: request, message } : current.fulltextFailure });
+  touch(id);
+  return accepted;
+}
+
+/** 详情已被applyBodyRow接受后核实际行目标，补上缓存未持有的URL/NULL事实。
+ * 拒绝的详情不得调用；Reader单篇/批量/private与AI离屏水合共用这一出口。 */
+export function reconcileFulltextTargetRow(id: string, row: {
+  content_id?: number | null; content_revision?: number | null;
+  feed_id?: number | null; title?: string | null; url?: string | null;
+}): void {
+  const current = bodyById.get(id);
+  if (!current) return;
+  let changed = false;
+  for (const ticket of fulltextTickets(current)) {
+    if (!matchesFulltextTarget(ticket.target, { contentId: row.content_id ?? null,
+      contentRev: row.content_revision ?? 0, anchor: anchorOfRow(row), url: row.url ?? null })) {
+      ticket.target.revoked = true; changed = true;
+    }
+  }
+  if (changed) { bodyById.set(id, { ...current }); touch(id); }
+}
+
+/** 已接受轻属性只确认位置，不以列表旧CID/rev裁决新正文（保留提取后的快照基线）。
+ * url undefined=本次未提供，null=明确无原文；两者不得混成同一个撤销依据。 */
+export function reconcileFulltextLocation(id: string, location: {
+  url?: string | null; anchor: string | null; unavailable?: boolean;
+}): void {
+  const current = bodyById.get(id);
+  if (!current) return;
+  let changed = false;
+  for (const ticket of fulltextTickets(current)) {
+    if (location.unavailable || (location.url !== undefined && location.url !== ticket.target.url)
+      || (location.anchor !== null && ticket.target.anchor !== null && location.anchor !== ticket.target.anchor)) {
+      ticket.target.revoked = true; changed = true;
+    }
+  }
+  if (changed) { bodyById.set(id, { ...current }); touch(id); }
+}
+
+/** 明确提交后新建轻目标，旧提取ticket已由成功写入撤销，不复用旧失败闭包。 */
+export function beginFulltextReadback(id: string, target: string | FulltextTarget): FulltextRequest | undefined {
+  const current = bodyById.get(id);
+  if (!current) return;
+  const ticket: FulltextRequest = { stamp: current.contentRevision, retired: false,
+    kind: typeof target === 'string' ? 'media' : 'verify',
+    target: typeof target === 'string' ? { contentId: current.contentId, contentRev: current.contentRev,
+      anchor: current.entryAnchor, url: target, revoked: false } : target };
+  bodyById.set(id, { ...current, fulltextReadback: ticket });
+  return ticket;
+}
+
+export function finishFulltextReadback(id: string, ticket: FulltextRequest): void {
+  const current = bodyById.get(id);
+  if (current?.fulltextReadback === ticket) bodyById.set(id, { ...current, fulltextReadback: undefined });
+}
+
 /** 全文提取成功：正文被 Readability 结果覆盖（rawContent 保留 RSS 原文）。
     AI 字段不动；推进失效戳，提取前在途的旧详情不得覆盖已提交的新全文。
     无记录 = 未水合，提取前提不成立（调用方守卫），此处防御性忽略。
@@ -378,6 +518,8 @@ export function applyExtractedFulltext(
     content: html,
     contentRevision: nextRevision(current.contentRevision),
     fulltextExtracted: true,
+    fulltextRequest: undefined,
+    fulltextFailure: undefined,
     state: 'ready',
     contentId: identity ? identity.contentId : current.contentId,
     contentRev: identity ? identity.contentRev : current.contentRev,
@@ -497,6 +639,11 @@ export function reconcileBodyEntities(
 
 /** 测试专用：清空全部记录（frontend-regression 的夹具复位；生产代码不得调用） */
 export function resetBodyCacheForTests(): void {
+  clearLibraryBodyCache();
+}
+
+/** 恢复后清掉旧库正文；保留单调 revision sequence，旧 hydration stamp 永不复用。 */
+export function clearLibraryBodyCache(): void {
   bodyById.clear();
   touch();
 }

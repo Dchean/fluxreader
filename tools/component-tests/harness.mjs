@@ -232,10 +232,8 @@ export const resetBodyCacheForTests = bodyCacheMod.resetBodyCacheForTests;
    清空，避免上一用例挂起的在途请求（受控 Promise 永不 settle）吞掉下一用例的同键触发。 */
 const aiSliceMod = await import('../../dist-test/store/slices/ai.js');
 export const resetAiRequestStateForTests = aiSliceMod.resetAiRequestStateForTests;
-const syncSliceMod = await import('../../dist-test/store/slices/sync.js');
 const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
 const { resetReadingPositionForTests } = await import('../../dist-test/lib/readingPosition.js');
-export const resetGithubLoginForTests = syncSliceMod.resetGithubLoginForTests;
 
 /* ------------------------------------------------------------------
    6) 统一错误账本（R1 修复）：console.error / jsdom 未捕获 / React 三通道错误
@@ -488,6 +486,7 @@ export function resetStore(extra = {}) {
     closeAskVisible: false,
     lightboxUrl: null,
     lightboxEntryId: null,
+    lightboxPageUrl: undefined,
     lightboxGallery: null,
     newCategoryModalOpen: false,
     addFeedModalOpen: false,
@@ -500,6 +499,9 @@ export function resetStore(extra = {}) {
     saveAndSyncBusyOwner: null,
     /* 同步账户/队列/订阅回执是跨用例真实事件源；基线清空防止上一用例的
        账户名、橙色灯或 outbox 计数泄漏到下一用例。 */
+    libraryGeneration: 0, libraryRestoreBusy: false,
+    localSyncState: null, localSyncBusy: null, localSyncError: null,
+    portableBackup: { busy: null, preview: null, result: null, error: null, refreshFailed: false },
     syncStatus: 'synced',
     backgroundSyncing: false,
     syncConnected: false,
@@ -517,12 +519,6 @@ export function resetStore(extra = {}) {
     syncTerminalFailed: 0,
     syncExpiredUnconfirmed: 0,
     syncQueueLastError: null,
-    githubFlow: null,
-    githubAccount: null,
-    githubLoggingIn: false,
-    githubLoginStartPending: false,
-    githubPollPending: false,
-    githubLoginCancelPending: false,
     /* OPT-009 B3：订阅写回回执与能力矩阵是事件/挂载写入的模块状态——
        基线清空，避免跨用例残留（上一用例的能力矩阵被下一个用例读到）。 */
     subOutboxStats: null,
@@ -542,7 +538,6 @@ export function resetStore(extra = {}) {
   });
   resetBodyCacheForTests();
   resetAiRequestStateForTests();
-  resetGithubLoginForTests();
   resetReadingPositionForTests();
 }
 
@@ -607,6 +602,12 @@ export function componentTest(name, options, body) {
     } catch (e) {
       errors.push(e);
     }
+    // Media transport and restore/report hooks share one instance; no resource crosses a case.
+    try {
+      const { awaitCoverReportFrontier, resetCoverCacheForTest } = await import('../../dist-test/lib/coverImage.js');
+      await awaitCoverReportFrontier();
+      resetCoverCacheForTest();
+    } catch (error) { errors.push(error); }
     // RS4：卸载effect也可能存档锚；即使body或卸载失败，仍清活锚/存档/节流基准。
     try { resetReadingPositionForTests(); } catch (e) { errors.push(e); }
     const ledgerErr = endTestErrors();
@@ -676,3 +677,4 @@ export async function runFinalTeardown() {
 
 /* 供诊断输出：把挂载树数量暴露给入口汇总。 */
 export function mountedCount() { return mountedRoots.length; }
+

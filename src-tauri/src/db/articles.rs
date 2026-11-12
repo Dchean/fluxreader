@@ -285,8 +285,65 @@ fn smart_dedup_on(_conn: &Connection) -> bool {
 
 // Note: 源内非空RSS内容等价组；真实身份保留，四向动作同组事务 — 见 .agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md
 const SAME_RSS_GROUP: &str = "b.feed_id = a.feed_id AND a.rss_content_id IS NOT NULL AND b.rss_content_id = a.rss_content_id AND b.title = a.title AND COALESCE(b.enclosure_url, '') = COALESCE(a.enclosure_url, '') AND COALESCE(b.enclosure_mime, '') = COALESCE(a.enclosure_mime, '')";
-const VISIBLE_ARTICLE: &str = "(a.is_starred = 1 OR EXISTS(SELECT 1 FROM feeds visible_feed WHERE visible_feed.id=a.feed_id AND visible_feed.active=1))";
-const VISIBLE_GROUP_MEMBER: &str = "(b.is_starred = 1 OR EXISTS(SELECT 1 FROM feeds visible_feed WHERE visible_feed.id=b.feed_id AND visible_feed.active=1))";
+const DIRECT_VISIBLE_GROUP_MEMBER: &str =
+    "(b.is_starred=1 OR COALESCE((SELECT active FROM feeds WHERE id=b.feed_id),0)=1)";
+const DEDUP_INDEX_CLAUSE: &str = " INDEXED BY idx_articles_rss_group";
+
+fn article_visibility(alias: &str, logical_state: bool) -> String {
+    if logical_state {
+        format!(
+            "EXISTS(SELECT 1 FROM local_sync_article_state visible \
+             WHERE visible.id={alias}.id AND (visible.is_starred=1 OR visible.active=1))"
+        )
+    } else {
+        format!(
+            "({alias}.is_starred=1 OR COALESCE((SELECT active FROM feeds \
+             WHERE id={alias}.feed_id),0)=1)"
+        )
+    }
+}
+
+pub(crate) fn article_flag(alias: &str, logical_state: bool, field: &str) -> String {
+    debug_assert!(matches!(field, "is_read" | "is_starred"));
+    if logical_state {
+        format!(
+            "COALESCE((SELECT logical_state.{field} FROM local_sync_article_state \
+             logical_state WHERE logical_state.id={alias}.id), {alias}.{field})"
+        )
+    } else {
+        format!("{alias}.{field}")
+    }
+}
+
+fn article_display_flags(logical_state: bool) -> (String, String) {
+    if logical_state {
+        let read = article_flag("a", true, "is_read");
+        let starred = article_flag("a", true, "is_starred");
+        (
+            format!(
+                "COALESCE((SELECT MIN(logical_state.is_read) FROM articles b \
+                 JOIN local_sync_article_state logical_state ON logical_state.id=b.id \
+                 WHERE {SAME_RSS_GROUP}), {read})"
+            ),
+            format!(
+                "COALESCE((SELECT MAX(logical_state.is_starred) FROM articles b \
+                 JOIN local_sync_article_state logical_state ON logical_state.id=b.id \
+                 WHERE {SAME_RSS_GROUP}), {starred})"
+            ),
+        )
+    } else {
+        (
+            format!(
+                "COALESCE((SELECT MIN(b.is_read) FROM articles b \
+                 WHERE {SAME_RSS_GROUP}),a.is_read)"
+            ),
+            format!(
+                "COALESCE((SELECT MAX(b.is_starred) FROM articles b \
+                 WHERE {SAME_RSS_GROUP}),a.is_starred)"
+            ),
+        )
+    }
+}
 
 /// 显示聚合谓词生成器：`NOT EXISTS (同组更低 id 的行在**同一 scope 与视图**
 /// 内)`。返回 (SQL 片段, 绑定值)；总是以 `a` 为外部行别名，内部以 `b` 为
@@ -299,6 +356,7 @@ const VISIBLE_GROUP_MEMBER: &str = "(b.is_starred = 1 OR EXISTS(SELECT 1 FROM fe
 ///   代表选择（否则未读视图里「代表已读」会把仍有未读副本的组整体藏掉）。
 #[derive(Default, Clone, Copy)]
 struct DedupScope<'a> {
+    logical_state: bool,
     feed: bool,
     folder: Option<i64>,
     layout: Option<&'a str>,
@@ -311,7 +369,28 @@ struct DedupScope<'a> {
 }
 
 fn dedup_exists_clause(scope: DedupScope) -> (String, Vec<rusqlite::types::Value>) {
-    let mut cond = format!("{SAME_RSS_GROUP} AND {VISIBLE_GROUP_MEMBER} AND b.id < a.id");
+    let from = if scope.logical_state {
+        "articles b JOIN local_sync_article_state logical_state ON logical_state.id=b.id"
+            .to_string()
+    } else {
+        format!("articles b{DEDUP_INDEX_CLAUSE}")
+    };
+    let visible = if scope.logical_state {
+        "(logical_state.is_starred=1 OR logical_state.active=1)".to_string()
+    } else {
+        DIRECT_VISIBLE_GROUP_MEMBER.to_string()
+    };
+    let read = if scope.logical_state {
+        "logical_state.is_read"
+    } else {
+        "b.is_read"
+    };
+    let starred = if scope.logical_state {
+        "logical_state.is_starred"
+    } else {
+        "b.is_starred"
+    };
+    let mut cond = format!("{SAME_RSS_GROUP} AND {visible} AND b.id < a.id");
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if scope.feed {
         cond.push_str(" AND b.feed_id = a.feed_id");
@@ -328,10 +407,10 @@ fn dedup_exists_clause(scope: DedupScope) -> (String, Vec<rusqlite::types::Value
         params.push(layout.to_string().into());
     }
     if scope.unread_only {
-        cond.push_str(" AND b.is_read = 0");
+        cond.push_str(&format!(" AND {read} = 0"));
     }
     if scope.starred_only {
-        cond.push_str(" AND b.is_starred = 1");
+        cond.push_str(&format!(" AND {starred} = 1"));
     }
     if scope.today_only {
         cond.push_str(" AND date(b.published_at, 'localtime') = date('now', 'localtime')");
@@ -345,14 +424,33 @@ fn dedup_exists_clause(scope: DedupScope) -> (String, Vec<rusqlite::types::Value
         params.push((ms / 1000).into());
     }
     (
-        format!("NOT EXISTS (SELECT 1 FROM articles b WHERE {cond})"),
+        format!("NOT EXISTS (SELECT 1 FROM {from} WHERE {cond})"),
         params,
     )
+}
+
+/// Keep the deterministic indexed plan on healthy databases, while allowing a
+/// manually damaged/degraded database to serve the same semantic query without
+/// the optimization. This mirrors the trigram search's acceleration-only
+/// contract: a missing index changes cost, never visibility or ordering.
+fn prepare_with_dedup_index_fallback<'conn>(
+    conn: &'conn Connection,
+    sql: &str,
+) -> rusqlite::Result<rusqlite::Statement<'conn>> {
+    match conn.prepare(sql) {
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("no such index: idx_articles_rss_group") =>
+        {
+            conn.prepare(&sql.replace(DEDUP_INDEX_CLAUSE, ""))
+        }
+        result => result,
+    }
 }
 
 /// 由 `ArticleQuery` 派生显示聚合 scope（与 `article_where` 的筛选逐项同构）。
 fn dedup_scope_of(q: &ArticleQuery) -> DedupScope<'_> {
     DedupScope {
+        logical_state: false,
         feed: q.feed_id.is_some(),
         folder: q.folder_id,
         layout: q.layout.as_deref(),
@@ -370,10 +468,10 @@ fn dedup_scope_of(q: &ArticleQuery) -> DedupScope<'_> {
 /// 测试可显式控制）。
 #[cfg(test)]
 fn list_articles_sql(q: &ArticleQuery, dedup: bool) -> (String, Vec<rusqlite::types::Value>) {
-    list_articles_window_sql(q, dedup, None)
+    list_articles_window_sql(q, dedup, false, None)
 }
 
-fn article_list_projection(with_content: bool) -> String {
+fn article_list_projection(with_content: bool, logical_state: bool) -> String {
     // 正文列只在 with_content 时 SELECT（社交/通知布局需要），其余布局保持轻量查询。
     // 尾部两列（content_id/content_revision）两种模式都返回——前端修订失效依据。
     let content_cols = if with_content {
@@ -381,11 +479,12 @@ fn article_list_projection(with_content: bool) -> String {
     } else {
         "NULL, NULL, NULL, 0"
     };
+    let (is_read, is_starred) = article_display_flags(logical_state);
     format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                a.ai_summary, a.source, a.published_at, COALESCE((SELECT MIN(b.is_read) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_read), COALESCE((SELECT MAX(b.is_starred) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_starred),
+                a.ai_summary, a.source, a.published_at, {is_read}, {is_starred},
                 {content_cols}, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
                 a.first_seen_at, a.published_at_source, a.image_count, a.media_revision, COALESCE((SELECT active = 0 FROM feeds WHERE id = a.feed_id), 0), (c.id IS NULL OR (COALESCE(c.content_html, '') = '' AND COALESCE(c.body_text, '') = '')), json_extract(a.images_json, '$[0]')
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id",
@@ -395,11 +494,12 @@ fn article_list_projection(with_content: bool) -> String {
 fn list_articles_window_sql(
     q: &ArticleQuery,
     dedup: bool,
+    logical_state: bool,
     window: Option<(i64, i64)>,
 ) -> (String, Vec<rusqlite::types::Value>) {
-    let mut sql = article_list_projection(q.with_content);
+    let mut sql = article_list_projection(q.with_content, logical_state);
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
-    let (mut where_clauses, mut params) = article_where_window(q, dedup, window);
+    let (mut where_clauses, mut params) = article_where_window(q, dedup, logical_state, window);
     // TASK-121：R1 修复——keyset 谓词追加处 `where_clauses.push`（本函数内，紧随
     // 其后）需可变绑定，漏 mut 即 CI rust job 的 error[E0596]
     // （lib 编译失败即止，tests/ 目标从未编译）。
@@ -466,8 +566,13 @@ pub fn list_articles_in_window(
 ) -> AppResult<Vec<ArticleListItem>> {
     // OPT-008B：显示聚合开关在查询入口解析一次（设置读取失败按关闭处理——显示
     // 层默认展示全部条目，不隐藏任何数据）。
-    let (sql, params) = list_articles_window_sql(q, smart_dedup_on(conn), window);
-    let mut stmt = conn.prepare(&sql)?;
+    let (sql, params) = list_articles_window_sql(
+        q,
+        smart_dedup_on(conn),
+        crate::local_sync::logical::query_requires_logical_state(conn)?,
+        window,
+    );
+    let mut stmt = prepare_with_dedup_index_fallback(conn, &sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params), article_list_item)?;
     let mut items = rows.collect::<Result<Vec<_>, _>>()?;
     // F07 读边界：社交/通知布局直接渲染这些字段；存量行可能从未经净化写入。
@@ -490,9 +595,10 @@ pub fn list_articles_in_window(
 fn article_where_window(
     q: &ArticleQuery,
     dedup: bool,
+    logical_state: bool,
     window: Option<(i64, i64)>,
 ) -> (Vec<String>, Vec<rusqlite::types::Value>) {
-    let mut where_clauses: Vec<String> = vec![VISIBLE_ARTICLE.into()];
+    let mut where_clauses = vec![article_visibility("a", logical_state)];
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(fid) = q.feed_id {
         where_clauses.push("a.feed_id = ?".to_string());
@@ -506,10 +612,16 @@ fn article_where_window(
         params.push(folder.into());
     }
     if q.only_unread {
-        where_clauses.push("a.is_read = 0".to_string());
+        where_clauses.push(format!(
+            "{} = 0",
+            article_flag("a", logical_state, "is_read")
+        ));
     }
     if q.only_starred {
-        where_clauses.push("a.is_starred = 1".to_string());
+        where_clauses.push(format!(
+            "{} = 1",
+            article_flag("a", logical_state, "is_starred")
+        ));
     }
     if let Some((start, end)) = window {
         where_clauses.push("datetime(a.published_at) >= datetime(?, 'unixepoch') AND datetime(a.published_at) < datetime(?, 'unixepoch')".into());
@@ -535,6 +647,7 @@ fn article_where_window(
         // OPT-008B：显示聚合（见 dedup_exists_clause 文件段注释）——谓词与
         // 上述 scope/视图条件逐项同构，追加在最后，绑定顺序紧随其后。
         let mut scope = dedup_scope_of(q);
+        scope.logical_state = logical_state;
         if let Some((start, end)) = window {
             scope.today_only = false;
             scope.since_ms = Some(start);
@@ -570,9 +683,14 @@ pub fn article_index_in_window(
     article_id: i64,
     window: Option<(i64, i64)>,
 ) -> AppResult<Option<i64>> {
-    let (sql, params) = article_index_window_sql(q, article_id, smart_dedup_on(conn), window);
-    let pos = conn
-        .prepare(&sql)?
+    let (sql, params) = article_index_window_sql(
+        q,
+        article_id,
+        smart_dedup_on(conn),
+        crate::local_sync::logical::query_requires_logical_state(conn)?,
+        window,
+    );
+    let pos = prepare_with_dedup_index_fallback(conn, &sql)?
         .query_row(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
         .optional()?;
     Ok(pos)
@@ -586,16 +704,17 @@ fn article_index_sql(
     article_id: i64,
     dedup: bool,
 ) -> (String, Vec<rusqlite::types::Value>) {
-    article_index_window_sql(q, article_id, dedup, None)
+    article_index_window_sql(q, article_id, dedup, false, None)
 }
 
 fn article_index_window_sql(
     q: &ArticleQuery,
     article_id: i64,
     dedup: bool,
+    logical_state: bool,
     window: Option<(i64, i64)>,
 ) -> (String, Vec<rusqlite::types::Value>) {
-    let (where_clauses, mut params) = article_where_window(q, dedup, window);
+    let (where_clauses, mut params) = article_where_window(q, dedup, logical_state, window);
     let order = if q.newest_first {
         PUBLISHED_ORDER_DESC
     } else {
@@ -695,7 +814,10 @@ pub struct ArticleUpdates {
 /// pagination or deduplication here: an item becoming read must remain addressable.
 pub fn get_article_updates(conn: &Connection, ids: &[i64]) -> AppResult<ArticleUpdates> {
     let mut items = Vec::new();
-    let projection = article_list_projection(false);
+    let projection = article_list_projection(
+        false,
+        crate::local_sync::logical::query_requires_logical_state(conn)?,
+    );
     for chunk in ids.chunks(500) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let mut stmt = conn.prepare(&format!("{projection} WHERE a.id IN ({placeholders})"))?;
@@ -718,7 +840,12 @@ pub fn list_article_member_ids(
     q: &ArticleQuery,
     window: Option<(i64, i64)>,
 ) -> AppResult<Vec<i64>> {
-    let (clauses, params) = article_where_window(q, true, window);
+    let (clauses, params) = article_where_window(
+        q,
+        true,
+        crate::local_sync::logical::query_requires_logical_state(conn)?,
+        window,
+    );
     let where_sql = if clauses.is_empty() {
         "1=1".to_string()
     } else {
@@ -729,9 +856,8 @@ pub fn list_article_member_ids(
     } else {
         PUBLISHED_ORDER_ASC
     };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT a.id FROM articles a WHERE {where_sql} ORDER BY {order}"
-    ))?;
+    let sql = format!("SELECT a.id FROM articles a WHERE {where_sql} ORDER BY {order}");
+    let mut stmt = prepare_with_dedup_index_fallback(conn, &sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -739,9 +865,10 @@ pub fn list_article_member_ids(
 /// Called only after a transport has durably acknowledged its captured state frontier.
 /// Active stubs are never removed; pending server intents still keep a retained identity alive.
 pub fn prune_retained_confirmed(conn: &Connection, ids: &[i64]) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let mut removed = 0;
     for id in ids {
-        removed+=conn.execute("DELETE FROM articles WHERE id=?1 AND is_starred=0 AND feed_id IN (SELECT id FROM feeds WHERE active=0) AND NOT EXISTS(SELECT 1 FROM sync_queue WHERE article_id=?1)",[id])?;
+        removed+=conn.execute("DELETE FROM articles WHERE id=?1 AND id IN(SELECT id FROM local_sync_article_state WHERE is_starred=0 AND active=0) AND NOT EXISTS(SELECT 1 FROM sync_queue WHERE article_id=?1) AND NOT EXISTS(SELECT 1 FROM local_sync_body_hold WHERE article_id=?1)",[id])?;
     }
     Ok(removed)
 }
@@ -868,13 +995,18 @@ fn run_search(
     candidate_matches: &[String],
     limit: i64,
 ) -> AppResult<Vec<ArticleListItem>> {
-    let (sql, bind_values) = build_search_sql(terms, candidate_matches, smart_dedup_on(conn));
+    let (sql, bind_values) = build_search_sql(
+        terms,
+        candidate_matches,
+        smart_dedup_on(conn),
+        crate::local_sync::logical::query_requires_logical_state(conn)?,
+    );
     // P3[8]（REQ-104）：LIMIT 此前用字符串插值 `LIMIT {limit}`。i64 本身无注入风险，
     // 但**负数在 SQLite 里表示「不限制」**，调用方一处笔误就会把整个库倒出来；
     // 且它不是绑定参数、不受参数检查保护。改为绑定参数并把上界收敛：
     // 非正数 → 回落安全默认（搜索场景没有「不限制」语义），并设上限防误用。
     let limit: i64 = if limit <= 0 { 100 } else { limit.min(1000) };
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = prepare_with_dedup_index_fallback(conn, &sql)?;
     let rows = stmt.query_map(
         rusqlite::params_from_iter(
             bind_values
@@ -893,6 +1025,7 @@ fn build_search_sql(
     terms: &[String],
     candidate_matches: &[String],
     dedup_on: bool,
+    logical_state: bool,
 ) -> (String, Vec<rusqlite::types::Value>) {
     // 每个词一组 (title/body/summary/ai_summary/translated LIKE)，词间 AND。
     // 占位符逐个编号（?N 是编号引用，跨词组复用会错位），ESCAPE 声明 SQLite 的
@@ -947,6 +1080,17 @@ fn build_search_sql(
     隐藏，搜索漏匹配。命中的代表可在列表 scope 锚定（实测由回归锁定），
     不做「关闭搜索去重」也不做「limit 后数组过滤」。 */
     let (dedup_sql, params): (String, Vec<rusqlite::types::Value>) = if dedup_on {
+        let dedup_from = if logical_state {
+            "articles b LEFT JOIN contents bc ON bc.id = b.content_id \
+             JOIN local_sync_article_state logical_state ON logical_state.id = b.id"
+        } else {
+            "articles b LEFT JOIN contents bc ON bc.id = b.content_id"
+        };
+        let visible_group = if logical_state {
+            "(logical_state.is_starred=1 OR logical_state.active=1)"
+        } else {
+            DIRECT_VISIBLE_GROUP_MEMBER
+        };
         let (inner_parts, _) = term_conditions("b", "bc", next_idx);
         // 内层参数与外部同值同序，追加一遍（词 ×5）
         let mut extra: Vec<rusqlite::types::Value> = Vec::with_capacity(terms.len() * 5);
@@ -958,8 +1102,8 @@ fn build_search_sql(
         }
         (
             format!(
-                " AND NOT EXISTS (SELECT 1 FROM articles b LEFT JOIN contents bc ON bc.id = b.content_id \
-                 WHERE {SAME_RSS_GROUP} AND {VISIBLE_GROUP_MEMBER} AND b.id < a.id AND {})",
+                " AND NOT EXISTS (SELECT 1 FROM {dedup_from} \
+                 WHERE {SAME_RSS_GROUP} AND {visible_group} AND b.id < a.id AND {})",
                 inner_parts.join(" AND ")
             ),
             extra,
@@ -978,15 +1122,17 @@ fn build_search_sql(
     } else {
         "articles a INDEXED BY idx_articles_published_id LEFT JOIN contents c ON c.id = a.content_id"
     };
+    let visible_article = article_visibility("a", logical_state);
+    let (is_read, is_starred) = article_display_flags(logical_state);
     let sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                a.ai_summary, a.source, a.published_at, COALESCE((SELECT MIN(b.is_read) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_read), COALESCE((SELECT MAX(b.is_starred) FROM articles b WHERE {SAME_RSS_GROUP}),a.is_starred),
+                a.ai_summary, a.source, a.published_at, {is_read}, {is_starred},
                 NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
                 a.first_seen_at, a.published_at_source, a.image_count, a.media_revision, COALESCE((SELECT active = 0 FROM feeds WHERE id = a.feed_id), 0), (c.id IS NULL OR (COALESCE(c.content_html, '') = '' AND COALESCE(c.body_text, '') = '')), json_extract(a.images_json, '$[0]')
          FROM {from_clause}
-         WHERE {VISIBLE_ARTICLE} AND {where}{candidate_sql}{dedup_sql}
+         WHERE {visible_article} AND {where}{candidate_sql}{dedup_sql}
          ORDER BY a.published_at DESC
          LIMIT ?{limit_idx}",
         from_clause = from_clause,
@@ -1010,6 +1156,7 @@ fn build_search_sql(
 /// 入口（开关关闭路径仍调用；`deduped_urls` 表结构不删，008A 迁移已清空历史
 /// 墓碑）。清理幂等。
 pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute("DELETE FROM deduped_urls", [])?;
     Ok(n)
 }
@@ -1026,7 +1173,7 @@ pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
 /// 独立调用入口：自开事务。需要与调用方其它写入同一短事务（账号切换/断开
 /// 的「全有全无」）时改用 [`purge_remote_data_in`]，避免嵌套 BEGIN。
 pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let r = purge_remote_data_in(&tx)?;
     tx.commit()?;
     Ok(r)
@@ -1036,20 +1183,11 @@ pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
 /// 全部清理步骤，不自行 BEGIN/COMMIT——与调用方的其它写入同生共死。
 /// SQL 语义与独立入口完全一致（同一份代码）。
 pub(crate) fn purge_remote_data_in(tx: &rusqlite::Transaction<'_>) -> AppResult<(usize, usize)> {
-    // P3[4]（REQ-104）：先记下「属于服务端的分类」，供第 5 步只删这些空目录。
-    // 此前第 5 步的 SQL 是「删所有无成员的目录」，注释却写「Pull 建的」——
-    // 于是**用户自建的空目录会被一起删掉**（用户手动建了目录、还没往里放订阅，
-    // 断开一次连接就没了）。这里改用可判定的归属信号：
-    //   ① 仍带着远端绑定的目录（folders.remote_id 非空，pull 建远端分类时写入）；
-    //   ② 其成员订阅属于服务端的目录（origin='remote'，第 1 步会把这些订阅删掉）。
-    // 两者都取不到的用户自建空目录一律保留。
+    // Creation ownership, not a remote binding or transient membership, decides
+    // whether an empty RSS category belongs to this account. A local source's
+    // membership permanently promotes its category, so local groups survive.
     let remote_folder_ids: Vec<i64> = {
-        let mut stmt = tx.prepare(
-            "SELECT id FROM folders
-             WHERE remote_id IS NOT NULL
-                OR id IN (SELECT DISTINCT folder_id FROM feeds
-                          WHERE folder_id IS NOT NULL AND origin = 'remote')",
-        )?;
+        let mut stmt = tx.prepare("SELECT id FROM folders WHERE origin='remote'")?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
@@ -1087,7 +1225,7 @@ pub(crate) fn purge_remote_data_in(tx: &rusqlite::Transaction<'_>) -> AppResult<
 /// 可再生成）。返回 (删文章数, 清 AI 字段数)。
 // Note: 清理边界与远端回灌文案 — 见 .agents/notes/implemented/bug-fix/2026-11-05-缓存清理语义与未读保护.md
 pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     // P3[5]（REQ-104）：cutoff 此前是 datetime('now','-N days','localtime')，而 published_at
     // 按 RFC3339 存（多为 UTC）。两者时区不一致 → 在 UTC+8 等时区 cutoff 被推后 8 小时，
     // **会把「只差一小会儿才到 N 天」的文章也删掉**（用户设 7 天，实际删掉 6 天 16 小时的）。
@@ -1099,23 +1237,36 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
     let cutoff = format!("datetime('now', '-{days} days')");
     let (mut deleted, mut ai_cleared) = (0usize, 0usize);
     if scope == "articles" {
-        deleted = tx.execute(
-            &format!(
-                "UPDATE articles AS a SET content_id = NULL, rss_content_id = NULL, summary = NULL,
-                    image_url = NULL, image_source = 'page', enclosure_url = NULL, enclosure_mime = NULL, duration_sec = NULL,
-                    ai_summary = NULL, translated_content = NULL, ai_summary_sig = NULL,
-                    translated_sig = NULL, ai_epoch = ai_epoch + 1
-                 WHERE datetime(published_at) < {cutoff}
-                   AND is_read = 1 AND is_starred = 0
-                   AND (content_id IS NOT NULL OR rss_content_id IS NOT NULL)
-                   AND id NOT IN (SELECT article_id FROM sync_queue WHERE article_id IS NOT NULL)
-                   AND NOT EXISTS(SELECT 1 FROM articles b WHERE {SAME_RSS_GROUP}
-                       AND (b.is_read=0 OR b.is_starred=1 OR datetime(b.published_at)>={cutoff}
-                           OR EXISTS(SELECT 1 FROM sync_queue q WHERE q.article_id=b.id)))"
-            ),
-            [],
-        )?;
-        tx.execute("DELETE FROM ai_segments WHERE article_id IN (SELECT id FROM articles WHERE content_id IS NULL)", [])?;
+        // Manual cleanup keeps its publication-age contract. Authority and the
+        // exact released payload are shared with automatic local-age cleanup.
+        if !super::body_retention::quiescent(&tx)? {
+            return Err(crate::error::AppError::new(
+                "localSyncPending",
+                "读藏状态仍在落盘，请稍后清理正文",
+            ));
+        }
+        let cutoff: i64 = tx.query_row(&format!("SELECT unixepoch({cutoff})"), [], |r| r.get(0))?;
+        let mut cursor = 0;
+        loop {
+            let rows = {
+                let mut stmt = tx.prepare("SELECT id FROM articles WHERE id>?1 AND unixepoch(published_at)<?2 AND (content_id IS NOT NULL OR rss_content_id IS NOT NULL) ORDER BY id LIMIT 64")?;
+                let rows = stmt
+                    .query_map(params![cursor, cutoff], |r| r.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for id in &rows {
+                deleted += usize::from(super::body_retention::release_qualified(
+                    &tx,
+                    *id,
+                    super::body_retention::Qualification::Published { cutoff },
+                )?);
+                cursor = *id;
+            }
+            if rows.len() < 64 {
+                break;
+            }
+        }
     } else if scope == "ai" {
         // OPT-008B 第二阶段：清理按**条目行**生效（原年龄范围不变）——共享 contents
         // 的兄弟条目不受影响（不误清年轻兄弟）；被清条目 ai_epoch+1，使网络在途的
@@ -1164,7 +1315,7 @@ pub fn clear_article_ai_product(
     article_id: i64,
     product: &str,
 ) -> AppResult<bool> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let affected = match product {
         "summary" => tx.execute(
             "UPDATE articles SET ai_summary = NULL, ai_summary_sig = NULL,
@@ -1490,6 +1641,18 @@ fn upsert_article_with_feed_tracked_impl(
     dedup: bool,
     published_at_clamped: bool,
 ) -> AppResult<ArticleUpsert> {
+    super::contents::with_write_savepoint(conn, "upsert_article_with_feed_tracked_impl", || {
+        upsert_article_with_feed_tracked_impl_in(conn, feed_id, a, dedup, published_at_clamped)
+    })
+}
+
+fn upsert_article_with_feed_tracked_impl_in(
+    conn: &Connection,
+    feed_id: i64,
+    a: &NewArticle,
+    dedup: bool,
+    published_at_clamped: bool,
+) -> AppResult<ArticleUpsert> {
     // 兼容参数：智能去重的入库闸门已移除（见函数注释与
     // upsert_article_with_feed 的 OPT-008B 说明）。
     let _ = dedup;
@@ -1562,9 +1725,10 @@ fn refresh_existing_article(
     include_url: bool,
     published_at_clamped: bool,
 ) -> AppResult<()> {
+    let missing_before = !super::body_retention::has_body(conn, id)?;
     /// 条目当前指向的内容快照（正文保护判定用）：
-    /// (content_id, extraction_source, fulltext_extracted)。正文本身不进快照——
-    /// 保护时只经 contents::repair_extracted_body_if_mismatch 就地修复。
+    /// (content_id, extraction_source, fulltext_extracted)。保护全文保持精确字节和身份，
+    /// RSS 刷新只维护独立 RSS 引用，不规范化既有正文。
     type CurrentContent = (Option<i64>, String, i64, Option<i64>);
     // OPT-008B 第二阶段：**正文保护上移到 contents**——条目当前指向 readability
     // 提取行（source='readability' 且 fulltext_extracted=1）时，RSS 刷新不得覆盖/
@@ -1582,16 +1746,9 @@ fn refresh_existing_article(
     let (cur_id, cur_source, cur_extracted, cur_rss_id) =
         cur.unwrap_or((None, String::new(), 0, None));
     let protected = cur_source == super::contents::SOURCE_READABILITY && cur_extracted != 0;
-    if protected {
-        // OPT-003 R1（历史错配修复，二期迁移到此保持同一用户保证）：flag1 行的
-        // body_text 与保留 HTML 不同源（旧版只写 HTML+flag 留下的错配）时按 HTML
-        // 重算修复；修复随 revision+1 暴露（前端修订失效）并经内容触发器更新 FTS。
-        // R3：修复单点收敛到 contents::repair_extracted_body_if_mismatch（与
-        // sync_map 回填路径共用同一语义）。
-        if let Some(cid) = cur_id {
-            super::contents::repair_extracted_body_if_mismatch(conn, cid)?;
-        }
-    }
+    // Note: 当前格式不再惰性改写既有正文 identity/bytes；L 与已发布 BodyRef
+    // 即使没有本机 hold 仍引用原身份 — 见 .agents/notes/implemented/architecture/
+    // 2026-10-12-订阅条目与共享内容身份.md「2026-11-11正文身份不可变后继」。
     if super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text) {
         let input = super::contents::ContentInput {
             content_html: a.content_html.clone(),
@@ -1619,7 +1776,8 @@ fn refresh_existing_article(
             for old_id in [cur_id, cur_rss_id].into_iter().flatten() {
                 conn.execute(
                     "DELETE FROM contents WHERE id = ?1
-                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)",
+                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)
+                     AND NOT EXISTS (SELECT 1 FROM local_sync_body_hold WHERE json_extract(body_ref,'$.primary')=contents.identity OR json_extract(body_ref,'$.rss')=contents.identity)",
                     params![old_id],
                 )?;
             }
@@ -1734,6 +1892,9 @@ fn refresh_existing_article(
             ],
         )?;
     }
+    if missing_before && super::body_retention::has_body(conn, id)? {
+        super::body_retention::restart(conn, id, chrono::Utc::now().timestamp())?;
+    }
     Ok(())
 }
 
@@ -1773,6 +1934,17 @@ pub fn refresh_bound_remote_article(conn: &Connection, id: i64, a: &NewArticle) 
 /// 走精确命中路径，不到这里）；否则会撞 UNIQUE 并透传错误（宁可失败可见，
 /// 不做静默改写）。
 pub fn upsert_remote_article(
+    conn: &Connection,
+    feed_id: i64,
+    a: &NewArticle,
+    eid: Option<i64>,
+) -> AppResult<ArticleUpsert> {
+    super::contents::with_write_savepoint(conn, "upsert_remote_article", || {
+        upsert_remote_article_in(conn, feed_id, a, eid)
+    })
+}
+
+fn upsert_remote_article_in(
     conn: &Connection,
     feed_id: i64,
     a: &NewArticle,
@@ -1977,11 +2149,22 @@ fn bump_article_version(conn: &Connection, id: i64, column: &str) -> AppResult<(
 }
 
 pub fn set_read(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        set_read(&tx, id, read)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let explicit = crate::local_sync::logical::capture_article_flag(conn, id, "read", read)?;
     bump_article_version(conn, id, "read_version")?;
     conn.execute(
         "UPDATE articles SET is_read = ?1 WHERE id = ?2",
         params![read as i64, id],
     )?;
+    // Explicit user read includes a physical no-op. Provider pulls use their
+    // guarded writes and the transition trigger, never this renewal hook.
+    super::body_retention::restart(conn, id, chrono::Utc::now().timestamp())?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
@@ -1993,6 +2176,7 @@ pub fn set_article_ai_fields(
     ai_summary: Option<&str>,
     translated_content: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE articles SET
             ai_summary = COALESCE(?1, ai_summary),
@@ -2066,6 +2250,7 @@ pub fn set_article_ai_fields_checked(
     expected: &AiCommitToken,
     product: AiProduct<'_>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     // WHERE 即「签名前提」的复核：ai_epoch（清除代次）、content_id/revision
     // （正文身份与修订——正文哈希由修订唯一决定）、title（签名输入之一）。
     let n = match product {
@@ -2162,13 +2347,6 @@ pub fn replace_article_content_checked(
     expected: &ContentCommitToken,
     new_html: &str,
 ) -> AppResult<Option<(i64, i64)>> {
-    let now = article_content_commit_token(conn, article_id)?;
-    let Some((current, _html)) = now else {
-        return Ok(None); // 条目已删除：迟到提取丢弃
-    };
-    if current != *expected {
-        return Ok(None); // 内容已被替换/重指：迟到提取丢弃（不得写分叉）
-    }
     let body_text = crate::sanitize::html_to_text(new_html);
     let input = super::contents::ContentInput {
         content_html: Some(crate::sanitize::sanitize(new_html, None)),
@@ -2177,7 +2355,14 @@ pub fn replace_article_content_checked(
         fulltext_extracted: true,
         url_norm: None,
     };
-    let committed = super::contents::with_write_savepoint(conn, "contents_extract_commit", || {
+    super::contents::with_write_savepoint(conn, "contents_extract_commit", || {
+        let Some((current, _html)) = article_content_commit_token(conn, article_id)? else {
+            return Ok(None);
+        };
+        if current != *expected {
+            return Ok(None);
+        }
+        let missing = !super::body_retention::has_body(conn, article_id)?;
         let (new_content_id, rev, _created) =
             super::contents::ensure_content(conn, &input, Some(article_id))?;
         if Some(new_content_id) != current.content_id {
@@ -2189,22 +2374,35 @@ pub fn replace_article_content_checked(
             if let Some(old_id) = current.content_id {
                 conn.execute(
                     "DELETE FROM contents WHERE id = ?1
-                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)",
+                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1 OR a.rss_content_id = ?1)
+                     AND NOT EXISTS (SELECT 1 FROM local_sync_body_hold WHERE json_extract(body_ref,'$.primary')=contents.identity OR json_extract(body_ref,'$.rss')=contents.identity)",
                     params![old_id],
                 )?;
             }
         }
-        Ok((new_content_id, rev))
-    })?;
-    Ok(Some(committed))
+        if missing
+            && super::contents::content_non_empty(input.content_html.as_deref(), &input.body_text)
+        {
+            super::body_retention::restart(conn, article_id, chrono::Utc::now().timestamp())?;
+        }
+        Ok(Some((new_content_id, rev)))
+    })
 }
 
 pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        set_starred(&tx, id, starred)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let explicit = crate::local_sync::logical::capture_article_flag(conn, id, "star", starred)?;
     bump_article_version(conn, id, "star_version")?;
     conn.execute(
         "UPDATE articles SET is_starred = ?1 WHERE id = ?2",
         params![starred as i64, id],
     )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
@@ -2267,23 +2465,59 @@ fn set_read_enqueue_in_tx(
 pub(crate) const READ_CLOSURE_SQL: &str = "SELECT b.id FROM articles a JOIN articles b ON b.feed_id=a.feed_id AND b.rss_content_id=a.rss_content_id AND b.title=a.title AND COALESCE(b.enclosure_url,'')=COALESCE(a.enclosure_url,'') AND COALESCE(b.enclosure_mime,'')=COALESCE(a.enclosure_mime,'') WHERE a.id=?1 AND b.id!=a.id AND b.is_read=0 ORDER BY b.id";
 
 fn read_targets_with_state(conn: &Connection, id: i64) -> AppResult<Vec<(i64, i64, bool)>> {
+    if let Some(targets) = crate::local_sync::logical::read_targets(conn, id)? {
+        return Ok(targets);
+    }
     let mut stmt = conn.prepare(&format!("SELECT b.id,b.feed_id,b.is_read=0 FROM articles a JOIN articles b ON b.id=a.id OR ({SAME_RSS_GROUP}) WHERE a.id=?1 ORDER BY b.id"))?;
     let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// 收藏版事务内核，同 [`set_read_enqueue_in_tx`]（action 名 `star`/`unstar`）。
-fn set_starred_enqueue_in_tx(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
-    for (target, _, _) in read_targets_with_state(conn, id)? {
-        set_starred(conn, target, starred)?;
+fn set_starred_enqueue_in_tx(conn: &Connection, id: i64, starred: bool) -> AppResult<Vec<i64>> {
+    let targets = read_targets_with_state(conn, id)?;
+    for (target, _, _) in &targets {
+        set_starred(conn, *target, starred)?;
         enqueue_sync(
             conn,
-            Some(target),
+            Some(*target),
             None,
             if starred { "star" } else { "unstar" },
             None,
         )?;
     }
+    Ok(targets.into_iter().map(|(target, _, _)| target).collect())
+}
+
+/// Cache release belongs to the exact article closure touched by this user
+/// action. Sweeping the whole `local_sync_article_state` view here makes every
+/// unstar scale with the library while the foreground writer is held.
+fn release_inactive_unstarred_caches(conn: &Connection, candidates: &[i64]) -> AppResult<()> {
+    let mut release = Vec::new();
+    for id in candidates {
+        if !crate::local_sync::logical::article_retention_state(conn, *id)?
+            .is_some_and(|(_, starred, active)| !starred && !active)
+        {
+            continue;
+        }
+        let held: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_sync_body_hold WHERE article_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !held {
+            release.push(*id);
+        }
+    }
+    if release.is_empty() {
+        return Ok(());
+    }
+    let ids = serde_json::to_string(&release)?;
+    conn.execute("UPDATE articles SET content_id=NULL,rss_content_id=NULL,summary=NULL,image_url=NULL,image_source='page',enclosure_url=NULL,enclosure_mime=NULL,duration_sec=NULL,ai_summary=NULL,translated_content=NULL,ai_summary_sig=NULL,translated_sig=NULL,ai_epoch=ai_epoch+1 WHERE id IN(SELECT value FROM json_each(?1))",[&ids])?;
+    conn.execute(
+        "DELETE FROM ai_segments WHERE article_id IN(SELECT value FROM json_each(?1))",
+        [&ids],
+    )?;
     Ok(())
 }
 
@@ -2300,7 +2534,7 @@ pub fn set_read_with_enqueue(
     id: i64,
     read: bool,
 ) -> AppResult<Vec<ReadWriteReceipt>> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let receipts = set_read_enqueue_in_tx(&tx, id, read)?;
     tx.commit()?;
     Ok(receipts)
@@ -2308,11 +2542,17 @@ pub fn set_read_with_enqueue(
 
 /// 单条收藏状态 + 同步入队，同 [`set_read_with_enqueue`]（TASK-108）。
 pub fn set_starred_with_enqueue(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
-    let tx = conn.unchecked_transaction()?;
-    set_starred_enqueue_in_tx(&tx, id, starred)?;
+    let tx = crate::db::write_transaction(conn)?;
+    let affected = set_starred_enqueue_in_tx(&tx, id, starred)?;
     if !starred {
-        tx.execute("UPDATE articles SET content_id=NULL,rss_content_id=NULL,summary=NULL,image_url=NULL,image_source='page',enclosure_url=NULL,enclosure_mime=NULL,duration_sec=NULL,ai_summary=NULL,translated_content=NULL,ai_summary_sig=NULL,translated_sig=NULL,ai_epoch=ai_epoch+1 WHERE is_starred=0 AND feed_id IN (SELECT id FROM feeds WHERE active=0)",[])?;
-        tx.execute("DELETE FROM ai_segments WHERE article_id IN (SELECT id FROM articles WHERE content_id IS NULL AND feed_id IN (SELECT id FROM feeds WHERE active=0))",[])?;
+        // Cache release is not a metadata edit. In particular it must not stamp
+        // null enclosure/image values over a retained logical article object.
+        let suppress = crate::local_sync::logical::enabled(&tx)?;
+        if suppress {
+            tx.execute("UPDATE local_sync_control SET applying=1 WHERE id=1", [])?;
+        }
+        release_inactive_unstarred_caches(&tx, &affected)?;
+        crate::local_sync::logical::finish_explicit(&tx, suppress)?;
     }
     tx.commit()?;
     Ok(())
@@ -2332,7 +2572,7 @@ pub fn set_read_bulk_with_enqueue(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let mut targets = std::collections::BTreeMap::new();
     for id in ids {
         for (target, feed_id, was_unread) in read_targets_with_state(&tx, *id)? {
@@ -2401,6 +2641,7 @@ pub fn clear_article_cover_if_matches(
     article_id: i64,
     url: &str,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     Ok(conn.execute(
         "UPDATE articles
          SET image_url = NULL, image_source = 'page'
@@ -2445,11 +2686,12 @@ pub(crate) fn scope_clause(
     starred_only: bool,
     since_ms: Option<i64>,
     layout: Option<&str>,
+    logical_state: bool,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut sql = " AND (is_starred=1 OR EXISTS(SELECT 1 FROM feeds visible_feed WHERE visible_feed.id=feed_id AND visible_feed.active=1))".to_string();
+    let mut sql = format!(" AND ({})", article_visibility("a", logical_state));
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(fid) = feed_id {
-        sql.push_str(" AND feed_id = ?");
+        sql.push_str(" AND a.feed_id = ?");
         binds.push(Box::new(fid));
     }
     if let Some(folder) = folder_id {
@@ -2466,7 +2708,9 @@ pub(crate) fn scope_clause(
     // F8：视图口径过滤——收藏视图只影响收藏文章；今天视图只影响当日文章
     // （since_ms 由前端按本地日界计算传入，datetime() 统一归一化后再比较）
     if starred_only {
-        sql.push_str(" AND is_starred = 1");
+        sql.push_str(" AND ");
+        sql.push_str(&article_flag("a", logical_state, "is_starred"));
+        sql.push_str(" = 1");
     }
     if let Some(ms) = since_ms {
         sql.push_str(" AND datetime(published_at) >= datetime(?, 'unixepoch')");
@@ -2484,8 +2728,8 @@ fn read_target_clause(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let (scope, binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
-    (format!("id IN (SELECT b.id FROM (SELECT * FROM articles WHERE is_read = 0{scope}) a JOIN articles b ON b.id=a.id OR ({SAME_RSS_GROUP}))"), binds)
+    let (scope, binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout, false);
+    (format!("id IN (SELECT b.id FROM (SELECT * FROM articles a WHERE a.is_read = 0{scope}) a JOIN articles b ON b.id=a.id OR ({SAME_RSS_GROUP}))"), binds)
 }
 
 /// 读目标集合的 id 列表（与 [`mark_all_read_with_enqueue`] 的 WHERE 同源；
@@ -2498,6 +2742,23 @@ pub fn list_read_target_ids_scoped(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> AppResult<Vec<i64>> {
+    if crate::local_sync::logical::query_requires_logical_state(conn)? {
+        let seeds = super::sync_map::list_unread_ids_scoped(
+            conn,
+            feed_id,
+            folder_id,
+            starred_only,
+            since_ms,
+            layout,
+        )?;
+        let mut targets = std::collections::BTreeSet::new();
+        for seed in seeds {
+            if let Some(rows) = crate::local_sync::logical::read_targets(conn, seed)? {
+                targets.extend(rows.into_iter().map(|row| row.0));
+            }
+        }
+        return Ok(targets.into_iter().collect());
+    }
     let (clause, binds) = read_target_clause(feed_id, folder_id, starred_only, since_ms, layout);
     let sql = format!("SELECT a.id FROM articles a WHERE {clause} ORDER BY a.id");
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
@@ -2519,6 +2780,32 @@ pub fn mark_all_read(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> AppResult<usize> {
+    let _writer = super::writer_guard(conn)?;
+    if crate::local_sync::logical::enabled(conn)? {
+        if conn.is_autocommit() {
+            let tx = crate::db::write_transaction(conn)?;
+            let changed = logical_mark_all(
+                &tx,
+                feed_id,
+                folder_id,
+                starred_only,
+                since_ms,
+                layout,
+                false,
+            )?;
+            tx.commit()?;
+            return Ok(changed);
+        }
+        return logical_mark_all(
+            conn,
+            feed_id,
+            folder_id,
+            starred_only,
+            since_ms,
+            layout,
+            false,
+        );
+    }
     let (clause, binds) = read_target_clause(feed_id, folder_id, starred_only, since_ms, layout);
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let changed: usize = conn.query_row(
@@ -2528,7 +2815,7 @@ pub fn mark_all_read(
     )?;
     ensure_read_version_can_grow(conn, &format!(" AND {clause}"), refs.as_slice())?;
     let sql = format!(
-        "UPDATE articles AS a SET is_read = 1, read_version = read_version + 1 \
+        "UPDATE articles AS a SET is_read = 1, read_version = read_version + 1, body_retention_since=CASE WHEN is_starred=0 THEN CAST(strftime('%s','now') AS INTEGER) END \
          WHERE {clause}"
     );
     conn.execute(&sql, refs.as_slice())?;
@@ -2583,9 +2870,23 @@ pub fn mark_all_read_with_enqueue(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> AppResult<usize> {
+    if crate::local_sync::logical::enabled(conn)? {
+        let tx = crate::db::write_transaction(conn)?;
+        let changed = logical_mark_all(
+            &tx,
+            feed_id,
+            folder_id,
+            starred_only,
+            since_ms,
+            layout,
+            true,
+        )?;
+        tx.commit()?;
+        return Ok(changed);
+    }
     let (clause, binds) = read_target_clause(feed_id, folder_id, starred_only, since_ms, layout);
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let changed: usize = tx.query_row(
         &format!("SELECT COUNT(*) FROM articles a WHERE a.is_read=0 AND {clause}"),
         refs.as_slice(),
@@ -2635,12 +2936,130 @@ pub fn mark_all_read_with_enqueue(
     // 标读入口，字段版本必须与状态写入原子一致（checked 增长，饱和拒绝）。
     ensure_read_version_can_grow(&tx, &format!(" AND {clause}"), refs.as_slice())?;
     let upd = format!(
-        "UPDATE articles AS a SET is_read = 1, read_version = read_version + 1 \
+        "UPDATE articles AS a SET is_read = 1, read_version = read_version + 1, body_retention_since=CASE WHEN is_starred=0 THEN CAST(strftime('%s','now') AS INTEGER) END \
          WHERE {clause}"
     );
     tx.execute(&upd, refs.as_slice())?;
     tx.commit()?;
     Ok(changed)
+}
+
+/// One frozen target table is shared by count, intent allocation, version writes
+/// and queueing. Equivalence expansion reads L before any explicit flag writes.
+fn insert_time_scoped_mark_seeds(
+    conn: &Connection,
+    feed_id: Option<i64>,
+    starred_only: bool,
+    since_ms: i64,
+) -> AppResult<()> {
+    let candidates = if let Some(feed_id) = feed_id {
+        let mut stmt = conn.prepare(
+            "SELECT a.id FROM articles a INDEXED BY idx_articles_feed_published
+             WHERE a.feed_id=?1
+               AND datetime(a.published_at)>=datetime(?2/1000,'unixepoch')
+             ORDER BY a.id",
+        )?;
+        let rows = stmt
+            .query_map([feed_id, since_ms], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT a.id FROM articles a INDEXED BY idx_articles_published
+             WHERE datetime(a.published_at)>=datetime(?1/1000,'unixepoch')
+             ORDER BY a.id",
+        )?;
+        let rows = stmt
+            .query_map([since_ms], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for id in candidates {
+        let Some((read, starred, active)) =
+            crate::local_sync::logical::article_retention_state(conn, id)?
+        else {
+            continue;
+        };
+        if read || (!active && !starred) || (starred_only && !starred) {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO local_sync_mark_seeds(id) VALUES(?1)",
+            [id],
+        )?;
+    }
+    Ok(())
+}
+
+fn logical_mark_all(
+    conn: &Connection,
+    feed_id: Option<i64>,
+    folder_id: Option<i64>,
+    starred_only: bool,
+    since_ms: Option<i64>,
+    layout: Option<&str>,
+    enqueue: bool,
+) -> AppResult<usize> {
+    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS local_sync_mark_seeds(id INTEGER PRIMARY KEY); DELETE FROM local_sync_mark_seeds; CREATE TEMP TABLE IF NOT EXISTS local_sync_mark_targets(id INTEGER PRIMARY KEY,was_unread INTEGER NOT NULL); DELETE FROM local_sync_mark_targets;")?;
+    if let (None, Some(since_ms), None) = (folder_id, since_ms, layout) {
+        insert_time_scoped_mark_seeds(conn, feed_id, starred_only, since_ms)?;
+    } else {
+        conn.execute("INSERT INTO local_sync_mark_seeds(id)
+      SELECT a.id FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN local_sync_article_state l ON l.id=a.id
+      LEFT JOIN local_sync_source_values folder ON folder.url=l.url AND folder.field='folder' AND folder.winner=1
+      LEFT JOIN local_sync_source_values layout ON layout.url=l.url AND layout.field='layout' AND layout.winner=1
+      LEFT JOIN folders g ON g.id=CASE WHEN folder.register IS NULL THEN f.folder_id ELSE (SELECT id FROM folders WHERE sync_id=json_extract(folder.register,'$.value.value')) END
+      LEFT JOIN local_sync_winners gl ON gl.key='g/'||g.sync_id||'/layout'
+      WHERE l.is_read=0 AND (l.active=1 OR l.is_starred=1) AND (?1 IS NULL OR a.feed_id=?1)
+      AND (?2 IS NULL OR g.id=?2) AND (?3=0 OR l.is_starred=1)
+      AND (?4 IS NULL OR datetime(a.published_at)>=datetime(?4/1000,'unixepoch'))
+      AND (?5 IS NULL OR CASE WHEN COALESCE(json_extract(layout.register,'$.value.value'),f.layout)!='inherit' THEN COALESCE(json_extract(layout.register,'$.value.value'),f.layout) ELSE COALESCE(json_extract(gl.register,'$.value.value'),g.layout,'article') END=?5)",params![feed_id,folder_id,starred_only,since_ms,layout])?;
+    }
+    let mut last = 0;
+    loop {
+        let next: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM local_sync_mark_seeds WHERE id>?1 ORDER BY id LIMIT 1",
+                [last],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(id) = next else { break };
+        last = id;
+        for (target, _, unread) in read_targets_with_state(conn, id)? {
+            conn.execute(
+                "INSERT OR IGNORE INTO local_sync_mark_targets(id,was_unread) VALUES(?1,?2)",
+                params![target, unread],
+            )?;
+        }
+    }
+    let count: usize = conn.query_row(
+        "SELECT COUNT(*) FROM local_sync_mark_targets WHERE was_unread=1",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure_read_version_can_grow(
+        conn,
+        " AND a.id IN(SELECT id FROM local_sync_mark_targets)",
+        &[],
+    )?;
+    last = 0;
+    loop {
+        let next: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM local_sync_mark_targets WHERE id>?1 ORDER BY id LIMIT 1",
+                [last],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(id) = next else { break };
+        last = id;
+        set_read(conn, id, true)?;
+        if enqueue {
+            enqueue_sync(conn, Some(id), None, "read", None)?;
+        }
+    }
+    Ok(count)
 }
 
 /// 条目计数（侧边栏角标）：按 feed 聚合，含未读/收藏/今日细分。
@@ -2665,8 +3084,11 @@ pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
 /// [`feed_counts`] 的显式开关内核（R2/N2：`counts_snapshot` 在同一开关值下
 /// 同时计算源计数与 scope 计数——两个数字来自同一次读取、同一口径）。
 fn feed_counts_with_dedup(conn: &Connection, dedup: bool) -> AppResult<Vec<FeedCounts>> {
-    let sql = feed_counts_sql(dedup);
-    let mut stmt = conn.prepare(&sql)?;
+    let sql = feed_counts_sql(
+        dedup,
+        crate::local_sync::logical::query_requires_logical_state(conn)?,
+    );
+    let mut stmt = prepare_with_dedup_index_fallback(conn, &sql)?;
     let rows = stmt.query_map([], |r| {
         Ok(FeedCounts {
             feed_id: r.get(0)?,
@@ -2679,7 +3101,7 @@ fn feed_counts_with_dedup(conn: &Connection, dedup: bool) -> AppResult<Vec<FeedC
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn feed_counts_sql(dedup: bool) -> String {
+fn feed_counts_sql(dedup: bool, logical_state: bool) -> String {
     // TASK-064 N5：today 判定与 only_today 同口径（本地时区两侧对齐），理由见
     // list_articles 的 where 构建处。
     let base_sql = "SELECT a.feed_id, {total}, {unread}, {starred}, {today}
@@ -2688,29 +3110,57 @@ fn feed_counts_sql(dedup: bool) -> String {
         // 源 scope 显示聚合：b.feed_id = a.feed_id（代表在源内选）。
         let ex = |scope: DedupScope| dedup_exists_clause(scope).0;
         let total = ex(DedupScope {
+            logical_state,
             feed: true,
             ..Default::default()
         });
         let unread = ex(DedupScope {
+            logical_state,
             feed: true,
             unread_only: true,
             ..Default::default()
         });
         let starred = ex(DedupScope {
+            logical_state,
             feed: true,
             starred_only: true,
             ..Default::default()
         });
         let today = ex(DedupScope {
+            logical_state,
             feed: true,
             today_only: true,
             ..Default::default()
         });
+        if logical_state {
+            let is_read = article_flag("a", true, "is_read");
+            let is_starred = article_flag("a", true, "is_starred");
+            let visible = article_visibility("a", true);
+            format!(
+                "SELECT a.feed_id, SUM({total}), SUM({is_read} = 0 AND {unread}),
+                        SUM({is_starred} = 1 AND {starred}),
+                        SUM(date(a.published_at, 'localtime') = date('now', 'localtime') AND {today})
+                 FROM articles a JOIN feeds f ON f.id=a.feed_id
+                 WHERE {visible} GROUP BY a.feed_id"
+            )
+        } else {
+            format!(
+                "SELECT a.feed_id, SUM({total}), SUM(a.is_read = 0 AND {unread}),
+                        SUM(a.is_starred = 1 AND {starred}),
+                        SUM(date(a.published_at, 'localtime') = date('now', 'localtime') AND {today})
+                 FROM articles a JOIN feeds f ON f.id=a.feed_id WHERE f.active=1 OR a.is_starred=1 GROUP BY a.feed_id"
+            )
+        }
+    } else if logical_state {
+        let is_read = article_flag("a", true, "is_read");
+        let is_starred = article_flag("a", true, "is_starred");
+        let visible = article_visibility("a", true);
         format!(
-            "SELECT a.feed_id, SUM({total}), SUM(a.is_read = 0 AND {unread}),
-                    SUM(a.is_starred = 1 AND {starred}),
-                    SUM(date(a.published_at, 'localtime') = date('now', 'localtime') AND {today})
-             FROM articles a JOIN feeds f ON f.id=a.feed_id WHERE f.active=1 OR a.is_starred=1 GROUP BY a.feed_id"
+            "SELECT a.feed_id, COUNT(*), SUM({is_read} = 0),
+                    SUM({is_starred} = 1),
+                    SUM(date(a.published_at, 'localtime') = date('now', 'localtime'))
+             FROM articles a JOIN feeds f ON f.id=a.feed_id
+             WHERE {visible} GROUP BY a.feed_id"
         )
     } else {
         base_sql
@@ -3209,7 +3659,7 @@ mod tests {
     #[test]
     fn purge_remote_data_removes_emptied_remote_folder() {
         let mut conn = conn();
-        let remote_folder = create_folder(&conn, "远端分类", "article").unwrap();
+        let remote_folder = create_remote_folder(&conn, "远端分类", "article").unwrap();
         insert_feed_origin(
             &conn,
             "https://r.example/feed",
@@ -3553,6 +4003,14 @@ mod tests {
     /// 大规模夹具：3 分类 × 10 源 × 300 条 = 3000 篇，published_at 递增无并列；
     /// 未读/收藏混合。直接 SQL 批量插入（upsert 逐条太慢）。
     fn seed_plan_fixture() -> Connection {
+        seed_plan_fixture_rows(300)
+    }
+
+    pub(super) fn seed_large_plan_fixture() -> Connection {
+        seed_plan_fixture_rows(2_000)
+    }
+
+    fn seed_plan_fixture_rows(rows_per_feed: i64) -> Connection {
         let conn = conn();
         let tx = conn.unchecked_transaction().unwrap();
         for f in 1..=3i64 {
@@ -3574,7 +4032,7 @@ mod tests {
             .unwrap();
         }
         for fid in 1..=10i64 {
-            for i in 0..300i64 {
+            for i in 0..rows_per_feed {
                 tx.execute(
                     "INSERT INTO articles (feed_id, guid, title, published_at, is_read, is_starred)
                      VALUES (?1, ?2, 't', datetime(?3, 'unixepoch'), ?4, ?5)",
@@ -3638,7 +4096,7 @@ mod tests {
             ("布局", q(None, None, false, Some("image"))),
         ];
         for (name, query) in &cases {
-            let (sql, p) = list_articles_sql(query, false);
+            let (sql, p) = list_articles_sql(query, true);
             let plan = explain(&conn, &sql, &p).unwrap();
             assert!(
                 !plan.contains("USE TEMP B-TREE"),
@@ -3648,12 +4106,71 @@ mod tests {
                 plan.contains("USING INDEX"),
                 "{name} 未走索引（SCAN 不带索引）：\n{plan}"
             );
+            assert!(
+                !plan.contains("local_sync_article_state")
+                    && !plan.contains("local_sync_source")
+                    && !plan.contains("MATERIALIZE local_sync"),
+                "{name} 在完全投影后仍按文章行重复展开本地同步视图：\n{plan}"
+            );
         }
-        let (sql, p) = article_index_sql(&q(None, None, false, None), 1, false);
+        let (sql, p) = article_index_sql(&q(None, None, false, None), 1, true);
         let plan = explain(&conn, &sql, &p).unwrap();
         assert!(
             !plan.contains("USE TEMP B-TREE"),
             "article_index 窗口仍有 TEMP B-TREE：\n{plan}"
+        );
+
+        let large = seed_large_plan_fixture();
+        let (sql, p) = list_articles_sql(&q(None, None, false, None), true);
+        let plan = explain(&large, &sql, &p).unwrap();
+        assert!(
+            !plan.contains("USE TEMP B-TREE")
+                && !plan.contains("local_sync_article_state")
+                && !plan.contains("MATERIALIZE local_sync"),
+            "20k 规模保持了相同的直接投影计划：\n{plan}"
+        );
+    }
+
+    #[test]
+    fn query_falls_back_to_logical_views_while_projection_work_is_pending() {
+        fn plan_uses_logical_state(plan: &str) -> bool {
+            plan.contains("local_sync_article_state")
+                || plan.contains("MATERIALIZE local_sync_source_state")
+                || plan.contains("local_sync_candidates")
+        }
+
+        let conn = conn();
+        assert!(!crate::local_sync::logical::query_requires_logical_state(&conn).unwrap());
+        conn.execute(
+            "INSERT INTO local_sync_work(job,key,revision) VALUES('','a/pending','1')",
+            [],
+        )
+        .unwrap();
+        assert!(crate::local_sync::logical::query_requires_logical_state(&conn).unwrap());
+
+        let query = q(None, None, false, None);
+        let (list_sql, list_params) = list_articles_window_sql(&query, true, true, None);
+        let count_sql = feed_counts_sql(true, true);
+        let (search_sql, mut search_params) =
+            build_search_sql(&["pending".to_string()], &[], true, true);
+        search_params.push(100_i64.into());
+        assert!(list_sql.contains("local_sync_article_state"));
+        assert!(count_sql.contains("local_sync_article_state"));
+        assert!(search_sql.contains("local_sync_article_state"));
+        let list_plan = explain(&conn, &list_sql, &list_params).unwrap();
+        assert!(
+            plan_uses_logical_state(&list_plan),
+            "list pending fallback did not use the logical article view:\n{list_plan}"
+        );
+        let count_plan = explain(&conn, &count_sql, &[]).unwrap();
+        assert!(
+            plan_uses_logical_state(&count_plan),
+            "count pending fallback did not use the logical article view:\n{count_plan}"
+        );
+        let search_plan = explain(&conn, &search_sql, &search_params).unwrap();
+        assert!(
+            plan_uses_logical_state(&search_plan),
+            "search pending fallback did not use the logical article view:\n{search_plan}"
         );
     }
 
@@ -3665,16 +4182,23 @@ mod tests {
     /// 给出，不另抄绑定）。
     #[test]
     fn scope_counts_feed_dedup_plan_avoids_temp_btree_and_per_row_search() {
-        let conn = seed_plan_fixture();
-        // 补 url_norm 群组（seed_plan_fixture 的行 url_norm 为 NULL），让
-        // EXISTS 的等值探测有真实群组形态（NULL 行永不命中组，两者都要覆盖）。
+        let conn = seed_large_plan_fixture();
+        // 补真实 RSS 等价组（seed_plan_fixture 的行 rss_content_id 为 NULL），
+        // 让 EXISTS 的等值探测覆盖生产去重键；NULL 行仍保留作负例。
         conn.execute(
-            "UPDATE articles SET url_norm = 'https://n.example/' || (id % 400) WHERE id % 2 = 0",
+            "WITH RECURSIVE seq(n) AS(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400)
+             INSERT INTO contents(id,identity,body_text)
+             SELECT n,'rss-plan-'||n,'' FROM seq",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE articles SET rss_content_id = (id % 400) + 1 WHERE id % 2 = 0",
             [],
         )
         .unwrap();
         for layout in [None, Some("article")] {
-            let sql = feed_counts_sql(true);
+            let sql = feed_counts_sql(true, false);
             let p = Vec::new();
             // 模板形态：feed 级必须没有 fb join 与布局复核（SELECT 列表布局
             // 占位随之消失，绑定只剩外层一处——由下面 explain 的绑定数同源验证）。
@@ -3698,6 +4222,12 @@ mod tests {
             assert!(
                 plan.contains("idx_articles_rss_group"),
                 "layout={layout:?} EXISTS 未走 rss_group 索引：\n{plan}"
+            );
+            assert!(
+                !plan.contains("local_sync_article_state")
+                    && !plan.contains("local_sync_source")
+                    && !plan.contains("MATERIALIZE local_sync"),
+                "layout={layout:?} 计数在完全投影后仍重复展开本地同步视图：\n{plan}"
             );
         }
     }
@@ -5069,16 +5599,17 @@ mod opt017b_search_tests {
 
         // 生成 SQL：长词带候选子句 + INDEXED BY；短词纯 LIKE 无候选
         let long_cand = vec![trigram_candidate_match("深度学习").unwrap()];
-        let (sql_long, long_bind) = build_search_sql(&[like_escape("深度学习")], &long_cand, false);
+        let (sql_long, long_bind) =
+            build_search_sql(&[like_escape("深度学习")], &long_cand, true, false);
         assert!(sql_long.contains("a.id IN (SELECT rowid FROM articles_trigram_idx"));
         assert!(sql_long.contains("INDEXED BY idx_articles_published_id"));
-        let (sql_short, short_bind) = build_search_sql(&[like_escape("科技")], &[], false);
+        let (sql_short, short_bind) = build_search_sql(&[like_escape("科技")], &[], true, false);
         assert!(!sql_short.contains("articles_trigram_idx"));
         assert!(!sql_short.contains("INDEXED BY"));
 
         // 混合词（2 字 + 4 字）：只对长词加一条候选子句
         let mixed = vec![like_escape("科技"), like_escape("深度学习")];
-        let (sql_mixed, _) = build_search_sql(&mixed, &long_cand, false);
+        let (sql_mixed, _) = build_search_sql(&mixed, &long_cand, true, false);
         assert_eq!(
             sql_mixed
                 .matches("IN (SELECT rowid FROM articles_trigram_idx")
@@ -5101,12 +5632,36 @@ mod opt017b_search_tests {
             !plan.iter().any(|s| s.contains("TEMP B-TREE FOR ORDER BY")),
             "候选过滤不得引入整体排序：{plan:?}"
         );
+        assert!(
+            !plan.iter().any(|s| {
+                s.contains("local_sync_article_state")
+                    || s.contains("local_sync_source")
+                    || s.contains("MATERIALIZE local_sync")
+            }),
+            "完全投影后的搜索不得逐行展开本地同步视图：{plan:?}"
+        );
         let plan_short = explain_plan(&conn, &sql_short, short_bind.len() + 1);
         assert!(
             !plan_short
                 .iter()
                 .any(|s| s.contains("articles_trigram_idx")),
             "短词查询不得引用候选索引：{plan_short:?}"
+        );
+
+        let large = super::tests::seed_large_plan_fixture();
+        let (large_sql, large_bind) =
+            build_search_sql(&[like_escape("深度学习")], &long_cand, true, false);
+        let large_plan = explain_plan(&large, &large_sql, large_bind.len() + 1);
+        assert!(
+            !large_plan
+                .iter()
+                .any(|s| s.contains("TEMP B-TREE FOR ORDER BY"))
+                && !large_plan.iter().any(|s| {
+                    s.contains("local_sync_article_state")
+                        || s.contains("local_sync_source")
+                        || s.contains("MATERIALIZE local_sync")
+                }),
+            "20k 规模搜索必须保持同一有序直接计划：{large_plan:?}"
         );
     }
 }

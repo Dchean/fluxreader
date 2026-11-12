@@ -43,8 +43,10 @@ pub async fn list_articles(
     state: State<'_, AppState>,
     args: ArticleListArgs,
 ) -> AppResult<Vec<db::ArticleListItem>> {
-    let conn = state.db.lock().await;
-    db::list_articles_in_window(&conn, &article_query(&args), date_window(&args)?)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::list_articles_in_window(conn, &article_query(&args), date_window(&args)?)
+    })
+    .await
 }
 
 /// 计算某篇文章在当前筛选排序下的绝对位置（0 起）——供前端「搜索/深层打开
@@ -55,13 +57,10 @@ pub async fn article_index(
     args: ArticleListArgs,
     article_id: i64,
 ) -> AppResult<Option<i64>> {
-    let conn = state.db.lock().await;
-    db::article_index_in_window(
-        &conn,
-        &article_query(&args),
-        article_id,
-        date_window(&args)?,
-    )
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::article_index_in_window(conn, &article_query(&args), article_id, date_window(&args)?)
+    })
+    .await
 }
 
 fn date_window(args: &ArticleListArgs) -> AppResult<Option<(i64, i64)>> {
@@ -95,8 +94,7 @@ fn article_query(args: &ArticleListArgs) -> db::ArticleQuery {
 
 #[tauri::command]
 pub async fn get_article(state: State<'_, AppState>, id: i64) -> AppResult<Option<db::ArticleRow>> {
-    let conn = state.db.lock().await;
-    db::get_article(&conn, id)
+    crate::state::database_work(state.db.clone(), move |conn| db::get_article(conn, id)).await
 }
 
 #[tauri::command]
@@ -104,8 +102,7 @@ pub async fn get_articles(
     state: State<'_, AppState>,
     ids: Vec<i64>,
 ) -> AppResult<Vec<db::ArticleRow>> {
-    let conn = state.db.lock().await;
-    db::get_articles(&conn, &ids)
+    crate::state::database_work(state.db.clone(), move |conn| db::get_articles(conn, &ids)).await
 }
 
 #[tauri::command]
@@ -113,8 +110,10 @@ pub async fn get_article_updates(
     state: State<'_, AppState>,
     ids: Vec<i64>,
 ) -> AppResult<db::ArticleUpdates> {
-    let conn = state.db.lock().await;
-    db::get_article_updates(&conn, &ids)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::get_article_updates(conn, &ids)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -122,8 +121,10 @@ pub async fn list_article_member_ids(
     state: State<'_, AppState>,
     args: ArticleListArgs,
 ) -> AppResult<Vec<i64>> {
-    let conn = state.db.lock().await;
-    db::list_article_member_ids(&conn, &article_query(&args), date_window(&args)?)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::list_article_member_ids(conn, &article_query(&args), date_window(&args)?)
+    })
+    .await
 }
 
 /// 图片位上报当前封面失效；仅在 URL 未被其它更新替换时清空，避免误删新封面。
@@ -141,17 +142,21 @@ async fn report_broken_cover_inner(
     article_id: i64,
     url: &str,
 ) -> AppResult<bool> {
-    // 与scheduler同序 db→cache 短锁，清库与撤成功缓存之间不留重填窗口。
-    let conn = state.db.lock().await;
-    let page_url = db::get_article_url(&conn, article_id)?;
-    let mut cover = state.cover_backfill.lock().await;
-    let changed = db::clear_article_cover_if_matches(&conn, article_id, url)? > 0;
-    if changed {
-        if let Some(page_url) = page_url {
-            cover.report_broken(&page_url, url);
+    let url = url.to_owned();
+    let cover = state.cover_backfill.clone();
+    // 与 scheduler 同序 db→cache；两把锁在同一个 blocking scope 内结束。
+    crate::state::database_work(state.db.clone(), move |conn| {
+        let page_url = db::get_article_url(conn, article_id)?;
+        let mut cover = cover.blocking_lock();
+        let changed = db::clear_article_cover_if_matches(conn, article_id, &url)? > 0;
+        if changed {
+            if let Some(page_url) = page_url {
+                cover.report_broken(&page_url, &url);
+            }
         }
-    }
-    Ok(changed)
+        Ok(changed)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -268,8 +273,10 @@ pub async fn search_articles(
     query: String,
     limit: Option<i64>,
 ) -> AppResult<Vec<db::ArticleListItem>> {
-    let conn = state.db.lock().await;
-    db::search_articles(&conn, &query, limit.unwrap_or(50))
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::search_articles(conn, &query, limit.unwrap_or(50))
+    })
+    .await
 }
 
 /// 记录已读状态并写入同步队列（命令与测试共用的真实逻辑）。
@@ -300,10 +307,10 @@ pub async fn set_read(
     id: i64,
     read: bool,
 ) -> AppResult<Vec<db::ReadWriteReceipt>> {
-    let receipts = {
-        let conn = state.db.lock().await;
-        record_read_state(&conn, id, read)?
-    };
+    let receipts = crate::state::database_work(state.db.clone(), move |conn| {
+        record_read_state(conn, id, read)
+    })
+    .await?;
     // 锁外调度即时推送（防抖合批，~1s 内到达服务端）；未配置时 push_states_now
     // 静默返回，队列项留待连接后的同步补推
     schedule_state_push(&state);
@@ -356,10 +363,10 @@ pub async fn set_read_bulk(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let receipts = {
-        let conn = state.db.lock().await;
-        apply_read_bulk(&conn, &ids, read)?
-    };
+    let receipts = crate::state::database_work(state.db.clone(), move |conn| {
+        apply_read_bulk(conn, &ids, read)
+    })
+    .await?;
     schedule_state_push(&state);
     // TASK-124：整批单事务提交后发 sync-queue-changed（锁外，同 set_read 口径）
     crate::sync::notify_queue_changed(&state.db).await;
@@ -368,10 +375,10 @@ pub async fn set_read_bulk(
 
 #[tauri::command]
 pub async fn set_starred(state: State<'_, AppState>, id: i64, starred: bool) -> AppResult<()> {
-    {
-        let conn = state.db.lock().await;
-        record_star_state(&conn, id, starred)?;
-    }
+    crate::state::database_work(state.db.clone(), move |conn| {
+        record_star_state(conn, id, starred)
+    })
+    .await?;
     schedule_state_push(&state);
     // TASK-124：收藏入队事务提交后发 sync-queue-changed（锁外，同 set_read 口径）
     crate::sync::notify_queue_changed(&state.db).await;
@@ -388,17 +395,17 @@ pub async fn mark_all_read(
     layout: Option<String>,
 ) -> AppResult<usize> {
     let starred_only = starred_only.unwrap_or(false);
-    let n = {
-        let conn = state.db.lock().await;
+    let n = crate::state::database_work(state.db.clone(), move |conn| {
         apply_mark_all_read(
-            &conn,
+            conn,
             feed_id,
             folder_id,
             starred_only,
             since_ms,
             layout.as_deref(),
-        )?
-    };
+        )
+    })
+    .await?;
     // 锁外调度即时推送；未配置时 push_states_now 内 build_client 返回 None 而
     // 静默返回，队列项留待连接后的同步补推（与 set_read/set_starred 一致）
     schedule_state_push(&state);
@@ -438,8 +445,7 @@ pub fn apply_mark_all_read(
 
 #[tauri::command]
 pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCounts>> {
-    let conn = state.db.lock().await;
-    db::feed_counts(&conn)
+    crate::state::database_work(state.db.clone(), move |conn| db::feed_counts(conn)).await
 }
 
 /// OPT-008B 第一阶段：全部 / 每分类 / 每源的**显示集合**精确计数
@@ -452,8 +458,10 @@ pub async fn scope_counts(
     state: State<'_, AppState>,
     layout: Option<String>,
 ) -> AppResult<db::ScopeCountsDetail> {
-    let conn = state.db.lock().await;
-    db::scope_counts(&conn, layout.as_deref())
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::scope_counts(conn, layout.as_deref())
+    })
+    .await
 }
 
 /// 计数组合快照（R2/N2）：同一开关值、同一 DB 锁内返回源计数 + scope 计数，
@@ -463,8 +471,10 @@ pub async fn counts_snapshot(
     state: State<'_, AppState>,
     layout: Option<String>,
 ) -> AppResult<db::CountsSnapshot> {
-    let conn = state.db.lock().await;
-    db::counts_snapshot(&conn, layout.as_deref())
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::counts_snapshot(conn, layout.as_deref())
+    })
+    .await
 }
 /* ============================================================
 刷新（直连抓取）
@@ -476,10 +486,7 @@ pub async fn counts_snapshot(
 pub async fn refresh_feed(state: State<'_, AppState>, feed_id: i64) -> AppResult<usize> {
     let db = state.db.clone();
     let client = state.http.clone();
-    let dedup = {
-        let conn = db.lock().await;
-        read_dedup_flag(&conn)
-    };
+    let dedup = crate::state::database_work(db.clone(), |conn| Ok(read_dedup_flag(conn))).await?;
     ingestion::refresh_feed_staged(&db, &client, feed_id, dedup)
         .await
         .map(|outcome| outcome.new_articles())

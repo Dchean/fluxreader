@@ -9,7 +9,7 @@ import type {
 } from '../types';
 import { resolveAiPolicy } from './aiPolicy';
 import { isSameLocalDay } from '../lib/format';
-import { getBodyEntry } from './bodyCache';
+import { getBodyEntry, isFulltextTargetCurrent } from './bodyCache';
 import type { BodyEntry, BodyState } from './bodyCache';
 import type { AppState } from './types';
 import { projectReadingMembers, sameReadingNavigation } from './readingSession';
@@ -76,6 +76,8 @@ export interface ArticleBodyView {
   aiSummarySig: string | null;
   translatedSig: string | null;
   fulltextExtracted: boolean;
+  extractingFulltext: boolean;
+  fulltextError: string;
   /** missing/failed 的呈现文案（其余态为空） */
   message: string;
   /** 显式失效计数（t122 断言/调试观察用） */
@@ -91,6 +93,8 @@ const UNREQUESTED_BODY: ArticleBodyView = {
   aiSummarySig: null,
   translatedSig: null,
   fulltextExtracted: false,
+  extractingFulltext: false,
+  fulltextError: '',
   message: '',
   contentRevision: 0,
 };
@@ -105,6 +109,8 @@ function bodyViewFrom(rec: BodyEntry): ArticleBodyView {
     aiSummarySig: rec.aiSummarySig,
     translatedSig: rec.translatedSig,
     fulltextExtracted: rec.fulltextExtracted,
+    extractingFulltext: !!rec.fulltextRequest && isFulltextTargetCurrent(rec, rec.fulltextRequest),
+    fulltextError: rec.fulltextFailure && isFulltextTargetCurrent(rec, rec.fulltextFailure.ticket) ? rec.fulltextFailure.message : '',
     message: rec.message,
     contentRevision: rec.contentRevision,
   };
@@ -136,6 +142,8 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
       aiSummarySig: entry.aiSummarySig ?? null,
       translatedSig: entry.translatedSig ?? null,
       fulltextExtracted: entry.fulltextExtracted ?? false,
+      extractingFulltext: false,
+      fulltextError: '',
       message: '',
       contentRevision: 0,
     };
@@ -149,6 +157,8 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
     aiSummarySig: entry.aiSummarySig ?? null,
     translatedSig: entry.translatedSig ?? null,
     fulltextExtracted: entry.fulltextExtracted ?? false,
+    extractingFulltext: false,
+    fulltextError: '',
     message: '',
     contentRevision: 0,
   };

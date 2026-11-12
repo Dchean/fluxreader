@@ -8,6 +8,44 @@ use rusqlite::{Connection, OptionalExtension};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Each blocking scope returns the same uniquely-owned report, including soft
+/// failures and partial commits. A worker failure ends this subscription phase.
+async fn subscription_database_work<T: Send + 'static>(
+    database: &Arc<Mutex<Connection>>,
+    report: &mut SyncReport,
+    work: impl FnOnce(&mut Connection, &mut SyncReport) -> T + Send + 'static,
+) -> AppResult<T> {
+    let mut owned_report = std::mem::take(report);
+    let (returned_report, result) = crate::state::database_work(database.clone(), move |conn| {
+        let result = work(conn, &mut owned_report);
+        Ok((owned_report, result))
+    })
+    .await?;
+    *report = returned_report;
+    Ok(result)
+}
+
+/// Guard one original subscription mutation, then validate its captured HTTP
+/// generation. Import loops release this permit between individual sources.
+fn subscription_writer(
+    conn: &Connection,
+    generation: i64,
+    report: &mut SyncReport,
+) -> Option<impl Drop> {
+    match db::writer_guard(conn).and_then(|guard| {
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(guard)
+    }) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            report
+                .errors
+                .push(format!("订阅写入准入失败，本阶段停止: {error}"));
+            None
+        }
+    }
+}
+
 /* ============================================================
 OPT-009 B3：subscription-outbox-changed 事件总线
 （订阅写回状态变化 → 前端持久回执，不依赖用户手动刷新设置页）
@@ -47,11 +85,15 @@ pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
     let Some(app) = SUBSCRIPTION_EVENT_TARGET.get() else {
         return;
     };
+    let snapshot = crate::state::database_work(db.clone(), |conn| {
+        Ok(super::current_account(conn)
+            .map(|account| account.map(|ctx| db::subscription_outbox_stats(conn, &ctx.key))))
+    })
+    .await;
     let payload = {
-        let conn = db.lock().await;
-        match super::current_account(&conn) {
+        match snapshot.and_then(|result| result) {
             // 当前账号限定：异账号暂停行不进入展示口径
-            Ok(Some(ctx)) => match db::subscription_outbox_stats(&conn, &ctx.key) {
+            Ok(Some(result)) => match result {
                 Ok(stats) => db::subscription_outbox_changed_payload(&stats, true),
                 Err(error) => {
                     emit_sync_error(&format!("订阅写回状态读取失败，请重试：{error}"));
@@ -195,15 +237,22 @@ pub(super) async fn push_feeds(
         /// edit_subscription(a=label) 才能保住 OPML/add_feed 选择的目录结构。
         folder_label: Option<String>,
     }
-    let items: Vec<PendingFeed> = {
-        let conn = db.lock().await;
+    enum BindingStep {
+        Bound(Option<i64>),
+        Retry,
+        Stale,
+    }
+    let generation = session.generation;
+    let queue_scope = queue_scope.cloned();
+    let queue_scope_for_work = queue_scope.clone();
+    let snapshot = subscription_database_work(db, report, move |conn, report| {
         // OPT-006：读队列入 HTTP 前先复核代际——账号已切换时旧队列已随 purge
         // 清空，本段不应再向新账号发起任何 add_feed。
-        if let Err(e) = session.ensure_current(&conn) {
+        if let Err(e) = SyncSession::ensure_generation(conn, generation) {
             log::warn!("sync: 订阅推送前账号代际已变更，跳过本轮推送: {e}");
-            return;
+            return None;
         }
-        let queued = match db::take_sync_queue(&conn) {
+        let queued = match db::take_sync_queue(conn) {
             Ok(v) => v,
             Err(e) => {
                 // C-2：读队列失败不再静默当空队列
@@ -213,7 +262,10 @@ pub(super) async fn push_feeds(
         };
         let mut out = Vec::new();
         for item in queued {
-            if queue_scope.is_some_and(|scope| !scope.contains(&item.id)) {
+            if queue_scope_for_work
+                .as_ref()
+                .is_some_and(|scope| !scope.contains(&item.id))
+            {
                 continue;
             }
             if item.action != "add_feed" {
@@ -234,7 +286,7 @@ pub(super) async fn push_feeds(
                 .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
                 .and_then(|v| v.get("folder_id").and_then(|f| f.as_i64()));
             let folder_label = match folder_id {
-                Some(fid) => match db::folder_name(&conn, fid) {
+                Some(fid) => match db::folder_name(conn, fid) {
                     Ok(label) => label,
                     Err(e) => {
                         log::warn!(
@@ -256,7 +308,18 @@ pub(super) async fn push_feeds(
                 folder_label,
             });
         }
-        out
+        Some(out)
+    })
+    .await;
+    let items: Vec<PendingFeed> = match snapshot {
+        Ok(Some(items)) => items,
+        Ok(None) => return,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("订阅队列数据库读取失败: {error}"));
+            return;
+        }
     };
     if items.is_empty() {
         return;
@@ -323,12 +386,16 @@ pub(super) async fn push_feeds(
             report.pushed_feeds += 1;
         }
         // 锁内：绑定本地 feed（URL 匹配）
-        let bound_remote_id = {
-            let conn = db.lock().await;
+        let url = it.url.clone();
+        let queue_id = it.queue_id;
+        let bound = subscription_database_work(db, report, move |conn, report| {
+            let Some(_writer) = subscription_writer(conn, generation, report) else {
+                return BindingStep::Stale;
+            };
             // OPT-006：绑定是回写边界——响应在途期间换号时不得写绑定。
-            if session.ensure_current(&conn).is_err() {
+            if SyncSession::ensure_generation(conn, generation).is_err() {
                 log::warn!("sync: quick_add 响应返回时账号代际已变更，丢弃绑定");
-                break;
+                return BindingStep::Stale;
             }
             let mut nid = None;
             // 绑定查找走规范化 URL（与 pull_feeds、OPML 去重同口径）：队列携带的
@@ -336,11 +403,11 @@ pub(super) async fn push_feeds(
             // 「本地已删除」→ 永不绑定。DB 错误不再 `.ok()` 吞掉：沿用 folder_label
             // 的处置（warn + report.errors + continue，队项不进 done，下轮重试）。
             // Note: 绑定查找必须走规范化 URL 且 DB 错误不得吞 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅绑定规范化与旁路16MiB界与SMTC浮点饱和.md
-            match db::feed_id_by_url_normalized(&conn, &it.url) {
+            match db::feed_id_by_url_normalized(conn, &url) {
                 Ok(Some(local_id)) => {
                     // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull
                     // 被当作未绑定源重复处理。改为 warn（可自愈，不中断）。
-                    if let Err(err) = db::set_feed_remote_id(&conn, local_id, rid) {
+                    if let Err(err) = db::set_feed_remote_id(conn, local_id, rid) {
                         log::warn!(
                         "sync: quick_add 后绑定远端 id 失败（feed={local_id} remote={rid}）: {err}"
                     );
@@ -351,16 +418,27 @@ pub(super) async fn push_feeds(
                 Err(e) => {
                     log::warn!(
                         "sync: 解析队列项 {} 的本地 feed 绑定失败（下轮重试）: {e}",
-                        it.queue_id
+                        queue_id
                     );
-                    report.errors.push(format!(
-                        "解析订阅 {} 的本地绑定失败（下轮重试）: {e}",
-                        it.url
-                    ));
-                    continue;
+                    report
+                        .errors
+                        .push(format!("解析订阅 {} 的本地绑定失败（下轮重试）: {e}", url));
+                    return BindingStep::Retry;
                 }
             }
-            nid
+            BindingStep::Bound(nid)
+        })
+        .await;
+        let bound_remote_id = match bound {
+            Ok(BindingStep::Bound(id)) => id,
+            Ok(BindingStep::Retry) => continue,
+            Ok(BindingStep::Stale) => break,
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("订阅绑定数据库工作失败: {error}"));
+                return;
+            }
         };
         // A-3：锁外补挂目标分类。挂载失败**保留队项**（不进 done → 不剪除）：
         // pull 对既有源不回灌远端分类（2026-11-01 审计 R2-P3），剪除后「远端订阅
@@ -390,40 +468,55 @@ pub(super) async fn push_feeds(
             _ => done.push(it.queue_id),
         }
     }
-    let conn = db.lock().await;
-    // OPT-006：剪除确认是回写边界——代际失配时 done 里的旧队项绝不能触碰
-    //（账号已切换，旧队项已随 purge 清空；新账号队项与旧编号无对应关系）。
-    if session.ensure_current(&conn).is_err() {
-        log::warn!("sync: 订阅推送确认时账号代际已变更，跳过剪除与僵尸清理");
-        return;
-    }
-    // P3-3：失败标记与剪除同一代际守卫边界（旧代际的失败不落到新队列）。
-    if !mount_failed.is_empty() {
-        if let Err(err) = db::mark_push_failed(&conn, &mount_failed) {
-            log::warn!(
-                "sync: 挂载失败保留队项的失败标记落库失败（{} 项）: {err}",
-                mount_failed.len()
-            );
+    let scoped = queue_scope.is_some();
+    let changed = !mount_failed.is_empty();
+    let recorded = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        // OPT-006：剪除确认是回写边界——代际失配时 done 里的旧队项绝不能触碰
+        //（账号已切换，旧队项已随 purge 清空；新账号队项与旧编号无对应关系）。
+        if SyncSession::ensure_generation(conn, generation).is_err() {
+            log::warn!("sync: 订阅推送确认时账号代际已变更，跳过剪除与僵尸清理");
+            return Ok(false);
+        }
+        // P3-3：失败标记与剪除同一代际守卫边界（旧代际的失败不落到新队列）。
+        if !mount_failed.is_empty() {
+            if let Err(err) = db::mark_push_failed(conn, &mount_failed) {
+                log::warn!(
+                    "sync: 挂载失败保留队项的失败标记落库失败（{} 项）: {err}",
+                    mount_failed.len()
+                );
+            }
+        }
+        // P3[1]：剪除已推送队项失败此前静默——残留队项会被下一轮重复推送（重复订阅
+        // 动作），且无日志可查。改为 warn（失败不中断：下轮会再尝试剪除）。
+        if let Err(err) = db::prune_sync(conn, &done) {
+            log::warn!("sync: 剪除已推送队列项失败（{} 项）: {err}", done.len());
+        }
+        // 定向同步不得借道清理其它队列行；僵尸清理只属于全量 feeds 阶段。
+        if !scoped {
+            // remove_feed 语义（SUB-4/SYN-1）：本地删除不推远端。历史版本可能在
+            // delete_feed 时建过 remove_feed 队项（从未被消费）——此处统一清僵尸项，
+            // 与 delete_feed 命令「不再建 remove_feed」的新语义一致。
+            if let Err(err) = db::purge_remove_feed_zombies(conn) {
+                log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
+            }
+        }
+        Ok(true)
+    })
+    .await;
+    match recorded {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("订阅确认数据库工作失败: {error}"));
+            return;
         }
     }
-    // P3[1]：剪除已推送队项失败此前静默——残留队项会被下一轮重复推送（重复订阅
-    // 动作），且无日志可查。改为 warn（失败不中断：下轮会再尝试剪除）。
-    if let Err(err) = db::prune_sync(&conn, &done) {
-        log::warn!("sync: 剪除已推送队列项失败（{} 项）: {err}", done.len());
-    }
-    // 定向同步不得借道清理其它队列行；僵尸清理只属于全量 feeds 阶段。
-    if queue_scope.is_none() {
-        // remove_feed 语义（SUB-4/SYN-1）：本地删除不推远端。历史版本可能在
-        // delete_feed 时建过 remove_feed 队项（从未被消费）——此处统一清僵尸项，
-        // 与 delete_feed 命令「不再建 remove_feed」的新语义一致。
-        if let Err(err) = db::purge_remove_feed_zombies(&conn) {
-            log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
-        }
-    }
-    drop(conn);
     // P3-3：失败标记改变了队列统计（waiting 中的 failed 计数升）——即时推送
     // pill（notify 内部自持短锁，此处已在 DB 锁外）。
-    if !mount_failed.is_empty() {
+    if changed {
         notify_queue_changed(db).await;
     }
 }
@@ -506,39 +599,42 @@ pub(super) async fn push_subscription_outbox(
     let _guard = PUSH_LOCK.lock().await;
 
     // ① 锁内：代际复核 → 取当前账号 key → 同账号旧代际重绑 → 计划
-    let (key, plan): (String, Vec<db::SubscriptionOutboxItem>) = {
-        let conn = db.lock().await;
-        if let Err(e) = session.ensure_current(&conn) {
+    let generation = session.generation;
+    let plan_scope = outbox_scope.cloned();
+    let planned = subscription_database_work(db, report, move |conn, report| {
+        let _writer = subscription_writer(conn, generation, report)?;
+        let outbox_scope = plan_scope.as_ref();
+        if let Err(e) = SyncSession::ensure_generation(conn, generation) {
             log::warn!("sync: 订阅 outbox 推送前账号代际已变更，跳过本轮: {e}");
-            return;
+            return None;
         }
-        let key = match super::current_account(&conn) {
+        let key = match super::current_account(conn) {
             Ok(Some(ctx)) => ctx.key,
-            Ok(None) => return, // 会话存在即凭据完整；防御：无凭据不推
+            Ok(None) => return None, // 会话存在即凭据完整；防御：无凭据不推
             Err(e) => {
                 report
                     .errors
                     .push(format!("读取同步账号身份失败，跳过订阅写回: {e}"));
-                return;
+                return None;
             }
         };
         let rebind_result = match outbox_scope {
             Some(scope) => {
                 let ids: Vec<i64> = scope.iter().copied().collect();
-                db::rebind_outbox_generation_for_ids(&conn, &key, session.generation, &ids)
+                db::rebind_outbox_generation_for_ids(conn, &key, generation, &ids)
             }
-            None => db::rebind_outbox_generation(&conn, &key, session.generation),
+            None => db::rebind_outbox_generation(conn, &key, generation),
         };
         if let Err(e) = rebind_result {
             // 重绑失败不阻断：本轮仍只发代际相等的行（下轮再重绑）
             report.errors.push(format!("订阅队项代际重绑失败: {e}"));
         }
-        match db::pending_outbox(&conn) {
+        let plan = match db::pending_outbox(conn) {
             Ok(items) => {
                 let total = items.len();
                 let mine: Vec<db::SubscriptionOutboxItem> = items
                     .into_iter()
-                    .filter(|i| i.account_key == key && i.account_generation == session.generation)
+                    .filter(|i| i.account_key == key && i.account_generation == generation)
                     .filter(|i| {
                         outbox_scope.map_or(true, |scope| {
                             scope.contains(&i.id) && i.action == db::ACTION_SUBSCRIBE
@@ -557,6 +653,17 @@ pub(super) async fn push_subscription_outbox(
                 report.errors.push(format!("读取订阅写回队列失败: {e}"));
                 (key, Vec::new())
             }
+        };
+        Some(plan)
+    }).await;
+    let (key, plan) = match planned {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("订阅计划数据库工作失败: {error}"));
+            return;
         }
     };
     if plan.is_empty() {
@@ -569,14 +676,15 @@ pub(super) async fn push_subscription_outbox(
     // Note: 能力矩阵与持久回执的 IPC/呈现落点 — 见 .agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md
     if !session.client.supports_subscription_write() {
         let pairs: Vec<(i64, i64)> = plan.iter().map(|i| (i.id, session.generation)).collect();
-        let marked = {
-            let conn = db.lock().await;
-            if session.ensure_current(&conn).is_err() {
+        let marked = crate::state::database_work(db.clone(), move |conn| {
+            let _writer = db::writer_guard(conn)?;
+            if SyncSession::ensure_generation(conn, generation).is_err() {
                 log::warn!("sync: local-only 标记前账号代际已变更，跳过");
-                return;
+                return Err(SyncSession::stale_error());
             }
-            db::mark_outbox_local_only(&conn, &pairs)
-        };
+            db::mark_outbox_local_only(conn, &pairs)
+        })
+        .await;
         match marked {
             Ok(n) => {
                 log::info!("sync: Fever 协议不支持订阅写回，{n} 项标记 local_only");
@@ -654,8 +762,14 @@ pub(super) async fn push_subscription_outbox(
     {
         return;
     }
-    let conn = db.lock().await;
-    if session.ensure_current(&conn).is_err() {
+    let changed = !done_plain.is_empty() || !done_subscribe.is_empty() || !failed.is_empty();
+    let recorded = subscription_database_work(db, report, move |conn, report| {
+    // The same-account successor rebase deliberately survives generation change.
+    let _writer = match db::writer_guard(conn) {
+        Ok(guard) => guard,
+        Err(error) => { report.errors.push(format!("订阅回执写入准入失败: {error}")); return; }
+    };
+    if SyncSession::ensure_generation(conn, generation).is_err() {
         // OPT-006 纪律：代际已变的**确认/失败标记**一律不落库（队项保留，下轮按
         // 新会话重发）。但「在途移动已成功、同账号后继意图已排队」这一事实属于
         // **账号作用域**：换代（同账号改密码/重连）后若不重定，下一轮会按过期
@@ -667,7 +781,7 @@ pub(super) async fn push_subscription_outbox(
         );
     } else {
         if !failed.is_empty() {
-            if let Err(e) = db::mark_outbox_failed(&conn, &failed) {
+            if let Err(e) = db::mark_outbox_failed(conn, &failed) {
                 log::warn!("sync: 订阅失败标记落库失败: {e}");
             }
         }
@@ -675,9 +789,9 @@ pub(super) async fn push_subscription_outbox(
         // 挂载 HTTP 在途期间原地更新（同 id/代际）时确认落空，最新目标留待下一轮。
         for (id, title, folder, prev) in &done_subscribe {
             match db::confirm_subscribe_if_desired_unchanged(
-                &conn,
+                conn,
                 *id,
-                session.generation,
+                generation,
                 title.as_deref(),
                 folder.as_deref(),
                 prev.as_deref(),
@@ -692,7 +806,7 @@ pub(super) async fn push_subscription_outbox(
         if !done_plain.is_empty() {
             // edit/unsubscribe 按 id 精确确认（换新 id 的替换路径天然落空）。
             for id in &done_plain {
-                match db::prune_outbox(&conn, &[*id], session.generation) {
+                match db::prune_outbox(conn, &[*id], generation) {
                     Ok(1) => {}
                     Ok(_) => log::warn!(
                         "sync: 订阅队项 {id} 精确确认落空（已被合并替换或删除），旧成功不确认新意图"
@@ -708,9 +822,9 @@ pub(super) async fn push_subscription_outbox(
     // 只有执行器在确认时刻知道「远端已接受该目标」；被处理的 id 已不在队
     // （确认成功删除，或被新意图合并替换）→ 后者按已接受目标重定替代行。
     for (id, feed_url, target) in &sent_moves {
-        match db::outbox_pending_by_id(&conn, *id) {
+        match db::outbox_pending_by_id(conn, *id) {
             Ok(true) => {} // 行仍在（本轮未确认，例如代际已变）：它自己就是待发意图
-            Ok(false) => match db::rebase_successor_edit_prev(&conn, &key, feed_url, target) {
+            Ok(false) => match db::rebase_successor_edit_prev(conn, &key, feed_url, target) {
                 Ok(0) => {} // 无替代行（或被重写为别的账号/动作）：无需处理
                 Ok(n) => log::warn!(
                     "sync: 订阅队项 {id} 发送成功但已被在途意图替换：{n} 个替代行移除基准重定为「{target}」（旧成功不确认新目标）"
@@ -722,8 +836,14 @@ pub(super) async fn push_subscription_outbox(
     }
     // B3：确认出队/失败累计也是状态变化——推送前端回执。事件在 DB 锁外发
     // （notify 内部自持短锁）；仅本轮确实触达了确认/失败落库时才发（不变不发）。
-    drop(conn);
-    if !done_plain.is_empty() || !done_subscribe.is_empty() || !failed.is_empty() {
+    }).await;
+    if let Err(error) = recorded {
+        report
+            .errors
+            .push(format!("订阅回执数据库工作失败: {error}"));
+        return;
+    }
+    if changed {
         notify_subscription_outbox_changed(db).await;
     }
 }
@@ -802,118 +922,135 @@ async fn exec_subscribe_item(
     // `update_pending_subscribe_desired` **原地**更新同一行（同 id）。因此绑定的
     // 同一 DB 临界区内重读当前行，挂载/确认以重读结果为准；行被替换/删除/动作
     // 改变则安全跳过（不得继续旧目标，也不得确认）。
-    let (fresh_title, fresh_folder, fresh_prev) = {
-        let conn = db.lock().await;
-        if session.ensure_current(&conn).is_err() {
-            log::warn!("sync: quick_add 响应返回时账号代际已变更，丢弃订阅推进");
-            return OutboxOutcome::Skipped;
-        }
-        if item.stage == db::STAGE_PENDING {
-            match db::advance_subscribe_stage(&conn, item.id, session.generation, rid) {
-                Ok(true) => {}
-                Ok(false) => {
-                    // 行已被合并/退订/删除替换：把远端已建 id 补给替代行，避免孤儿；
-                    // 旧 HTTP 成功不得确认（或绑定）替代行之外的新意图。
-                    match db::adopt_remote_id_for_pending(
-                        &conn,
-                        key,
-                        session.generation,
-                        &item.feed_url,
-                        rid,
-                    ) {
-                        Ok(true) => log::info!(
-                            "sync: 订阅 {} 行已被替换，远端已建 id {rid} 已结转替代行",
-                            item.feed_url
-                        ),
-                        Ok(false) => log::warn!(
+    let generation = session.generation;
+    let binding_item = item.clone();
+    let binding_key = key.to_owned();
+    let bound = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        Ok((|| {
+            let item = &binding_item;
+            let key = binding_key.as_str();
+            if SyncSession::ensure_generation(conn, generation).is_err() {
+                log::warn!("sync: quick_add 响应返回时账号代际已变更，丢弃订阅推进");
+                return Err(OutboxOutcome::Skipped);
+            }
+            if item.stage == db::STAGE_PENDING {
+                match db::advance_subscribe_stage(conn, item.id, generation, rid) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // 行已被合并/退订/删除替换：把远端已建 id 补给替代行，避免孤儿；
+                        // 旧 HTTP 成功不得确认（或绑定）替代行之外的新意图。
+                        match db::adopt_remote_id_for_pending(
+                            conn,
+                            key,
+                            generation,
+                            &item.feed_url,
+                            rid,
+                        ) {
+                            Ok(true) => log::info!(
+                                "sync: 订阅 {} 行已被替换，远端已建 id {rid} 已结转替代行",
+                                item.feed_url
+                            ),
+                            Ok(false) => log::warn!(
                             "sync: 订阅 {} 行已被替换且无替代行可结转远端 id {rid}（无本地残留）",
                             item.feed_url
                         ),
-                        Err(e) => log::warn!("sync: 接管远端已建订阅 id 失败: {e}"),
+                            Err(e) => log::warn!("sync: 接管远端已建订阅 id 失败: {e}"),
+                        }
+                        return Err(OutboxOutcome::Skipped);
                     }
-                    return OutboxOutcome::Skipped;
-                }
-                Err(e) => {
-                    return OutboxOutcome::Retry(format!(
-                        "订阅 {} 阶段推进失败: {e}",
-                        item.feed_url
-                    ))
-                }
-            }
-        }
-        // 绑定义务：本地订阅仍存在则写入 remote_id；已删除则把远端 id 结转退订。
-        match db::feed_id_by_url_normalized(&conn, &item.feed_url) {
-            Ok(Some(local_id)) => {
-                if let Err(e) = db::set_feed_remote_id(&conn, local_id, rid) {
-                    return OutboxOutcome::Retry(format!(
-                        "绑定本地订阅 {} 失败（队项保留，重启重试不重复 quick_add）: {e}",
-                        item.feed_url
-                    ));
+                    Err(e) => {
+                        return Err(OutboxOutcome::Retry(format!(
+                            "订阅 {} 阶段推进失败: {e}",
+                            item.feed_url
+                        )))
+                    }
                 }
             }
-            Ok(None) => {
-                // 结转退订 = enqueue_unsubscribe 内部的 DELETE pending + DELETE
-                // add_feed 队项 + INSERT 退订三写。崩溃窗口会留下「旧创建意图
-                // 已删、退订意图未落」的半程状态（远端订阅永久无人退订）。全库
-                // 其余调用方均在事务内执行（commands/folders.rs 退订命令等），
-                // 此处对齐同一口径；开事务/入队/提交任一步失败按既有软失败处理
-                // （warn + Skipped，事务对象 drop 自动回滚）。
-                let carried = (|| -> AppResult<bool> {
-                    let tx = conn.unchecked_transaction()?;
-                    let queued = db::enqueue_unsubscribe(
-                        &tx,
-                        session.generation,
-                        key,
-                        &item.feed_url,
-                        Some(rid),
-                        None,
-                    )?;
-                    tx.commit()?;
-                    Ok(queued)
-                })();
-                match carried {
-                    Ok(queued) => log::warn!(
+            // 绑定义务：本地订阅仍存在则写入 remote_id；已删除则把远端 id 结转退订。
+            match db::feed_id_by_url_normalized(conn, &item.feed_url) {
+                Ok(Some(local_id)) => {
+                    if let Err(e) = db::set_feed_remote_id(conn, local_id, rid) {
+                        return Err(OutboxOutcome::Retry(format!(
+                            "绑定本地订阅 {} 失败（队项保留，重启重试不重复 quick_add）: {e}",
+                            item.feed_url
+                        )));
+                    }
+                }
+                Ok(None) => {
+                    // 结转退订 = enqueue_unsubscribe 内部的 DELETE pending + DELETE
+                    // add_feed 队项 + INSERT 退订三写。崩溃窗口会留下「旧创建意图
+                    // 已删、退订意图未落」的半程状态（远端订阅永久无人退订）。全库
+                    // 其余调用方均在事务内执行（commands/folders.rs 退订命令等），
+                    // 此处对齐同一口径；开事务/入队/提交任一步失败按既有软失败处理
+                    // （warn + Skipped，事务对象 drop 自动回滚）。
+                    let carried = (|| -> AppResult<bool> {
+                        let tx = crate::db::write_transaction(conn)?;
+                        let queued = db::enqueue_unsubscribe(
+                            &tx,
+                            generation,
+                            key,
+                            &item.feed_url,
+                            Some(rid),
+                            None,
+                        )?;
+                        tx.commit()?;
+                        Ok(queued)
+                    })();
+                    match carried {
+                        Ok(queued) => log::warn!(
                         "sync: 订阅 {} 本地已删除，远端已建 id {rid} 结转退订（queued={queued}）",
                         item.feed_url
                     ),
-                    Err(e) => log::warn!("sync: 结转退订意图失败（远端 id {rid}）: {e}"),
+                        Err(e) => log::warn!("sync: 结转退订意图失败（远端 id {rid}）: {e}"),
+                    }
+                    return Err(OutboxOutcome::Skipped);
                 }
-                return OutboxOutcome::Skipped;
+                Err(e) => {
+                    return Err(OutboxOutcome::Retry(format!(
+                        "查询本地订阅 {} 失败: {e}",
+                        item.feed_url
+                    )))
+                }
             }
-            Err(e) => {
-                return OutboxOutcome::Retry(format!("查询本地订阅 {} 失败: {e}", item.feed_url))
-            }
-        }
-        // 与绑定同一临界区重读：此后发送的目标即「发送时最新」（标题/分类/旧
-        // label 三字段都参与确认——B2-3 起挂载也带 r= 移除旧 label）。
-        match conn
-            .query_row(
-                "SELECT desired_title, desired_folder, prev_folder FROM subscription_outbox
+            // 与绑定同一临界区重读：此后发送的目标即「发送时最新」（标题/分类/旧
+            // label 三字段都参与确认——B2-3 起挂载也带 r= 移除旧 label）。
+            match conn
+                .query_row(
+                    "SELECT desired_title, desired_folder, prev_folder FROM subscription_outbox
                   WHERE id = ?1 AND account_generation = ?2 AND action = 'subscribe'
                     AND status = 'pending'",
-                rusqlite::params![item.id, session.generation],
-                |r| {
-                    Ok((
-                        r.get::<_, Option<String>>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-        {
-            Ok(Some(fresh)) => fresh,
-            Ok(None) => {
-                log::warn!(
+                    rusqlite::params![item.id, generation],
+                    |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+            {
+                Ok(Some(fresh)) => Ok(fresh),
+                Ok(None) => {
+                    log::warn!(
                     "sync: 订阅 {} 行已被替换/删除/动作改变，本轮不发送、不确认（由新意图接管）",
                     item.feed_url
                 );
-                return OutboxOutcome::Skipped;
+                    Err(OutboxOutcome::Skipped)
+                }
+                Err(e) => Err(OutboxOutcome::Retry(format!(
+                    "重读订阅行 {} 失败: {e}",
+                    item.feed_url
+                ))),
             }
-            Err(e) => {
-                return OutboxOutcome::Retry(format!("重读订阅行 {} 失败: {e}", item.feed_url))
-            }
-        }
+        })())
+    })
+    .await;
+    let (fresh_title, fresh_folder, fresh_prev) = match bound {
+        Ok(Ok(fresh)) => fresh,
+        Ok(Err(outcome)) => return outcome,
+        Err(error) => return OutboxOutcome::Retry(format!("订阅绑定数据库工作失败: {error}")),
     };
 
     // 阶段三：目标标题/分类补挂（绑定完成后的最后一步；失败则保留队项，
@@ -1045,46 +1182,56 @@ async fn exec_unsubscribe_recovery(
     // account_key+generation 严格限定作用域）。列表成功但无同 URL id 时不持久化。
     if item.resolved_remote_id.is_none() {
         if let Some(&first) = targets.first() {
-            let stored = {
-                let conn = db.lock().await;
-                if session.ensure_current(&conn).is_err() {
-                    log::warn!(
-                        "sync: 退订 {} 解析响应返回时账号代际已变更，丢弃本轮（不写库不发送）",
-                        item.feed_url
-                    );
-                    return OutboxOutcome::Skipped;
-                }
-                match db::advance_unsubscribe_resolution(&conn, item.id, session.generation, first)
-                {
-                    Ok(true) => true,
-                    Ok(false) => {
-                        // 行已被替换/删除（新意图接管）：把已验证 id 结转替代行，
-                        // 避免远端孤儿；旧解析结果绝不推进不属于它的行。
-                        match db::adopt_remote_id_for_pending(
-                            &conn,
-                            &item.account_key,
-                            session.generation,
-                            &item.feed_url,
-                            first,
-                        ) {
-                            Ok(true) => log::info!(
-                                "sync: 退订 {} 行已被替换，远端已解析 id {first} 已结转替代行",
-                                item.feed_url
-                            ),
-                            Ok(false) => log::warn!(
-                                "sync: 退订 {} 行已被替换且无替代行可结转远端 id {first}",
-                                item.feed_url
-                            ),
-                            Err(e) => log::warn!("sync: 退订解析目标结转替代行失败: {e}"),
-                        }
-                        false
+            let generation = session.generation;
+            let resolved_item = item.clone();
+            let stored = crate::state::database_work(db.clone(), move |conn| {
+                let _writer = db::writer_guard(conn)?;
+                Ok((|| {
+                    let item = &resolved_item;
+                    if SyncSession::ensure_generation(conn, generation).is_err() {
+                        log::warn!(
+                            "sync: 退订 {} 解析响应返回时账号代际已变更，丢弃本轮（不写库不发送）",
+                            item.feed_url
+                        );
+                        return Err(OutboxOutcome::Skipped);
                     }
-                    Err(e) => {
-                        return OutboxOutcome::Retry(format!(
+                    match db::advance_unsubscribe_resolution(conn, item.id, generation, first) {
+                        Ok(true) => Ok(true),
+                        Ok(false) => {
+                            // 行已被替换/删除（新意图接管）：把已验证 id 结转替代行，
+                            // 避免远端孤儿；旧解析结果绝不推进不属于它的行。
+                            match db::adopt_remote_id_for_pending(
+                                conn,
+                                &item.account_key,
+                                generation,
+                                &item.feed_url,
+                                first,
+                            ) {
+                                Ok(true) => log::info!(
+                                    "sync: 退订 {} 行已被替换，远端已解析 id {first} 已结转替代行",
+                                    item.feed_url
+                                ),
+                                Ok(false) => log::warn!(
+                                    "sync: 退订 {} 行已被替换且无替代行可结转远端 id {first}",
+                                    item.feed_url
+                                ),
+                                Err(e) => log::warn!("sync: 退订解析目标结转替代行失败: {e}"),
+                            }
+                            Ok(false)
+                        }
+                        Err(e) => Err(OutboxOutcome::Retry(format!(
                             "退订 {} 解析目标落库失败（保留队项，不发送半套退订）: {e}",
                             item.feed_url
-                        ))
+                        ))),
                     }
+                })())
+            })
+            .await;
+            let stored = match stored {
+                Ok(Ok(stored)) => stored,
+                Ok(Err(outcome)) => return outcome,
+                Err(error) => {
+                    return OutboxOutcome::Retry(format!("退订解析数据库工作失败: {error}"))
                 }
             };
             if !stored {
@@ -1210,10 +1357,10 @@ pub(super) async fn record_outbox_session_block(
 ) {
     let summary = outbox_block_summary(err, session_endpoint, session_username);
     log::warn!("sync: 订阅写回被阻塞（会话构建失败）: {summary}");
-    let marked = {
-        let conn = db.lock().await;
-        match super::current_account(&conn) {
-            Ok(Some(ctx)) => db::mark_outbox_session_blocked(&conn, &ctx.key, &summary),
+    let marked = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        match super::current_account(conn) {
+            Ok(Some(ctx)) => db::mark_outbox_session_blocked(conn, &ctx.key, &summary),
             // 未配置：无账号身份可归属（B3 口径：未连接统计为空），不标记
             Ok(None) => Ok(0),
             Err(e) => {
@@ -1221,7 +1368,8 @@ pub(super) async fn record_outbox_session_block(
                 Err(e)
             }
         }
-    };
+    })
+    .await;
     match marked {
         Ok(n) if n > 0 => notify_subscription_outbox_changed(db).await,
         Ok(_) => {}
@@ -1263,16 +1411,21 @@ async fn mark_subscription_import_incomplete(
     session: &SyncSession,
     account_key: &str,
     report: &mut SyncReport,
-) {
-    let conn = db.lock().await;
-    if session.ensure_current(&conn).is_err() {
-        return;
+) -> AppResult<()> {
+    let generation = session.generation;
+    let account_key = account_key.to_owned();
+    let marked = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(db::mark_binding_incomplete(conn, &account_key))
+    })
+    .await?;
+    if let Err(error) = marked {
+        record_pull_apply_failure(error, report, |error| {
+            format!("写入订阅绑定不完整 marker 失败: {error}")
+        })?;
     }
-    if let Err(e) = db::mark_binding_incomplete(&conn, account_key) {
-        report
-            .errors
-            .push(format!("写入订阅绑定不完整 marker 失败: {e}"));
-    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1284,7 +1437,7 @@ fn insert_remote_feed_bound(
     folder_id: i64,
     remote_id: i64,
 ) -> AppResult<Option<(i64, String, i64)>> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     // insert_feed_origin can reactivate a retained row. Establish creation from
     // the actual pre-insert row, not from lifecycle_version==0 alone.
     let existed: bool = tx.query_row(
@@ -1359,6 +1512,26 @@ mod discovery_receipt_tests {
             "a failed binding transaction cannot expose a new-source receipt or row"
         );
     }
+
+    #[tokio::test]
+    async fn pull_worker_stale_restores_report_before_terminating() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let database = Arc::new(Mutex::new(conn));
+        let mut report = SyncReport {
+            pulled_feeds: 7,
+            ..Default::default()
+        };
+        let result =
+            subscription_database_work(&database, &mut report, |_, report| -> AppResult<()> {
+                report.pulled_feeds += 1;
+                Err(SyncSession::stale_error())
+            })
+            .await;
+        assert_eq!(result.unwrap().unwrap_err().code, "staleSession");
+        assert_eq!(report.pulled_feeds, 8);
+        assert!(report.errors.is_empty());
+    }
 }
 
 fn prune_historical_unbound_remote_orphans(
@@ -1397,29 +1570,31 @@ pub(super) async fn pull_feeds(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     report: &mut SyncReport,
-) {
+) -> AppResult<()> {
+    let generation = session.generation;
     // OPT-006：发起拉取前先复核代际——账号已切换时不向新服务端发旧请求。
     if !session_is_current(db, session).await {
-        report
-            .errors
-            .push("同步会话已失效（账号配置已变更），跳过订阅拉取".into());
-        return;
+        return Err(SyncSession::stale_error());
     }
     let account_key = {
-        let conn = db.lock().await;
-        match super::current_account(&conn) {
+        match crate::state::database_work(db.clone(), move |conn| {
+            SyncSession::ensure_generation(conn, generation)?;
+            Ok(super::current_account(conn))
+        })
+        .await?
+        {
             Ok(Some(ctx)) => ctx.key,
             Ok(None) => {
                 report
                     .errors
                     .push("订阅拉取：当前无同步账号身份，本轮跳过（fail-closed）".into());
-                return;
+                return Ok(());
             }
             Err(e) => {
-                report.errors.push(format!(
-                    "订阅拉取：读取同步账号身份失败，本轮跳过（fail-closed）: {e}"
-                ));
-                return;
+                record_pull_apply_failure(e, report, |e| {
+                    format!("订阅拉取：读取同步账号身份失败，本轮跳过（fail-closed）: {e}")
+                })?;
+                return Ok(());
             }
         }
     };
@@ -1430,8 +1605,8 @@ pub(super) async fn pull_feeds(
             (Ok(t), Ok(s)) => (t, s),
             (Err(e), _) | (_, Err(e)) => {
                 report.push_client_error(&e, format!("拉取订阅失败: {e}"));
-                mark_subscription_import_incomplete(db, session, &account_key, report).await;
-                return;
+                mark_subscription_import_incomplete(db, session, &account_key, report).await?;
+                return Ok(());
             }
         };
 
@@ -1442,16 +1617,13 @@ pub(super) async fn pull_feeds(
     // Google Reader 分类没有数字 id，用 label 名做键（与 Miniflux 的 category id 不同）。
     // 本地 folder 的 remote_id 存「分类在远端无数字 id」，此处用 label 名作为稳定键——
     // 简单起见：按 label 名 upsert 本地 folder，不维护 remote_id（分类碰撞用名字）。
-    {
-        let conn = db.lock().await;
+    let folder_key = account_key.clone();
+    let imported =
+        subscription_database_work(db, report, move |conn, report| -> AppResult<Option<bool>> {
+        let account_key = folder_key;
+        let writer = db::writer_guard(conn)?;
         // OPT-006：建分类是回写边界——响应在途期间账号被切换则整段丢弃。
-        if let Err(e) = session.ensure_current(&conn) {
-            log::warn!("sync: 分类导入前账号代际已变更，丢弃本轮响应: {e}");
-            report
-                .errors
-                .push("同步会话已失效（账号配置已在其他窗口变更），本轮订阅响应已丢弃".into());
-            return;
-        }
+        SyncSession::ensure_generation(conn, generation)?;
         // 分类规范化收口在 greader::category_name（OPT-004）：
         // Miniflux folder tag 带 label；FreshRSS folder tag 只有 {id,type:folder}
         // （从 user/.../label/ 后缀取名）；state tag（含 org.freshrss/main）一律不成目录。
@@ -1466,25 +1638,28 @@ pub(super) async fn pull_feeds(
         // 空集合继续（空集合会把已改名/删除的分类按远端旧 label 复活，并静默丢弃
         // 当前账号的墓碑），记同步错误并跳过本轮分类与订阅导入（订阅导入依赖
         // label → folder 映射，映射不可信时不写任何依赖它的本地状态）。
-        let active = match active_folder_tombstones(&conn, &account_key, &remote_labels) {
+        let active = match active_folder_tombstones(conn, &account_key, &remote_labels) {
             Ok(v) => v,
             Err(e) => {
                 report.errors.push(format!(
                     "分类墓碑读取/回收失败，本轮跳过分类与订阅导入（fail-closed，保留原值待重试）: {e}"
                 ));
-                if let Err(mark_err) = db::mark_binding_incomplete(&conn, &account_key) {
+                if let Err(mark_err) = db::mark_binding_incomplete(conn, &account_key) {
                     report.errors.push(format!(
                         "分类墓碑失败后写入绑定不完整 marker 失败: {mark_err}"
                     ));
                 }
-                return;
+                return Ok(None);
             }
         };
+        drop(writer);
         for label in &remote_labels {
+            let _writer = db::writer_guard(conn)?;
+            SyncSession::ensure_generation(conn, generation)?;
             if active.iter().any(|t| t == label) {
                 continue; // 本地已改名/删除：不按远端旧 label 复活目录
             }
-            let existing = match db::find_folder_by_name(&conn, label) {
+            let existing = match db::find_folder_by_name(conn, label) {
                 Ok(v) => v,
                 Err(e) => {
                     import_incomplete = true;
@@ -1498,7 +1673,7 @@ pub(super) async fn pull_feeds(
                 // TASK-056 修复轮 1（审查 FINDING 3）：此前是 `let _ = create_folder(...)`。
                 // 静默失败会让后续 find_folder_by_name 落空 → 该分类下的订阅被改挂「未分类」，
                 // **用户的目录结构无声丢失**——与本任务修复的外键缺陷同族。
-                if let Err(e) = db::create_folder(&conn, label, "article") {
+                if let Err(e) = db::create_remote_folder(conn, label, "article") {
                     import_incomplete = true;
                     report
                         .errors
@@ -1506,127 +1681,152 @@ pub(super) async fn pull_feeds(
                 }
             }
         }
+        Ok(Some(import_incomplete))
+    })
+    .await??;
+    match imported {
+        Some(incomplete) => import_incomplete = incomplete,
+        None => return Ok(()),
     }
 
     // 锁内：订阅按 URL 碰撞合并
-    {
-        let mut conn = db.lock().await;
-        // OPT-006：绑定/建源也是回写边界——代际失配整段丢弃（不建源、不绑定）。
-        if let Err(e) = session.ensure_current(&conn) {
-            log::warn!("sync: 订阅导入前账号代际已变更，丢弃本轮响应: {e}");
-            report
-                .errors
-                .push("同步会话已失效（账号配置已在其他窗口变更），本轮订阅响应已丢弃".into());
-            return;
-        }
-        // A-1 + OPT-008A R1/R2：本地已删除（墓碑）的订阅不复活；远端列表已不含的
-        // 墓碑可清除。匹配/收敛必须跨算法版本兼容（旧算法键在 legacy 命名空间，
-        // 见 db::feeds 墓碑段），不能在 subscriptions 里重算或混用算法。
-        // R2：墓碑读取/清理任何错误 = 状态未知——本轮停止订阅导入并记入 report，
-        // setting 原值保留（修复后下一轮自然重试）；绝不能把「未知」当「空表」
-        // 放行导入（会复活用户已删除的订阅）。
-        let remote_urls: Vec<String> = remote_subs.iter().map(|rf| rf.url.clone()).collect();
-        let tombstones_known = match (|| -> AppResult<()> {
-            let mut tombstone_urls = remote_urls.clone();
-            let remote_ids: std::collections::HashSet<i64> = remote_subs
-                .iter()
-                .filter_map(|rf| greader::parse_feed_numeric_id(&rf.id))
-                .collect();
-            // A stable remote ID still present under a changed URL has not confirmed deletion.
-            // Keep the old local URL tombstone until that identity is actually absent.
-            let mut stmt = conn.prepare(
-                "SELECT remote_id,feed_url FROM feeds WHERE active=0 AND remote_id IS NOT NULL",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-            for row in rows {
-                let (remote_id, url) = row?;
-                if remote_ids.contains(&remote_id) {
-                    tombstone_urls.push(url);
+    let imported = subscription_database_work(
+        db,
+        report,
+        move |conn, report| -> AppResult<Option<(bool, bool, Vec<greader::Subscription>)>> {
+            let writer = db::writer_guard(conn)?;
+            // OPT-006：绑定/建源也是回写边界——代际失配整段丢弃（不建源、不绑定）。
+            SyncSession::ensure_generation(conn, generation)?;
+            // A-1 + OPT-008A R1/R2：本地已删除（墓碑）的订阅不复活；远端列表已不含的
+            // 墓碑可清除。匹配/收敛必须跨算法版本兼容（旧算法键在 legacy 命名空间，
+            // 见 db::feeds 墓碑段），不能在 subscriptions 里重算或混用算法。
+            // R2：墓碑读取/清理任何错误 = 状态未知——本轮停止订阅导入并记入 report，
+            // setting 原值保留（修复后下一轮自然重试）；绝不能把「未知」当「空表」
+            // 放行导入（会复活用户已删除的订阅）。
+            let remote_urls: Vec<String> = remote_subs.iter().map(|rf| rf.url.clone()).collect();
+            let tombstones_known = match (|| -> AppResult<()> {
+                let mut tombstone_urls = remote_urls.clone();
+                let remote_ids: std::collections::HashSet<i64> = remote_subs
+                    .iter()
+                    .filter_map(|rf| greader::parse_feed_numeric_id(&rf.id))
+                    .collect();
+                // A stable remote ID still present under a changed URL has not confirmed deletion.
+                // Keep the old local URL tombstone until that identity is actually absent.
+                let mut stmt = conn.prepare(
+                    "SELECT remote_id,feed_url FROM feeds WHERE active=0 AND remote_id IS NOT NULL",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+                for row in rows {
+                    let (remote_id, url) = row?;
+                    if remote_ids.contains(&remote_id) {
+                        tombstone_urls.push(url);
+                    }
                 }
-            }
-            db::prune_feed_tombstones(&conn, &tombstone_urls)
-        })() {
-            Ok(()) => true,
-            Err(e) => {
-                report.errors.push(format!(
-                    "订阅墓碑读取/清理失败，本轮停止订阅导入（保留原值待重试）: {e}"
-                ));
-                false
-            }
-        };
-        if !tombstones_known {
-            import_incomplete = true;
-            subscriptions_exhausted = false;
-        }
-        for rf in &remote_subs {
-            if import_incomplete || !tombstones_known {
-                subscriptions_exhausted = false;
-                break; // 状态未知/已有失败：停止后续订阅写入
-            }
-            match db::feed_url_tombstoned(&conn, &rf.url) {
-                // known tombstone 是用户本机主动删除的预期 continue，不计 incomplete。
-                Ok(true) => continue,
-                Ok(false) => {}
+                db::prune_feed_tombstones(conn, &tombstone_urls)
+            })() {
+                Ok(()) => true,
                 Err(e) => {
-                    import_incomplete = true;
-                    subscriptions_exhausted = false;
                     report.errors.push(format!(
-                        "订阅墓碑读取失败，本轮停止订阅导入（保留原值待重试）: {e}"
+                        "订阅墓碑读取/清理失败，本轮停止订阅导入（保留原值待重试）: {e}"
                     ));
-                    break;
+                    false
                 }
-            }
-            let Some(remote_feed_id) = greader::parse_feed_numeric_id(&rf.id) else {
-                import_incomplete = true;
-                report.errors.push(format!(
-                    "远端订阅 {} 缺少可绑定的数字 feed id（保留原值待重试）",
-                    rf.url
-                ));
-                continue;
             };
-            // 稳定远端 ID 优先；弱 URL 仅兜底未绑定源。元数据与绑定同事务，
-            // 唯一 URL 冲突不能改绑或删旧建新。
-            let local_feed = match db::match_remote_feed(
-                &conn,
-                remote_feed_id,
-                &rf.url,
-                &rf.title,
-                rf.html_url.as_deref(),
-            ) {
-                Ok(v) => v,
-                Err(e) => {
+            if !tombstones_known {
+                import_incomplete = true;
+                subscriptions_exhausted = false;
+            }
+            drop(writer);
+            for rf in &remote_subs {
+                let _writer = db::writer_guard(conn)?;
+                SyncSession::ensure_generation(conn, generation)?;
+                if import_incomplete || !tombstones_known {
+                    subscriptions_exhausted = false;
+                    break; // 状态未知/已有失败：停止后续订阅写入
+                }
+                match db::feed_url_tombstoned(conn, &rf.url) {
+                    // known tombstone 是用户本机主动删除的预期 continue，不计 incomplete。
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        import_incomplete = true;
+                        subscriptions_exhausted = false;
+                        report.errors.push(format!(
+                            "订阅墓碑读取失败，本轮停止订阅导入（保留原值待重试）: {e}"
+                        ));
+                        break;
+                    }
+                }
+                let Some(remote_feed_id) = greader::parse_feed_numeric_id(&rf.id) else {
                     import_incomplete = true;
                     report.errors.push(format!(
-                        "订阅 {} 身份匹配/绑定更新失败（保留原值待重试）: {e}",
+                        "远端订阅 {} 缺少可绑定的数字 feed id（保留原值待重试）",
                         rf.url
                     ));
                     continue;
-                }
-            };
-            // 分类归属：subscription 的第一个分类 category。
-            // FreshRSS 的 category 形如 {id:"user/-/label/名", label:"名"}——**没有 type**，
-            // 靠 id 的 label 前缀识别；Miniflux 仍是 type:folder。规则同 tag/list 收口在
-            // greader::category_name。
-            let remote_folder_label = rf.categories.iter().find_map(|c| {
-                greader::category_name(&c.id, c.label.as_deref(), c.r#type.as_deref())
-            });
-            match local_feed {
-                Some((_lid, changed)) => {
-                    report.feeds_data_changed |= changed;
-                }
-                None => {
-                    // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
-                    //
-                    // 目录兜底（TASK-056）：远端无分类（或 label 在本地找不到）时必须挂到一个
-                    // **真实存在**的 folder。此前是 `get_first_folder_id().unwrap_or(1)`，
-                    // 而新装应用 folders 表为空 → 硬编码的 1 指向不存在目录 →
-                    // `feeds.folder_id REFERENCES folders(id)` 外键违约（连接开启了
-                    // `PRAGMA foreign_keys=ON`）→ 插入失败。改用既有
-                    // `ensure_uncategorized_folder`（不存在则创建「未分类」），保证外键成立。
-                    let folder_id: i64 = match remote_folder_label.as_deref() {
-                        Some(label) => match db::find_folder_by_name(&conn, label) {
-                            Ok(Some(fid)) => fid,
-                            Ok(None) => match db::ensure_uncategorized_folder(&conn) {
+                };
+                // 稳定远端 ID 优先；弱 URL 仅兜底未绑定源。元数据与绑定同事务，
+                // 唯一 URL 冲突不能改绑或删旧建新。
+                let local_feed = match db::match_remote_feed(
+                    conn,
+                    remote_feed_id,
+                    &rf.url,
+                    &rf.title,
+                    rf.html_url.as_deref(),
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        import_incomplete = true;
+                        report.errors.push(format!(
+                            "订阅 {} 身份匹配/绑定更新失败（保留原值待重试）: {e}",
+                            rf.url
+                        ));
+                        continue;
+                    }
+                };
+                // 分类归属：subscription 的第一个分类 category。
+                // FreshRSS 的 category 形如 {id:"user/-/label/名", label:"名"}——**没有 type**，
+                // 靠 id 的 label 前缀识别；Miniflux 仍是 type:folder。规则同 tag/list 收口在
+                // greader::category_name。
+                let remote_folder_label = rf.categories.iter().find_map(|c| {
+                    greader::category_name(&c.id, c.label.as_deref(), c.r#type.as_deref())
+                });
+                match local_feed {
+                    Some((_lid, changed)) => {
+                        report.feeds_data_changed |= changed;
+                    }
+                    None => {
+                        // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
+                        //
+                        // 目录兜底（TASK-056）：远端无分类（或 label 在本地找不到）时必须挂到一个
+                        // **真实存在**的 folder。此前是 `get_first_folder_id().unwrap_or(1)`，
+                        // 而新装应用 folders 表为空 → 硬编码的 1 指向不存在目录 →
+                        // `feeds.folder_id REFERENCES folders(id)` 外键违约（连接开启了
+                        // `PRAGMA foreign_keys=ON`）→ 插入失败。改用既有
+                        // `ensure_uncategorized_folder`（不存在则创建「未分类」），保证外键成立。
+                        let folder_id: i64 = match remote_folder_label.as_deref() {
+                            Some(label) => match db::find_folder_by_name(conn, label) {
+                                Ok(Some(fid)) => fid,
+                                Ok(None) => match db::ensure_remote_uncategorized_folder(conn) {
+                                    Ok(fid) => fid,
+                                    Err(e) => {
+                                        import_incomplete = true;
+                                        report
+                                            .errors
+                                            .push(format!("订阅 {} 建目录失败: {e}", rf.url));
+                                        continue;
+                                    }
+                                },
+                                Err(e) => {
+                                    import_incomplete = true;
+                                    report
+                                        .errors
+                                        .push(format!("订阅 {} 本地目录读取失败: {e}", rf.url));
+                                    continue;
+                                }
+                            },
+                            None => match db::ensure_remote_uncategorized_folder(conn) {
                                 Ok(fid) => fid,
                                 Err(e) => {
                                     import_incomplete = true;
@@ -1636,65 +1836,64 @@ pub(super) async fn pull_feeds(
                                     continue;
                                 }
                             },
+                        };
+                        let inserted = insert_remote_feed_bound(
+                            conn,
+                            &rf.url,
+                            rf.html_url.as_deref(),
+                            &rf.title,
+                            folder_id,
+                            remote_feed_id,
+                        );
+                        // TASK-056：失败必须可见。此前是无 else 的 `if let Ok(fid)`，
+                        // 错误被静默吞掉、report.errors 保持为空，前端仍提示「已拉取订阅源」
+                        // 「后端同步完成」——用户看到成功、实际零订阅。
+                        match inserted {
+                            Ok(created) => {
+                                report.pulled_feeds += 1;
+                                if let Some((id, source_id, lifecycle)) = created {
+                                    report
+                                        .discovered_sources
+                                        .entry(id)
+                                        .or_insert((source_id, lifecycle));
+                                }
+                            }
                             Err(e) => {
                                 import_incomplete = true;
-                                report
-                                    .errors
-                                    .push(format!("订阅 {} 本地目录读取失败: {e}", rf.url));
-                                continue;
+                                report.errors.push(format!(
+                                    "拉取订阅 {} 建本地并绑定失败（事务已回滚）: {e}",
+                                    rf.url
+                                ));
                             }
-                        },
-                        None => match db::ensure_uncategorized_folder(&conn) {
-                            Ok(fid) => fid,
-                            Err(e) => {
-                                import_incomplete = true;
-                                report
-                                    .errors
-                                    .push(format!("订阅 {} 建目录失败: {e}", rf.url));
-                                continue;
-                            }
-                        },
-                    };
-                    let inserted = insert_remote_feed_bound(
-                        &mut conn,
-                        &rf.url,
-                        rf.html_url.as_deref(),
-                        &rf.title,
-                        folder_id,
-                        remote_feed_id,
-                    );
-                    // TASK-056：失败必须可见。此前是无 else 的 `if let Ok(fid)`，
-                    // 错误被静默吞掉、report.errors 保持为空，前端仍提示「已拉取订阅源」
-                    // 「后端同步完成」——用户看到成功、实际零订阅。
-                    match inserted {
-                        Ok(created) => {
-                            report.pulled_feeds += 1;
-                            if let Some((id, source_id, lifecycle)) = created {
-                                report
-                                    .discovered_sources
-                                    .entry(id)
-                                    .or_insert((source_id, lifecycle));
-                            }
-                        }
-                        Err(e) => {
-                            import_incomplete = true;
-                            report.errors.push(format!(
-                                "拉取订阅 {} 建本地并绑定失败（事务已回滚）: {e}",
-                                rf.url
-                            ));
                         }
                     }
                 }
             }
+            let _writer = db::writer_guard(conn)?;
+            SyncSession::ensure_generation(conn, generation)?;
+            if !prune_historical_unbound_remote_orphans(conn, &remote_urls, report) {
+                import_incomplete = true;
+            }
+            Ok(Some((
+                import_incomplete,
+                subscriptions_exhausted,
+                remote_subs,
+            )))
+        },
+    )
+    .await??;
+    let remote_subs = match imported {
+        Some((incomplete, exhausted, subscriptions)) => {
+            import_incomplete = incomplete;
+            subscriptions_exhausted = exhausted;
+            subscriptions
         }
-        if !prune_historical_unbound_remote_orphans(&conn, &remote_urls, report) {
-            import_incomplete = true;
-        }
-    }
+        None => return Ok(()),
+    };
 
     if import_incomplete || !subscriptions_exhausted {
-        mark_subscription_import_incomplete(db, session, &account_key, report).await;
-        return;
+        mark_subscription_import_incomplete(db, session, &account_key, report).await?;
+        return Ok(());
     }
 
     // ============================================================
@@ -1716,14 +1915,14 @@ pub(super) async fn pull_feeds(
     //    不参与本账号快照），读取失败 fail-closed 跳过本轮删除
     //    （见 [`pending_protected_feed_ids`]，B1-R3 复审 P2-3 / P3-4）。
     // ============================================================
-    {
-        let conn = db.lock().await;
+    let delete_key = account_key.clone();
+    let deleted =
+        subscription_database_work(db, report, move |conn, report| -> AppResult<Option<bool>> {
+        let account_key = delete_key;
+        let writer = db::writer_guard(conn)?;
         // OPT-006：远端退订对账的本地删除是回写边界——代际失配时整段跳过
         //（换号后新账号的订阅列表与本轮旧响应无对应关系，绝不能删）。
-        if let Err(e) = session.ensure_current(&conn) {
-            log::warn!("sync: 退订对账前账号代际已变更，跳过删除段: {e}");
-            return;
-        }
+        SyncSession::ensure_generation(conn, generation)?;
         let remote_id_set: std::collections::HashSet<i64> = remote_subs
             .iter()
             .filter_map(|rf| greader::parse_feed_numeric_id(&rf.id))
@@ -1763,54 +1962,67 @@ pub(super) async fn pull_feeds(
         // - 订阅写回 outbox 只计**当前同步账号**的 pending 意图：异账号的暂停行
         //   不得保护本账号快照（否则换号后本账号的远端删除对账永久失效）。
         // Note: 保护集合的账号限定与 fail-closed — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
-        let account_key = match super::current_account(&conn) {
+        let account_key = match super::current_account(conn) {
             Ok(Some(ctx)) => ctx.key,
             Ok(None) => {
                 report
                     .errors
                     .push("远端退订对账：当前无同步账号身份，本轮跳过删除（fail-closed）".into());
-                if let Err(mark_err) = db::mark_binding_incomplete(&conn, &account_key) {
+                if let Err(mark_err) = db::mark_binding_incomplete(conn, &account_key) {
                     report
                         .errors
                         .push(format!("写入绑定不完整 marker 失败: {mark_err}"));
                 }
-                return;
+                return Ok(None);
             }
             Err(e) => {
                 report.errors.push(format!(
                     "远端退订对账：读取同步账号身份失败，本轮跳过删除（fail-closed）: {e}"
                 ));
-                if let Err(mark_err) = db::mark_binding_incomplete(&conn, &account_key) {
+                if let Err(mark_err) = db::mark_binding_incomplete(conn, &account_key) {
                     report
                         .errors
                         .push(format!("写入绑定不完整 marker 失败: {mark_err}"));
                 }
-                return;
+                return Ok(None);
             }
         };
-        let pending_feed_ids = match pending_protected_feed_ids(&conn, &account_key) {
+        let pending_feed_ids = match pending_protected_feed_ids(conn, &account_key) {
             Ok(v) => v,
             Err(e) => {
                 report.errors.push(format!(
                     "远端退订对账：读取本地未推送保护集合失败，本轮跳过删除（fail-closed）: {e}"
                 ));
-                let marker = db::mark_binding_incomplete(&conn, &account_key);
+                let marker = db::mark_binding_incomplete(conn, &account_key);
                 if let Err(mark_err) = marker {
                     report
                         .errors
                         .push(format!("写入绑定不完整 marker 失败: {mark_err}"));
                 }
-                return;
+                return Ok(None);
             }
         };
+        drop(writer);
         for (feed_id, feed_url, remote_id) in candidates {
+            let _writer = db::writer_guard(conn)?;
+            SyncSession::ensure_generation(conn, generation)?;
             if remote_id_set.contains(&remote_id) {
                 continue; // 远端仍订阅：保留
             }
-            if pending_feed_ids.contains(&feed_id) {
+            let now_protected = match pending_protected_feed_ids(conn, &account_key) {
+                Ok(ids) => ids.contains(&feed_id),
+                Err(error) => {
+                    import_incomplete = true;
+                    report.errors.push(format!(
+                        "远端已退订、读取本地源 {feed_url} 的未推送保护失败，本轮保留该源: {error}"
+                    ));
+                    continue;
+                }
+            };
+            if pending_feed_ids.contains(&feed_id) || now_protected {
                 continue; // ④ 本地变更未推送（含 article 级）：不删，等回传后再收敛
             }
-            match db::delete_feed(&conn, feed_id) {
+            match db::delete_feed(conn, feed_id) {
                 Ok(()) => {
                     report.removed_feeds += 1;
                     log::info!(
@@ -1825,29 +2037,37 @@ pub(super) async fn pull_feeds(
                 }
             }
         }
+        Ok(Some(import_incomplete))
+    })
+    .await??;
+    match deleted {
+        Some(incomplete) => import_incomplete = incomplete,
+        None => return Ok(()),
     }
 
-    let conn = db.lock().await;
-    if let Err(e) = session.ensure_current(&conn) {
-        log::warn!("sync: 写入绑定完整性标记前账号已变更，丢弃本轮结果: {e}");
-        return;
-    }
-    let should_mark = import_incomplete || !subscriptions_exhausted;
-    let marker = if should_mark {
-        db::mark_binding_incomplete(&conn, &account_key)
-    } else {
-        db::clear_binding_incomplete(&conn, &account_key)
-    };
-    if let Err(e) = marker {
-        report.errors.push(format!(
-            "写入账号绑定完整性标记失败（{}）: {e}",
-            if should_mark {
-                "incomplete"
-            } else {
-                "complete"
-            }
-        ));
-    }
+    subscription_database_work(db, report, move |conn, report| -> AppResult<()> {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
+        let should_mark = import_incomplete || !subscriptions_exhausted;
+        let marker = if should_mark {
+            db::mark_binding_incomplete(conn, &account_key)
+        } else {
+            db::clear_binding_incomplete(conn, &account_key)
+        };
+        if let Err(e) = marker {
+            report.errors.push(format!(
+                "写入账号绑定完整性标记失败（{}）: {e}",
+                if should_mark {
+                    "incomplete"
+                } else {
+                    "complete"
+                }
+            ));
+        }
+        Ok(())
+    })
+    .await??;
+    Ok(())
 }
 
 /// 分类墓碑的「回收 + 读取」单点（fail-closed，B2-4）：先按当前账号回收远端

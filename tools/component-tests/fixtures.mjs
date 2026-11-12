@@ -77,6 +77,7 @@ export function rowsForLayout(rows, layout) {
    ------------------------------------------------------------------ */
 export const invokeCalls = [];
 let plan = {};
+let persistedSettings = {};
 let installed = null;
 
 export function clearInvokeCalls() { invokeCalls.length = 0; }
@@ -84,7 +85,7 @@ export function clearInvokeCalls() { invokeCalls.length = 0; }
 /** 覆写命令行为；未覆写的命令回落默认实现。 */
 export function setPlan(next) { plan = { ...plan, ...next }; }
 
-export function resetPlan() { plan = {}; }
+export function resetPlan() { plan = {}; persistedSettings = {}; }
 
 export function syncRunFixture(phase = () => Promise.resolve({ errors: [] })) {
   return async () => ({
@@ -143,7 +144,9 @@ function defaultHandler(cmd, args) {
     }
     case 'set_read': case 'set_starred': case 'set_setting': case 'resolve_close': return Promise.resolve(null);
     case 'set_read_bulk': return Promise.resolve(null);
-    case 'get_setting': return Promise.resolve(null);
+    case 'get_setting': return Promise.resolve(args?.key === 'app_settings' ? JSON.stringify(persistedSettings) : null);
+    case 'patch_app_settings': persistedSettings = { ...persistedSettings, ...args.patch }; return Promise.resolve(JSON.stringify(persistedSettings));
+    case 'local_sync_status': return Promise.resolve({ connected: false, endpoint: null, username: null, mode: 'scheduled', interval_minutes: 15, generation: 0, library_id: 'fixture', pending_operations: 0, pending_bodies: 0, pending_publications: 0, last_state_sync: 0, last_body_sync: 0, next_retry_at: 0, last_error: null });
     case 'sync_status': return Promise.resolve({ connected: false, endpoint: null, account: null, last_sync: 0 });
     case 'sync_queue_stats': return Promise.resolve({
       account_generation: 0,
@@ -154,17 +157,6 @@ function defaultHandler(cmd, args) {
     /* OPT-009 B3：订阅写回只读 IPC 的缺省（未连接/无待办——与真实后端未连接
        态同形；用例需要时经 setPlan 覆写）。 */
     case 'subscription_outbox_stats': return Promise.resolve({ pending: 0, failed: 0, local_only: 0, last_error: null });
-    /* OPT-010：配置预览（只读）缺省——无变更的合并预览；用例需要结构化清单时
-       经 setPlan 覆写。 */
-    case 'config_sync_plan': return Promise.resolve({
-      mode: args?.mode ?? 'merge',
-      snapshotHash: 'default-hash',
-      currentVersion: 'default-version',
-      affectedArticleCount: 0,
-      additions: [], updates: [], removals: [],
-      settingsChangedKeys: [], settingsRemovedKeys: [],
-      pendingConnection: false, warnings: [],
-    });
     case 'subscription_capabilities': return Promise.resolve({
       connected: false,
       protocol: null,
@@ -178,8 +170,6 @@ function defaultHandler(cmd, args) {
       empty_folder_remote: { support: 'Unsupported', detail: '未连接同步：空分类只从本机删除或改名。' },
       limitations: [],
     });
-    case 'github_login_status': return Promise.resolve(null);
-    case 'github_login_cancel': return Promise.resolve({ cancelled: true });
     /* OPT-013 B1：缓存签名校验（前端命中判定的后端权威）。夹具缺省「命中」——
        行里携带的产物都生成于同一份夹具配置下；测「未标记版本/旧签名不短路」
        的用例经 setPlan 覆写为未命中。 */

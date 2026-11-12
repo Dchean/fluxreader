@@ -207,25 +207,4 @@ export async function run(ctx) {
   try { e2BoundOk = typeof internalsBeforeBind.appStore().getState === 'function'; } catch { e2BoundOk = false; }
   checkNew('(E2) store 创建之后（bind 之后）句柄正常可用，不误抛', e2BoundOk === true);
 
-  /* ---------- E1：bootstrapGithubAuth（唯一「slice 导出 + 晚绑定句柄」迁移点） ---------- */
-  await resetStore();
-  const { bootstrapGithubAuth } = await import('../../dist-test/store.js');
-  S.ghLoginStatus = { login: 'octocat' };
-  store.setState({ githubAccount: null });
-  await bootstrapGithubAuth();
-  checkNew('(E1) 后端有登录态 → 经晚绑定句柄写入 store.githubAccount（登录态启动即恢复）',
-    store.getState().githubAccount?.login === 'octocat'
-    && S.invokeCalls.some((c) => c.cmd === 'github_login_status'));
-  S.ghLoginStatus = null;
-  store.setState({ githubAccount: { login: 'keep' } });
-  await bootstrapGithubAuth();
-  checkNew('(E1) 后端未登录（null）→ 不误清空现有登录态',
-    store.getState().githubAccount?.login === 'keep');
-  S.ghLoginStatus = 'reject';
-  store.setState({ githubAccount: { login: 'keep' } });
-  let e1Threw = false;
-  try { await bootstrapGithubAuth(); } catch { e1Threw = true; }
-  checkNew('(E1) 后端不可用（IPC 失败）→ 静默忽略：不抛出、不污染状态',
-    e1Threw === false && store.getState().githubAccount?.login === 'keep');
-  S.ghLoginStatus = null;
 }

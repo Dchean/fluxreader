@@ -11,6 +11,7 @@ import type {
   SubscriptionActionCapability,
   SubscriptionCapabilities,
   SubscriptionOutboxStats,
+  LocalSyncStatus,
 } from './api';
 
 export interface SyncPillInput {
@@ -33,6 +34,10 @@ export interface SyncPillInput {
   lastError?: string | null;
   /** 注入时钟，供纯函数测试短窗口边界。 */
   now?: number;
+  /** 仅纯本地模式采用；undefined=旧调用方未传，null=状态尚未确认。 */
+  localSync?: LocalSyncStatus | null;
+  localSyncBusy?: 'connect' | 'disconnect' | 'run' | null;
+  localSyncError?: string | null;
 }
 
 export const SYNC_SUCCESS_LABEL_MS = 2_400;
@@ -62,6 +67,10 @@ function syncProtocolLabel(protocol: string | null | undefined): string | null {
 }
 
 export function syncPillView(s: SyncPillInput): SyncPillView {
+  if (!s.syncConnected && s.localSync !== undefined
+    && (s.localSync === null || s.localSync.connected || s.localSyncBusy || s.localSyncError)) {
+    return localSyncPillView(s.localSync, s.localSyncBusy ?? null, s.localSyncError ?? null);
+  }
   const now = s.now ?? Date.now();
   const subscription = s.subscription ?? null;
   const subscriptionUnknown = subscription == null;
@@ -148,6 +157,35 @@ export function syncPillView(s: SyncPillInput): SyncPillView {
     settingsAriaLabel: `打开同步设置。当前状态：${label}。${title}`,
     announcement: `${label}。${details}`,
   };
+}
+
+/** WebDAV的确认事实来自独立状态/正文通道，不借用RSS活动的成功绿灯。 */
+function localSyncPillView(status: LocalSyncStatus | null, activity: SyncPillInput['localSyncBusy'], error: string | null): SyncPillView {
+  const busy = activity != null;
+  const failure = error || status?.last_error;
+  const pending = status ? status.pending_operations + status.pending_bodies + status.pending_publications : 0;
+  const confirmed = status != null && status.last_state_sync > 0 && status.last_body_sync > 0;
+  const label = busy ? activity === 'connect' ? '连接中' : activity === 'disconnect' ? '断开中' : '状态同步中'
+    : failure ? '同步未完成' : status?.connected ? 'WebDAV' : status === null ? '同步状态未确认' : '本地模式';
+  const tone: SyncIndicatorTone = busy ? 'syncing' : failure ? 'error'
+    : !status || (status.connected && (!confirmed || pending > 0)) ? 'pending'
+      : status.connected && confirmed ? 'success' : 'local';
+  const time = (seconds: number) => seconds > 0 ? new Date(seconds * 1000).toLocaleString() : '尚未同步';
+  const details = status ? [
+    status.connected ? `WebDAV 已配置连接${status.username ? ` · ${status.username}` : ''}` : '本地模式 · WebDAV 未连接',
+    `状态确认：${time(status.last_state_sync)}`,
+    `正文确认：${time(status.last_body_sync)}`,
+    `待处理状态 ${status.pending_operations} 项`,
+    `待确认批次 ${status.pending_publications} 个`,
+    `本机待补正文 ${status.pending_bodies} 篇`,
+    status.next_retry_at > 0 ? `下次重试：${time(status.next_retry_at)}` : '',
+    failure ? `最近错误：${failure}` : '',
+  ].filter(Boolean).join('；') : `连接与同步状态尚未确认${failure ? `；${failure}` : ''}`;
+  const title = `${details}。点击圆点${status?.connected ? '同步 WebDAV' : '刷新或检查连接'}，点击文字打开同步设置。`;
+  return { label, tone, busy, details, title,
+    syncAriaLabel: busy ? `操作进行中，手动同步按钮暂不可用。${title}` : `手动同步。${title}`,
+    settingsAriaLabel: `打开同步设置。当前状态：${label}。${title}`,
+    announcement: `${label}。${details}` };
 }
 
 export function syncPillLabel(s: SyncPillInput): string {

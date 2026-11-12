@@ -1,3 +1,4 @@
+import { bindImageCapacityListener } from './lib/imageProxy';
 import { create } from 'zustand';
 import type { AppState } from './store/types';
 import { bindAppStore } from './store/internals';
@@ -9,6 +10,7 @@ import { createBootstrapSlice } from './store/slices/bootstrap';
 import { createPlayerSlice } from './store/slices/player';
 import { createUiSlice } from './store/slices/ui';
 import { createSyncSlice } from './store/slices/sync';
+import { createLocalLibrarySlice } from './store/slices/localLibrary';
 import { createFeedsSlice } from './store/slices/feeds';
 import { createSettingsSlice } from './store/slices/settings';
 import { bindExternalOpenFailureHandler } from './lib/external';
@@ -32,7 +34,8 @@ import { bindAiCacheInvalidationHandler } from './lib/api';
    不参与任何取值——不会出现同名 key 被后展开的 slice 覆盖。
    ============================================================ */
 
-export { bootstrapGithubAuth, confirmAppliedConfig } from './store/slices/bootstrap';
+export { confirmAppliedConfig } from './store/slices/bootstrap';
+export { enqueueAiConfigWrite } from './components/settings/aiConfig';
 /* OPT-011 R5：配置应用/上传的协调入口经 store 公开面导出——组件一律经本模块
    （测试工具链把 src/store.ts 别名到唯一 store 实例）消费协调协议，避免深层
    子路径在别名体系下形成第二个协议实例（写队列/屏障必须与 store 的写入口同一份）。 */
@@ -59,13 +62,16 @@ export const useAppStore = create<AppState>((...a) => ({
   ...createPlayerSlice(...a),
   ...createUiSlice(...a),
   ...createSyncSlice(...a),
+  ...createLocalLibrarySlice(...a),
   ...createFeedsSlice(...a),
   ...createSettingsSlice(...a),
 }));
 
 /* 注入 store 句柄：供跨 slice 的模块级 helper（视图缓存、标读/收藏收口、
-   GitHub 轮询）读写。与原实现时序一致——模块求值期不会调用它们。 */
+   同步活动）读写。与原实现时序一致——模块求值期不会调用它们。 */
 bindAppStore(useAppStore);
+// One scalar wake-up on saturated→available, not one transport waiter per component.
+bindImageCapacityListener(() => useAppStore.setState(s => ({ mediaCapacityRevision: s.mediaCapacityRevision + 1 })));
 bindExternalOpenFailureHandler((message) => useAppStore.getState().showToast(message));
 bindAiCacheInvalidationHandler(() => useAppStore.setState((s) => ({ aiStatusRevision: s.aiStatusRevision + 1 })));
 
@@ -112,3 +118,4 @@ export { ERROR_CENTER_MAX } from './store/slices/ui';
 /* OPT-018：toast 退场定时器清理入口——组件回归夹具经本模块（dist-test/store.js
    的唯一 store 实例）调用，避免深层子路径在别名体系下形成第二个模块实例。 */
 export { clearToastTimers } from './store/slices/ui';
+

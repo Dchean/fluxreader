@@ -11,7 +11,8 @@ import type { ArticleEntry, CategoryGroup, ContentLayoutType, FeedAiMode, FeedIt
 import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
 import { galleryMediaKey } from '../lib/galleryMedia';
-import { canProxyImages, fetchProxiedImage, needsImageProxy } from '../lib/imageProxy';
+import { useImageResource } from './useImageResource';
+import { canProxyImages, needsImageProxy } from '../lib/imageProxy';
 import {
   addFeedShowsSyncSwitch,
   addFeedSyncHint,
@@ -370,6 +371,7 @@ function hostOf(url: string): string {
 export function Lightbox() {
   const lightboxUrl = useAppStore((s) => s.lightboxUrl);
   const lightboxEntryId = useAppStore((s) => s.lightboxEntryId);
+  const lightboxPageUrl = useAppStore(s => s.lightboxPageUrl);
   const gallery = useAppStore((s) => s.lightboxGallery);
   const activeArticleId = useAppStore((s) => s.activeArticleId);
   const currentMediaKey = useAppStore((s) => {
@@ -439,7 +441,7 @@ export function Lightbox() {
     >
       {/* 原正文/社交单图路径仍使用共享 CoverImage，点击图片关闭语义不变。 */}
       {lightboxUrl && !gallery && (
-        <CoverImage src={lightboxUrl} articleId={lightboxEntryId} className="lightbox-img" alt="preview" />
+        <CoverImage src={lightboxUrl} articleId={lightboxEntryId} pageUrl={lightboxPageUrl} className="lightbox-img" alt="preview" />
       )}
       {lightboxUrl && gallery && (
         <>
@@ -476,46 +478,28 @@ export function Lightbox() {
   );
 }
 
-/** 画廊正文图可重试，不复用封面永久失败缓存，也不上报为破封面。 */
+/** Gallery body images share transport, not the cover reporting policy. */
 function GalleryPreviewImage({ src, pageUrl, index }: { src: string; pageUrl?: string; index: number }) {
-  const [attempt, setAttempt] = useState(0);
-  return <GalleryImageAttempt key={attempt} src={src} pageUrl={pageUrl} index={index}
-    retry={() => setAttempt((value) => value + 1)} />;
+  const generation = useAppStore(s => s.libraryGeneration);
+  const busy = useAppStore(s => s.libraryRestoreBusy);
+  const { lease, snapshot, retry } = useImageResource(src, pageUrl, !busy, 0, String(generation));
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const direct = !canProxyImages() || !needsImageProxy(src);
+  const resolved = snapshot.status === 'ready' ? snapshot.src : direct ? src : null;
+  const failed = snapshot.status === 'failed';
+  const loaded = resolved !== null && loadedSrc === resolved;
+  return <div className="lightbox-gallery-image" aria-busy={!failed && !loaded}>
+    {!failed && resolved && <img className="lightbox-img" src={resolved} referrerPolicy="no-referrer"
+      alt={`第 ${index + 1} 张图片`} onLoad={() => setLoadedSrc(resolved)} onError={() => lease?.failDecode()} />}
+    {failed ? <div className="lightbox-status" role="status">
+      <span>{snapshot.reason === 'too-large' ? '图片过大，无法加载' : '图片加载失败'}</span>
+      <button className="lightbox-control" onClick={event => {
+        event.currentTarget.closest<HTMLElement>('[role="dialog"]')?.focus({ preventScroll: true });
+        setLoadedSrc(null); retry();
+      }}>重试图片</button>
+    </div> : !loaded && <span className="lightbox-image-loading" role="status">图片加载中…</span>}
+  </div>;
 }
-
-function GalleryImageAttempt({ src, pageUrl, index, retry }: {
-  src: string; pageUrl?: string; index: number; retry: () => void;
-}) {
-  const needsProxy = canProxyImages() && needsImageProxy(src);
-  const [resolved, setResolved] = useState<string | null>(needsProxy ? null : src);
-  const [failed, setFailed] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => {
-    if (!needsProxy) return;
-    let alive = true;
-    void fetchProxiedImage(src, pageUrl).then((result) => {
-      if (!alive) return;
-      if (result.ok) setResolved(result.dataUrl);
-      else setFailed(true);
-    });
-    return () => { alive = false; };
-  }, [src, pageUrl, needsProxy]);
-  return (
-    <div className="lightbox-gallery-image" aria-busy={!failed && !loaded}>
-      {!failed && resolved && <img className="lightbox-img" src={resolved} referrerPolicy="no-referrer"
-        alt={`第 ${index + 1} 张图片`} onLoad={() => setLoaded(true)} onError={() => setFailed(true)} />}
-      {failed ? (
-        <div className="lightbox-status" role="status">
-          <span>图片加载失败</span><button className="lightbox-control" onClick={(e) => {
-            e.currentTarget.closest<HTMLElement>('[role="dialog"]')?.focus({ preventScroll: true });
-            retry();
-          }}>重试图片</button>
-        </div>
-      ) : !loaded && <span className="lightbox-image-loading" role="status">图片加载中…</span>}
-    </div>
-  );
-}
-
 export function NewCategoryModal() {
   const newCategoryModalOpen = useAppStore((s) => s.newCategoryModalOpen);
   const closeMiniModal = useAppStore((s) => s.closeMiniModal);
@@ -1003,3 +987,4 @@ export function CloseAskDialog() {
     </ModalOverlay>
   );
 }
+

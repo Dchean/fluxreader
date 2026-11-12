@@ -524,49 +524,5 @@ export async function run(ctx) {
     store.getState().finishSyncActivity(cleanup, 'synced');
   }
 
-  /* ---------- P2-1：GitHub 断开也使用同一 generation，不覆盖更新的活动 ---------- */
-  {
-    await resetManualSyncState(ctx);
-    const disconnectGate = deferred();
-    const calls = [];
-    const restoreInvoke = installCommands(ctx, {
-      github_login_disconnect: () => disconnectGate.promise,
-    }, calls);
-    try {
-      const disconnect = store.getState().githubLoginDisconnect();
-      checkNew('(opt022-g1) GitHub 断开开始即登记独立 generation/owner',
-        store.getState().syncStatus === 'syncing'
-          && store.getState().syncActivityOwner === 'github-disconnect'
-          && store.getState().syncActivityToken != null);
-
-      const newer = store.getState().beginSyncActivity('save-and-sync');
-      store.getState().finishSyncActivity(newer, 'synced');
-      disconnectGate.reject({ message: 'GitHub 断开失败' });
-      checkNew('(opt022-g2) GitHub 断开 reject 后 finish 自己的 token，且不覆盖更新活动已发布的 synced',
-        await settleWithin(disconnect)
-          && store.getState().syncStatus === 'synced'
-          && store.getState().syncActivityOwner === null
-          && store.getState().syncActivityToken === null
-          && store.getState().syncFailure === null
-          && store.getState().githubLoggingIn === false);
-
-      const fs = await import('node:fs');
-      const syncSliceSrc = fs.readFileSync(
-        new URL('../../src/store/slices/sync.ts', import.meta.url),
-        'utf8',
-      );
-      const disconnectBlock = syncSliceSrc.slice(
-        syncSliceSrc.indexOf('githubLoginDisconnect:'),
-        syncSliceSrc.indexOf('githubLoginDisconnect:') + 900,
-      );
-      checkNew('(opt022-g3) 源码守卫：GitHub 断开 begin 与 reject/finish 接线仍存在',
-        disconnectBlock.includes("beginSyncActivity('github-disconnect')")
-          && disconnectBlock.includes("finishSyncActivity(syncToken, 'error')")
-          && disconnectBlock.includes("finishSyncActivity(syncToken, 'synced')"));
-    } finally {
-      restoreInvoke();
-      store.setState({ toasts: [], githubLoggingIn: false });
-    }
-  }
 
 }

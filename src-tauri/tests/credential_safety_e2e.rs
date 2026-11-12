@@ -89,20 +89,20 @@ fn non_dpapi_ciphertext_read_is_error() {
 #[test]
 fn real_dpapi_roundtrip_keeps_secret_out_of_plaintext_at_rest() {
     let conn = fresh_conn("cred_dpapi_roundtrip");
-    let secret = r#"{"backend":"gist","token":"mock-pat-not-a-real-credential"}"#;
-    db::set_setting(&conn, "config_sync_credentials", secret).unwrap();
+    let secret = "mock-webdav-not-a-real-credential";
+    db::set_setting(&conn, "local_sync_password", secret).unwrap();
 
-    let stored = raw_value(&conn, "config_sync_credentials").expect("落库值应存在");
+    let stored = raw_value(&conn, "local_sync_password").expect("落库值应存在");
     assert!(
         stored.starts_with("dpapi:"),
         "落库必须是 DPAPI 密文：{stored}"
     );
     assert!(
-        !stored.contains("mock-pat-not-a-real-credential"),
+        !stored.contains("mock-webdav-not-a-real-credential"),
         "持久化值不得包含明文"
     );
     assert_eq!(
-        db::get_setting(&conn, "config_sync_credentials")
+        db::get_setting(&conn, "local_sync_password")
             .unwrap()
             .unwrap(),
         secret,
@@ -187,11 +187,7 @@ fn generic_ipc_rejects_sensitive_keys_dedicated_commands_keep_working() {
     );
 
     // 其余保护键同轴：通用读/写一律拒绝（greader_password 另受账号生命周期保护）
-    for key in [
-        "config_sync_credentials",
-        "miniflux_token",
-        "greader_password",
-    ] {
+    for key in ["local_sync_password", "miniflux_token", "greader_password"] {
         assert_eq!(
             app_lib::commands::read_setting(&conn, key)
                 .unwrap_err()

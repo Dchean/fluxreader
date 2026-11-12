@@ -30,6 +30,7 @@ pub fn upsert_ai_segment(
     content: &str,
     expected_epoch: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "INSERT INTO ai_segments (article_id, product, signature, segment_index, content)
          SELECT ?1, ?2, ?3, ?4, ?5
@@ -106,6 +107,7 @@ pub fn delete_stale_ai_segments(
     product: &str,
     signature: &str,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "DELETE FROM ai_segments
          WHERE article_id = ?1 AND product = ?2 AND signature != ?3",

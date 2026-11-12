@@ -22,8 +22,29 @@ struct FeedServer {
     max_active: Arc<AtomicUsize>,
 }
 
+#[derive(Clone)]
+enum FeedGate {
+    Delay(Duration),
+    FirstWave {
+        barrier: Arc<tokio::sync::Barrier>,
+        arrivals: Arc<AtomicUsize>,
+    },
+}
+
 impl FeedServer {
     async fn start(delay_ms: u64) -> Self {
+        Self::start_with_gate(FeedGate::Delay(Duration::from_millis(delay_ms))).await
+    }
+
+    async fn start_first_wave_rendezvous() -> Self {
+        Self::start_with_gate(FeedGate::FirstWave {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            arrivals: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+    }
+
+    async fn start_with_gate(gate: FeedGate) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let hits = Arc::new(StdMutex::new(HashMap::new()));
@@ -34,6 +55,7 @@ impl FeedServer {
             let hits = hits.clone();
             let active = active.clone();
             let max_active = max_active.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
                 loop {
                     let accepted = tokio::select! {
@@ -46,8 +68,9 @@ impl FeedServer {
                     let hits = hits.clone();
                     let active = active.clone();
                     let max_active = max_active.clone();
+                    let gate = gate.clone();
                     tokio::spawn(async move {
-                        serve_feed(stream, delay_ms, hits, active, max_active).await;
+                        serve_feed(stream, gate, hits, active, max_active).await;
                     });
                 }
             })
@@ -101,7 +124,7 @@ impl Drop for FeedServer {
 
 async fn serve_feed(
     mut stream: tokio::net::TcpStream,
-    delay_ms: u64,
+    gate: FeedGate,
     hits: Arc<StdMutex<HashMap<String, usize>>>,
     active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
@@ -154,7 +177,21 @@ async fn serve_feed(
             Err(observed) => highest = observed,
         }
     }
-    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    match gate {
+        FeedGate::Delay(delay) => tokio::time::sleep(delay).await,
+        FeedGate::FirstWave { barrier, arrivals } => {
+            if arrivals.fetch_add(1, Ordering::SeqCst) < 2
+                && tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+                    .await
+                    .is_err()
+            {
+                let _ =
+                    write_response(&mut stream, "503 Service Unavailable", "gate timeout").await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
 
     if name == "fail" || (name == "fail-once" && hit_count == 1) {
         let _ = write_response(&mut stream, "500 Internal Server Error", "injected").await;
@@ -292,7 +329,7 @@ async fn same_feed_inflight_is_deduplicated() {
 
 #[tokio::test]
 async fn distinct_feeds_share_one_bounded_batch() {
-    let server = FeedServer::start(180).await;
+    let server = FeedServer::start_first_wave_rendezvous().await;
     let (_guard, db) = setup("refresh_bounded").await;
     {
         let conn = db.lock().await;
@@ -438,7 +475,8 @@ async fn manual_then_due_skips_recent_success_even_when_due_query_would_select_i
 
 #[tokio::test]
 async fn inflight_skip_then_failure_does_not_enter_footprint_and_due_retry_succeeds() {
-    let server = FeedServer::start(300).await;
+    // Keep the first request visibly in flight under the parallel test gate too.
+    let server = FeedServer::start(2_000).await;
     let (_guard, db) = setup("refresh_inflight_failure_retry").await;
     let feed_id = {
         let conn = db.lock().await;
@@ -453,11 +491,17 @@ async fn inflight_skip_then_failure_does_not_enter_footprint_and_due_retry_succe
     };
     let client = ingestion::build_client(10);
 
+    let mut claim_observer =
+        ingestion::refresh_claim_hook::ClaimObserver::install(&db, &server.url("fail-once"));
     let first_db = db.clone();
     let first_client = client.clone();
     let first = tokio::spawn(async move {
         ingestion::refresh_feed_staged(&first_db, &first_client, feed_id, false).await
     });
+    claim_observer
+        .wait_for_claim()
+        .await
+        .expect("首轮必须先在进程内建立 in-flight claim");
     tokio::time::timeout(Duration::from_secs(2), async {
         while server.hits("fail-once") == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -525,6 +569,8 @@ async fn footprint_uses_normalized_url_not_reusable_sqlite_id() {
         // Intentional physical rowid reuse probe; ordinary unsubscribe now archives identity.
         conn.execute("DELETE FROM feeds WHERE id=?1", [old_id])
             .unwrap();
+        conn.execute("DELETE FROM sqlite_sequence WHERE name='feeds'", [])
+            .unwrap();
         insert_feed(&conn, &server.url("new"), "New", "local")
     };
     assert_eq!(
@@ -569,6 +615,8 @@ async fn reused_rowid_while_old_url_inflight_refreshes_new_source() {
         let conn = db.lock().await;
         // Intentional physical rowid reuse probe; ordinary unsubscribe now archives identity.
         conn.execute("DELETE FROM feeds WHERE id=?1", [old_id])
+            .unwrap();
+        conn.execute("DELETE FROM sqlite_sequence WHERE name='feeds'", [])
             .unwrap();
         insert_feed(&conn, &new_url, "New", "local")
     };

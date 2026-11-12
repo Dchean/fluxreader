@@ -407,8 +407,11 @@ pub(super) fn accept_generation(generation: i64) -> AppResult<()> {
 }
 
 pub(super) async fn check_generation(db: &Arc<AsyncMutex<Connection>>) -> AppResult<()> {
-    let conn = db.lock().await;
-    accept_generation(crate::db::sync_generation(&conn)?)
+    // accept_generation reads the async task-local round identity, so only the
+    // SQL snapshot moves to the worker; acceptance remains on this task.
+    let generation =
+        crate::state::database_work(db.clone(), |conn| crate::db::sync_generation(conn)).await?;
+    accept_generation(generation)
 }
 
 #[derive(Debug, Serialize)]

@@ -49,27 +49,29 @@ impl PushPlan {
             let bindings = bindings.clone();
             Box::pin(async move {
                 let database = weak_db.upgrade().ok_or_else(SyncSession::stale_error)?;
-                let conn = database.lock().await;
-                if db::sync_generation(&conn)? != generation {
-                    return Err(SyncSession::stale_error());
-                }
-                for binding in &bindings {
-                    let Some(binding) = binding else {
-                        return Err(AppError::new(
-                            "staleBinding",
-                            "发送前条目来源凭据失效，队列保留",
-                        ));
-                    };
-                    if db::verified_remote_binding(&conn, binding.article_id)?.as_ref()
-                        != Some(binding)
-                    {
-                        return Err(AppError::new(
-                            "staleBinding",
-                            "发送前条目来源凭据失效，队列保留",
-                        ));
+                crate::state::database_work(database, move |conn| {
+                    if db::sync_generation(conn)? != generation {
+                        return Err(SyncSession::stale_error());
                     }
-                }
-                Ok(())
+                    for binding in &bindings {
+                        let Some(binding) = binding else {
+                            return Err(AppError::new(
+                                "staleBinding",
+                                "发送前条目来源凭据失效，队列保留",
+                            ));
+                        };
+                        if db::verified_remote_binding(conn, binding.article_id)?.as_ref()
+                            != Some(binding)
+                        {
+                            return Err(AppError::new(
+                                "staleBinding",
+                                "发送前条目来源凭据失效，队列保留",
+                            ));
+                        }
+                    }
+                    Ok(())
+                })
+                .await
             })
         })
     }
@@ -353,20 +355,31 @@ async fn readback_states(
     let mut states = HashMap::new();
     let mut complete = true;
     for chunk in ids.chunks(VERIFICATION_CHUNK) {
-        let current = {
-            let conn = database.lock().await;
-            session.ensure_current(&conn)?;
+        let ids = chunk.to_vec();
+        let bindings: Vec<_> = plan
+            .bindings
+            .values()
+            .filter(|binding| ids.contains(&binding.remote_id))
+            .cloned()
+            .collect();
+        let generation = session.generation;
+        let current = crate::state::database_work(database.clone(), move |conn| {
+            SyncSession::ensure_generation(conn, generation)?;
             let mut current = Vec::new();
-            for id in chunk {
-                for (queue_id, binding) in &plan.bindings {
-                    if binding.remote_id == *id && plan.binding_is_current(&conn, *queue_id)? {
+            for id in &ids {
+                for binding in &bindings {
+                    if binding.remote_id == *id
+                        && db::verified_remote_binding(conn, binding.article_id)?.as_ref()
+                            == Some(binding)
+                    {
                         current.push(*id);
                         break;
                     }
                 }
             }
-            current
-        };
+            Ok(current)
+        })
+        .await?;
         complete &= current.len() == chunk.len();
         if current.is_empty() {
             continue;
@@ -396,26 +409,36 @@ async fn current_push_items(
     queue_ids: impl IntoIterator<Item = i64>,
     report: &mut SyncReport,
 ) -> Option<HashSet<i64>> {
-    let conn = database.lock().await;
-    if session.ensure_current(&conn).is_err() {
-        return None;
-    }
-    let mut current = HashSet::new();
-    for queue_id in queue_ids {
-        match plan.binding_is_current(&conn, queue_id) {
-            Ok(true) => {
-                current.insert(queue_id);
-            }
-            Ok(false) => {}
-            Err(error) => {
-                report
-                    .errors
-                    .push(format!("推送来源凭据复核失败（队列保留）: {error}"));
-                return None;
+    let bindings: Vec<_> = queue_ids
+        .into_iter()
+        .map(|id| (id, plan.bindings.get(&id).cloned()))
+        .collect();
+    let generation = session.generation;
+    let result = crate::state::database_work(database.clone(), move |conn| {
+        if SyncSession::ensure_generation(conn, generation).is_err() {
+            return Ok(None);
+        }
+        let mut current = HashSet::new();
+        for (queue_id, binding) in bindings {
+            if let Some(binding) = binding {
+                if db::verified_remote_binding(conn, binding.article_id)?.as_ref() == Some(&binding)
+                {
+                    current.insert(queue_id);
+                }
             }
         }
+        Ok(Some(current))
+    })
+    .await;
+    match result {
+        Ok(current) => current,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("推送来源凭据复核失败（队列保留）: {error}"));
+            None
+        }
     }
-    Some(current)
 }
 
 fn record_failure(
@@ -878,12 +901,11 @@ pub async fn notify_queue_changed(db: &Arc<Mutex<Connection>>) {
     let Some(app) = QUEUE_EVENT_TARGET.get() else {
         return;
     };
-    let payload = {
-        let conn = db.lock().await;
+    let payload = crate::state::database_work(db.clone(), |conn| {
         // OPT-014 R1：读取/解密失败按「已配置」的显示口径处理（Err ≠ 未配置）——
         // 让等待/失败统计照常发给前端（错误原因由推送路径的 last_error 呈现）；
         // 只有确证未配置才静默（不误报、不刷状态）。
-        let configured = match crate::sync::read_credentials(&conn) {
+        let configured = match crate::sync::read_credentials(conn) {
             Ok(None) => false,
             Ok(Some(_)) => true,
             Err(e) => {
@@ -891,13 +913,18 @@ pub async fn notify_queue_changed(db: &Arc<Mutex<Connection>>) {
                 true
             }
         };
-        match db::sync_queue_stats(&conn) {
-            Ok(stats) => db::queue_changed_payload(&stats, configured),
-            Err(e) => {
-                log::warn!("sync: 读取队列统计失败，跳过本轮 sync-queue-changed: {e}");
-                emit_sync_error(&format!("同步队列状态读取失败，请重试：{e}"));
-                None
-            }
+        Ok(db::queue_changed_payload(
+            &db::sync_queue_stats(conn)?,
+            configured,
+        ))
+    })
+    .await;
+    let payload = match payload {
+        Ok(payload) => payload,
+        Err(e) => {
+            log::warn!("sync: 读取队列统计失败，跳过本轮 sync-queue-changed: {e}");
+            emit_sync_error(&format!("同步队列状态读取失败，请重试：{e}"));
+            None
         }
     };
     if let Some(p) = payload {
@@ -916,10 +943,10 @@ pub async fn notify_queue_changed(db: &Arc<Mutex<Connection>>) {
 pub(super) async fn record_push_block(db: &Arc<Mutex<Connection>>, err: &crate::error::AppError) {
     let summary = push_block_summary(err);
     log::warn!("sync: 状态推送被阻塞（客户端构建失败）: {summary}");
-    let marked = {
-        let conn = db.lock().await;
-        db::mark_push_blocked(&conn, &summary)
-    };
+    let marked = crate::state::database_work(db.clone(), move |conn| {
+        db::mark_push_blocked(conn, &summary)
+    })
+    .await;
     match marked {
         Ok(n) if n > 0 => notify_queue_changed(db).await,
         Ok(_) => {}
@@ -993,20 +1020,22 @@ async fn push_states_with_session(
 ) -> AppResult<SyncReport> {
     // 串行化：与 states_phase/feeds_phase 的推送段互斥（见 PUSH_LOCK 注释）
     let _guard = PUSH_LOCK.lock().await;
-    let planned = {
-        let conn = db.lock().await;
+    let generation = session.generation;
+    let planned = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
         // OPT-006：计划构建是回写前边界（age_stale_queue 会写库）——代际失配即弃。
-        if session.ensure_current(&conn).is_err() {
+        if SyncSession::ensure_generation(conn, generation).is_err() {
             log::info!("sync: 即时推送计划构建时账号代际已变更，丢弃本轮");
             return Err(SyncSession::stale_error());
         }
         let mut report = SyncReport::default();
-        let stale = age_stale_queue(&conn, &mut report);
-        match plan_push(&conn) {
+        let stale = age_stale_queue(conn, &mut report);
+        Ok(match plan_push(conn) {
             Ok(p) => Ok((p, report, stale)),
             Err(e) => Err(e),
-        }
-    };
+        })
+    })
+    .await?;
     let (plan, mut report, stale) = match planned {
         Ok(v) => v,
         Err(e) => {
@@ -1024,23 +1053,23 @@ async fn push_states_with_session(
         return Ok(report);
     }
     let mut outcome = exec_push(db, session, &plan, &mut report).await;
-    let mut infra_errors: Vec<String> = Vec::new();
-    {
-        let conn = db.lock().await;
+    let (report, outcome, infra_errors) = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        let mut infra_errors: Vec<String> = Vec::new();
         // OPT-006：确认/失败标记/剪除都是回写边界——账号已变更时旧队项已清空，
         // 不得把旧批次的记账落回（更不得动新账号的队项）。
-        if session.ensure_current(&conn).is_err() {
+        if SyncSession::ensure_generation(conn, generation).is_err() {
             log::info!("sync: 即时推送回写时账号代际已变更，丢弃确认与标记");
             return Err(SyncSession::stale_error());
         }
-        outcome.discard_stale(&conn, &plan, &mut report)?;
+        outcome.discard_stale(conn, &plan, &mut report)?;
         // TASK-116：失败项落库标记（attempts+1 / last_error）——即时推送失败此前
         // 只进日志，用户在 UI 上永远看不到「部分失败」。标记失败不影响队列保留。
         let retry_push = outcome.failures_for(PushFailureClass::Push);
         let retry_verification = outcome.failures_for(PushFailureClass::Verification);
         let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
         if !retry_push.is_empty() {
-            if let Err(e) = db::mark_push_failed(&conn, &retry_push) {
+            if let Err(e) = db::mark_push_failed(conn, &retry_push) {
                 let message = format!("队列推送失败标记落库失败: {e}");
                 log::warn!("sync: {message}");
                 report.errors.push(message.clone());
@@ -1048,7 +1077,7 @@ async fn push_states_with_session(
             }
         }
         if !retry_verification.is_empty() {
-            if let Err(e) = db::mark_push_verification_failed(&conn, &retry_verification) {
+            if let Err(e) = db::mark_push_verification_failed(conn, &retry_verification) {
                 let message = format!("队列失败标记落库失败: {e}");
                 log::warn!("sync: {message}");
                 report.errors.push(message.clone());
@@ -1056,7 +1085,7 @@ async fn push_states_with_session(
             }
         }
         if !target_missing.is_empty() {
-            if let Err(e) = db::mark_queue_target_missing(&conn, &target_missing) {
+            if let Err(e) = db::mark_queue_target_missing(conn, &target_missing) {
                 let message = format!("target_missing 标记落库失败: {e}");
                 log::warn!("sync: {message}");
                 report.errors.push(message.clone());
@@ -1064,14 +1093,16 @@ async fn push_states_with_session(
             }
         }
         if !outcome.done.is_empty() {
-            if let Err(e) = db::prune_sync(&conn, &outcome.done) {
+            if let Err(e) = db::prune_sync(conn, &outcome.done) {
                 let message = format!("已推送队项出队失败: {e}");
                 log::warn!("sync: {message}");
                 report.errors.push(message.clone());
                 infra_errors.push(message);
             }
         }
-    }
+        Ok((report, outcome, infra_errors))
+    })
+    .await?;
     let mut emitted_target_missing = std::collections::HashSet::new();
     for failure in outcome
         .failures

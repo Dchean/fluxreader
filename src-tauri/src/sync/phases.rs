@@ -187,7 +187,18 @@ async fn feeds_phase_in_session_scoped(
         scope.map(|scope| &scope.subscription_outbox_ids),
     )
     .await;
-    pull_feeds(db, session, &mut report).await;
+    // The feeds entrypoint deliberately preserves a partial subscription push
+    // report. A disconnect after that push but before source discovery keeps
+    // the original outbox/report semantics; the direct states/discovery
+    // entrypoints still promote stale from pull_feeds itself.
+    if !session_is_current(db, session).await {
+        report.push_classified_error(
+            format!("拉取订阅失败: {}", SyncSession::stale_error()),
+            false,
+        );
+        return Ok(report);
+    }
+    pull_feeds(db, session, &mut report).await?;
     Ok(report)
 }
 
@@ -195,20 +206,24 @@ async fn begin_subscription_discovery(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
 ) -> AppResult<bool> {
-    let conn = db.lock().await;
-    session.ensure_current(&conn)?;
-    let account = super::current_account(&conn)?.ok_or_else(|| {
-        AppError::new(
-            "notConnected",
-            "订阅发现缺少当前同步账号身份，本轮不发起远端请求",
-        )
-    })?;
-    let now = Utc::now().timestamp();
-    if !db::zero_binding_discovery_due(&conn, &account.key, now)? {
-        return Ok(false);
-    }
-    db::mark_zero_binding_discovery_attempt(&conn, &account.key, now)?;
-    Ok(true)
+    let generation = session.generation;
+    crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
+        let account = super::current_account(conn)?.ok_or_else(|| {
+            AppError::new(
+                "notConnected",
+                "订阅发现缺少当前同步账号身份，本轮不发起远端请求",
+            )
+        })?;
+        let now = Utc::now().timestamp();
+        if !db::zero_binding_discovery_due(conn, &account.key, now)? {
+            return Ok(false);
+        }
+        db::mark_zero_binding_discovery_attempt(conn, &account.key, now)?;
+        Ok(true)
+    })
+    .await
 }
 
 /// states 阶段（状态+条目层）：push 队列 + pull entries。
@@ -259,13 +274,7 @@ async fn states_phase_inner(
     let discovery_attempted = if !full {
         match begin_subscription_discovery(db, &lease.session).await {
             Ok(due) => due,
-            Err(e) => {
-                let mut report = SyncReport::default();
-                report
-                    .errors
-                    .push(format!("订阅发现节流检查失败，本轮不发起远端请求: {e}"));
-                return Ok(report);
-            }
+            Err(e) => return Err(e),
         }
     } else {
         false
@@ -294,23 +303,27 @@ async fn states_phase_in_session(
     discovery_attempted: bool,
 ) -> AppResult<SyncReport> {
     let mut report = SyncReport::default();
+    let generation = session.generation;
     if discovery_attempted {
-        pull_feeds(db, session, &mut report).await;
+        pull_feeds(db, session, &mut report).await?;
     } else if !full {
         log::debug!("sync: 订阅发现尚未到期，本轮跳过只读订阅拉取");
     }
     // This complete round keeps one local intent/source baseline across both
     // authority reads and the content pass. A later HTTP request does not erase
     // user actions that happened during this round, even after their ACK.
+    let maps_result = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(db::sync_match_maps(conn))
+    })
+    .await?;
     let mut versions = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::sync_match_maps(&conn) {
+        match maps_result {
             Ok(maps) => Arc::new(maps),
             Err(error) => {
-                report.errors.push(format!(
-                    "同步匹配映射构建失败，本轮不合并（游标保留）: {error}"
-                ));
+                record_pull_apply_failure(error, &mut report, |error| {
+                    format!("同步匹配映射构建失败，本轮不合并（游标保留）: {error}")
+                })?;
                 return Ok(report);
             }
         }
@@ -321,67 +334,74 @@ async fn states_phase_in_session(
     // 推送段进 PUSH_LOCK（与 push_states_now/feeds_phase 的推送互斥，防 prune 竞态）
     {
         let _guard = PUSH_LOCK.lock().await;
-        let (plan, stale) = {
-            let conn = db.lock().await;
+        let (plan, stale, returned_report) = crate::state::database_work(db.clone(), move |conn| {
+            let _writer = db::writer_guard(conn)?;
             // OPT-006：计划构建即 HTTP→DB 边界（age_stale_queue 是写）——代际失配
             // 直接丢弃本轮，不发出任何请求。
-            session.ensure_current(&conn)?;
-            let stale = age_stale_queue(&conn, &mut report);
+            SyncSession::ensure_generation(conn, generation)?;
+            let stale = age_stale_queue(conn, &mut report);
             let retried = if full {
-                db::retry_target_missing(&conn)?
+                db::retry_target_missing(conn)?
             } else {
                 0
             };
-            let mut plan = plan_push(&conn)?;
+            let mut plan = plan_push(conn)?;
             plan.reclassified += retried;
-            (plan, stale)
-        };
+            Ok((plan, stale, report))
+        })
+        .await?;
+        report = returned_report;
         let mut outcome = exec_push(db, session, &plan, &mut report).await;
         attempted_this_round.extend(outcome.attempted.iter().copied());
-        {
-            let conn = db.lock().await;
-            // OPT-006：推送确认/失败标记/剪除都是回写边界——账号已变更时旧队项
-            // 已随 purge 清空，且新账号可能复用编号语义，一律不得落库。
-            session.ensure_current(&conn)?;
-            outcome.discard_stale(&conn, &plan, &mut report)?;
-            let retry_push = outcome.failures_for(PushFailureClass::Push);
-            let retry_verification = outcome.failures_for(PushFailureClass::Verification);
-            let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
-            // TASK-116：失败项落库标记（attempts+1 / last_error，四态展示口径）
-            if !retry_push.is_empty() {
-                if let Err(err) = db::mark_push_failed(&conn, &retry_push) {
-                    log::warn!("sync: 推送失败标记落库失败（states 首次 push）: {err}");
-                    report
-                        .errors
-                        .push(format!("队列失败标记落库失败（states 首次 push）: {err}"));
+        let (returned_report, returned_outcome, plan) =
+            crate::state::database_work(db.clone(), move |conn| {
+                let _writer = db::writer_guard(conn)?;
+                // OPT-006：推送确认/失败标记/剪除都是回写边界——账号已变更时旧队项
+                // 已随 purge 清空，且新账号可能复用编号语义，一律不得落库。
+                SyncSession::ensure_generation(conn, generation)?;
+                outcome.discard_stale(conn, &plan, &mut report)?;
+                let retry_push = outcome.failures_for(PushFailureClass::Push);
+                let retry_verification = outcome.failures_for(PushFailureClass::Verification);
+                let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
+                // TASK-116：失败项落库标记（attempts+1 / last_error，四态展示口径）
+                if !retry_push.is_empty() {
+                    if let Err(err) = db::mark_push_failed(conn, &retry_push) {
+                        log::warn!("sync: 推送失败标记落库失败（states 首次 push）: {err}");
+                        report
+                            .errors
+                            .push(format!("队列失败标记落库失败（states 首次 push）: {err}"));
+                    }
                 }
-            }
-            if !retry_verification.is_empty() {
-                if let Err(err) = db::mark_push_verification_failed(&conn, &retry_verification) {
-                    log::warn!("sync: 状态读回失败标记落库失败（states 首次 push）: {err}");
-                    report.errors.push(format!(
-                        "状态读回失败标记落库失败（states 首次 push）: {err}"
-                    ));
+                if !retry_verification.is_empty() {
+                    if let Err(err) = db::mark_push_verification_failed(conn, &retry_verification) {
+                        log::warn!("sync: 状态读回失败标记落库失败（states 首次 push）: {err}");
+                        report.errors.push(format!(
+                            "状态读回失败标记落库失败（states 首次 push）: {err}"
+                        ));
+                    }
                 }
-            }
-            if !target_missing.is_empty() {
-                if let Err(err) = db::mark_queue_target_missing(&conn, &target_missing) {
-                    log::warn!("sync: target_missing 标记落库失败（states 首次 push）: {err}");
-                    report.errors.push(format!(
-                        "target_missing 标记落库失败（states 首次 push）: {err}"
-                    ));
+                if !target_missing.is_empty() {
+                    if let Err(err) = db::mark_queue_target_missing(conn, &target_missing) {
+                        log::warn!("sync: target_missing 标记落库失败（states 首次 push）: {err}");
+                        report.errors.push(format!(
+                            "target_missing 标记落库失败（states 首次 push）: {err}"
+                        ));
+                    }
                 }
-            }
-            // P3[1]：剪除失败此前静默 → 队项残留会被重复推送。改为 warn。
-            if !outcome.done.is_empty() {
-                if let Err(err) = db::prune_sync(&conn, &outcome.done) {
-                    log::warn!("sync: 剪除已推送队项失败（states 首次 push）: {err}");
-                    report
-                        .errors
-                        .push(format!("已推送队项出队失败（states 首次 push）: {err}"));
+                // P3[1]：剪除失败此前静默 → 队项残留会被重复推送。改为 warn。
+                if !outcome.done.is_empty() {
+                    if let Err(err) = db::prune_sync(conn, &outcome.done) {
+                        log::warn!("sync: 剪除已推送队项失败（states 首次 push）: {err}");
+                        report
+                            .errors
+                            .push(format!("已推送队项出队失败（states 首次 push）: {err}"));
+                    }
                 }
-            }
-        }
+                Ok((report, outcome, plan))
+            })
+            .await?;
+        report = returned_report;
+        outcome = returned_outcome;
         // TASK-124：推送确认/失败后发事件（成功出队 waiting 降、失败转
         // retry_wait 并更新 last_error；无身份分类与老化转态也发）。
         // 统计读在锁外短临界区（notify_queue_changed 内部自持短锁）。
@@ -403,16 +423,11 @@ async fn states_phase_in_session(
             } else {
                 match begin_subscription_discovery(db, session).await {
                     Ok(due) => due,
-                    Err(e) => {
-                        report.errors.push(format!(
-                            "条目绑定不完整后的订阅发现检查失败，本轮不重试: {e}"
-                        ));
-                        false
-                    }
+                    Err(e) => return Err(e),
                 }
             };
             if retry_discovery {
-                pull_feeds(db, session, &mut report).await;
+                pull_feeds(db, session, &mut report).await?;
                 // Only this import's committed first-creation receipts extend
                 // the old baseline. Never refresh an old source's lifecycle or
                 // any local field version after an in-flight user operation.
@@ -435,60 +450,68 @@ async fn states_phase_in_session(
     // 其他客户端会看到「本地已读、后端仍未读」。二次 push 幂等（队列已空则无操作）。
     {
         let _guard = PUSH_LOCK.lock().await;
-        let (plan, stale) = {
-            let conn = db.lock().await;
-            session.ensure_current(&conn)?;
-            let stale = age_stale_queue(&conn, &mut report);
-            let mut plan = plan_push(&conn)?;
+        let (plan, stale, returned_report) = crate::state::database_work(db.clone(), move |conn| {
+            let _writer = db::writer_guard(conn)?;
+            SyncSession::ensure_generation(conn, generation)?;
+            let stale = age_stale_queue(conn, &mut report);
+            let mut plan = plan_push(conn)?;
             plan.remove_attempted(&attempted_this_round);
-            (plan, stale)
-        };
+            Ok((plan, stale, report))
+        })
+        .await?;
+        report = returned_report;
         if !plan.status.is_empty() || !plan.stars.is_empty() {
             let mut outcome = exec_push(db, session, &plan, &mut report).await;
-            {
-                let conn = db.lock().await;
-                // TASK-116：失败项落库标记（pull 后补推段，同首次 push 段口径）
-                // OPT-006：同首次 push 段——回写前复核代际。
-                session.ensure_current(&conn)?;
-                outcome.discard_stale(&conn, &plan, &mut report)?;
-                let retry_push = outcome.failures_for(PushFailureClass::Push);
-                let retry_verification = outcome.failures_for(PushFailureClass::Verification);
-                let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
-                if !retry_push.is_empty() {
-                    if let Err(err) = db::mark_push_failed(&conn, &retry_push) {
-                        log::warn!("sync: 推送失败标记落库失败（states 补推）: {err}");
-                        report
-                            .errors
-                            .push(format!("队列失败标记落库失败（states 补推）: {err}"));
+            let (returned_report, returned_outcome, plan) =
+                crate::state::database_work(db.clone(), move |conn| {
+                    let _writer = db::writer_guard(conn)?;
+                    // TASK-116：失败项落库标记（pull 后补推段，同首次 push 段口径）
+                    // OPT-006：同首次 push 段——回写前复核代际。
+                    SyncSession::ensure_generation(conn, generation)?;
+                    outcome.discard_stale(conn, &plan, &mut report)?;
+                    let retry_push = outcome.failures_for(PushFailureClass::Push);
+                    let retry_verification = outcome.failures_for(PushFailureClass::Verification);
+                    let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
+                    if !retry_push.is_empty() {
+                        if let Err(err) = db::mark_push_failed(conn, &retry_push) {
+                            log::warn!("sync: 推送失败标记落库失败（states 补推）: {err}");
+                            report
+                                .errors
+                                .push(format!("队列失败标记落库失败（states 补推）: {err}"));
+                        }
                     }
-                }
-                if !retry_verification.is_empty() {
-                    if let Err(err) = db::mark_push_verification_failed(&conn, &retry_verification)
-                    {
-                        log::warn!("sync: 状态读回失败标记落库失败（states 补推）: {err}");
-                        report
-                            .errors
-                            .push(format!("状态读回失败标记落库失败（states 补推）: {err}"));
+                    if !retry_verification.is_empty() {
+                        if let Err(err) =
+                            db::mark_push_verification_failed(conn, &retry_verification)
+                        {
+                            log::warn!("sync: 状态读回失败标记落库失败（states 补推）: {err}");
+                            report
+                                .errors
+                                .push(format!("状态读回失败标记落库失败（states 补推）: {err}"));
+                        }
                     }
-                }
-                if !target_missing.is_empty() {
-                    if let Err(err) = db::mark_queue_target_missing(&conn, &target_missing) {
-                        log::warn!("sync: target_missing 标记落库失败（states 补推）: {err}");
-                        report
-                            .errors
-                            .push(format!("target_missing 标记落库失败（states 补推）: {err}"));
+                    if !target_missing.is_empty() {
+                        if let Err(err) = db::mark_queue_target_missing(conn, &target_missing) {
+                            log::warn!("sync: target_missing 标记落库失败（states 补推）: {err}");
+                            report
+                                .errors
+                                .push(format!("target_missing 标记落库失败（states 补推）: {err}"));
+                        }
                     }
-                }
-                // P3[1]：同上（pull 后补推段）。
-                if !outcome.done.is_empty() {
-                    if let Err(err) = db::prune_sync(&conn, &outcome.done) {
-                        log::warn!("sync: 剪除已推送队项失败（states 补推）: {err}");
-                        report
-                            .errors
-                            .push(format!("已推送队项出队失败（states 补推）: {err}"));
+                    // P3[1]：同上（pull 后补推段）。
+                    if !outcome.done.is_empty() {
+                        if let Err(err) = db::prune_sync(conn, &outcome.done) {
+                            log::warn!("sync: 剪除已推送队项失败（states 补推）: {err}");
+                            report
+                                .errors
+                                .push(format!("已推送队项出队失败（states 补推）: {err}"));
+                        }
                     }
-                }
-            }
+                    Ok((report, outcome, plan))
+                })
+                .await?;
+            report = returned_report;
+            outcome = returned_outcome;
             // TASK-124：补推段同口径发事件（含分类写回）。
             if !outcome.done.is_empty()
                 || !outcome.failures.is_empty()
@@ -519,12 +542,17 @@ async fn commit_content_cursor(
 ) -> AppResult<()> {
     if !report.states_incomplete && !report.binding_incomplete {
         if let Some(candidate) = report.content_cursor_candidate.take() {
-            let conn = db.lock().await;
-            session.ensure_current(&conn)?;
-            if let Err(error) = db::set_last_sync_ts(&conn, candidate) {
-                report
-                    .errors
-                    .push(format!("同步完成时间/游标写入失败（保留旧游标）: {error}"));
+            let generation = session.generation;
+            let saved = crate::state::database_work(db.clone(), move |conn| {
+                let _writer = db::writer_guard(conn)?;
+                SyncSession::ensure_generation(conn, generation)?;
+                Ok(db::set_last_sync_ts(conn, candidate))
+            })
+            .await?;
+            if let Err(error) = saved {
+                record_pull_apply_failure(error, report, |error| {
+                    format!("同步完成时间/游标写入失败（保留旧游标）: {error}")
+                })?;
             }
         }
     }
@@ -695,23 +723,24 @@ async fn discovery_pull_in_session(
     session: &Arc<SyncSession>,
     report: &mut SyncReport,
 ) -> AppResult<()> {
-    let before = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        db::remote_feed_binding_count(&conn)?
-    };
-    pull_feeds(db, session, report).await;
-    let after = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        db::remote_feed_binding_count(&conn)?
-    };
+    let generation = session.generation;
+    let before = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        db::remote_feed_binding_count(conn)
+    })
+    .await?;
+    pull_feeds(db, session, report).await?;
+    let after = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        db::remote_feed_binding_count(conn)
+    })
+    .await?;
     if after > before {
         let _pull_guard = PULL_LOCK.lock().await;
         pull_entries(db, session, report, false, None).await?;
         if report.binding_incomplete && !report.pull_admission_blocked {
             // 新订阅在首次发现与条目读取之间才变为可见时，再发现并重试一次。
-            pull_feeds(db, session, report).await;
+            pull_feeds(db, session, report).await?;
             pull_entries(db, session, report, false, None).await?;
         }
         drop(_pull_guard);

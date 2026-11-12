@@ -269,7 +269,7 @@ export function PlayerBar() {
 
         <div className="player-track-info">
           {/* 封面：共享 CoverImage（与卡片/全屏播放器共用同一缓存与上报去重） */}
-          <CoverImage src={player.cover} articleId={player.coverEntryId} className="player-cover" alt="cover" />
+          <CoverImage src={player.cover} articleId={player.coverEntryId} pageUrl={player.coverPageUrl} enabled={player.isActive} className="player-cover" alt="cover" />
           <div className="player-titles">
             <div className="player-title">{player.title}</div>
             <div className="player-subtitle">{player.showName}</div>
@@ -416,6 +416,8 @@ function PlayerFullOverlay({
           <CoverImage
             src={player.cover}
             articleId={player.coverEntryId}
+            pageUrl={player.coverPageUrl}
+            enabled={open}
             className="player-full-cover"
             alt=""
             fallbackClassName="player-full-cover player-full-cover-fallback cover-fallback"
@@ -477,3 +479,4 @@ function PlayerFullOverlay({
     </div>
   );
 }
+

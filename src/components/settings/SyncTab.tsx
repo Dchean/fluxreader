@@ -11,7 +11,7 @@ import {
 import { syncStateSummary, subscriptionWriteSummary, subscriptionActionLine } from '../../lib/syncPill';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
-import { ConfigSyncSection } from './ConfigSyncSection';
+import { LocalSyncSection } from './LocalSyncSection';
 import { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint } from './endpointHint';
 import { syncFailureMessage } from '../../store/syncErrors';
 import {
@@ -94,6 +94,7 @@ export function SyncTab() {
   const syncRemoteWriteConfirmed = useAppStore((s) => s.syncRemoteWriteConfirmed);
   const syncFailure = useAppStore((s) => s.syncFailure);
   const syncConnected = useAppStore((s) => s.syncConnected);
+  const webdavConnected = useAppStore((s) => s.localSyncState?.connected === true);
   const syncAccount = useAppStore((s) => s.syncAccount);
   const syncProtocol = useAppStore((s) => s.syncProtocol);
   const syncEndpoint = useAppStore((s) => s.syncEndpoint);
@@ -364,6 +365,10 @@ export function SyncTab() {
       草稿一旦捕获便只使用该快照；save 失败与 post-save sync 失败各留可重试入口。
       表单 UI 写入仅在当前 revision 仍属于同一草稿时允许。 */
   async function runSaveAndSync(draft: SaveAndSyncDraft): Promise<void> {
+    if (useAppStore.getState().localSyncState?.connected || useAppStore.getState().localSyncBusy) {
+      showToast('请先断开 WebDAV，再连接 RSS 同步服务');
+      return;
+    }
     if (isSupersededDraft(draft)) {
       showSupersededDraft();
       return;
@@ -837,7 +842,7 @@ export function SyncTab() {
           </button>
           <button
             className="toggle-action-btn btn-primary"
-            disabled={testing || saving}
+            disabled={testing || saving || webdavConnected}
             onClick={() => void doSaveAndSync()}
             title="保存后拉取订阅、阅读状态与文章并刷新内容；不会推送已有本地订阅"
             aria-describedby="sync-save-help"
@@ -891,7 +896,7 @@ export function SyncTab() {
       </SettingCard>
 
       <CacheCleanupSection />
-      <ConfigSyncSection />
+      <LocalSyncSection />
 
       <ConfirmDialog
         open={confirmDisconnect}

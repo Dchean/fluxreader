@@ -160,41 +160,43 @@ async fn load_ai_snapshot(
     article_id: i64,
     kind: AiKind,
 ) -> AppResult<AiInputSnapshot> {
-    let conn = state.db.lock().await;
-    let raw = match db::get_setting(&conn, "ai_config") {
-        Ok(value) => value,
-        Err(err) => {
-            log::warn!("ai: 读取 ai_config 失败: {err}");
-            return Err(err);
-        }
-    };
-    let cfg = AiConfigSnapshot::from_raw(raw.as_deref())?;
-    let not_found = || AppError::not_found(format!("article {article_id}"));
-    let (title, body, cached, cached_sig) = match kind {
-        AiKind::Summary => {
-            let (title, body, cached, sig) =
-                db::get_article_for_summary(&conn, article_id)?.ok_or_else(not_found)?;
-            (title, body, cached, sig)
-        }
-        AiKind::Translation => {
-            let (title, body, cached, sig) =
-                db::get_article_for_translation(&conn, article_id)?.ok_or_else(not_found)?;
-            (title, body, cached, sig)
-        }
-    };
-    let token = db::article_ai_commit_token(&conn, article_id)?.ok_or_else(not_found)?;
-    let system = cfg.system_for(kind).to_string();
-    let signature = expected_signature(&cfg.cfg, &system, kind, &title, &token, &body);
-    Ok(AiInputSnapshot {
-        cfg,
-        system,
-        title,
-        body,
-        cached,
-        cached_sig,
-        token,
-        signature,
+    crate::state::database_work(state.db.clone(), move |conn| {
+        let raw = match db::get_setting(conn, "ai_config") {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("ai: 读取 ai_config 失败: {err}");
+                return Err(err);
+            }
+        };
+        let cfg = AiConfigSnapshot::from_raw(raw.as_deref())?;
+        let not_found = || AppError::not_found(format!("article {article_id}"));
+        let (title, body, cached, cached_sig) = match kind {
+            AiKind::Summary => {
+                let (title, body, cached, sig) =
+                    db::get_article_for_summary(conn, article_id)?.ok_or_else(not_found)?;
+                (title, body, cached, sig)
+            }
+            AiKind::Translation => {
+                let (title, body, cached, sig) =
+                    db::get_article_for_translation(conn, article_id)?.ok_or_else(not_found)?;
+                (title, body, cached, sig)
+            }
+        };
+        let token = db::article_ai_commit_token(conn, article_id)?.ok_or_else(not_found)?;
+        let system = cfg.system_for(kind).to_string();
+        let signature = expected_signature(&cfg.cfg, &system, kind, &title, &token, &body);
+        Ok(AiInputSnapshot {
+            cfg,
+            system,
+            title,
+            body,
+            cached,
+            cached_sig,
+            token,
+            signature,
+        })
     })
+    .await
 }
 
 /// AI 缓存校验响应（前端命中判定用；camelCase 与前端类型逐字对应）。
@@ -281,8 +283,11 @@ pub async fn ai_clear_cache(
 /// ai_clear_cache 的实现体（product：`"summary"` | `"translation"`，其余值显式
 /// validate 失败；条目不存在 → not_found——不清不静默成功）。
 async fn ai_clear_cache_inner(state: &AppState, article_id: i64, product: &str) -> AppResult<()> {
-    let mut conn = state.db.lock().await;
-    let cleared = db::clear_article_ai_product(&mut conn, article_id, product)?;
+    let product = product.to_owned();
+    let cleared = crate::state::database_work(state.db.clone(), move |conn| {
+        db::clear_article_ai_product(conn, article_id, &product)
+    })
+    .await?;
     if !cleared {
         return Err(AppError::not_found(format!("article {article_id}")));
     }
@@ -290,51 +295,55 @@ async fn ai_clear_cache_inner(state: &AppState, article_id: i64, product: &str) 
 }
 
 async fn ai_cache_check_inner(state: &AppState, article_id: i64) -> AppResult<AiCacheCheck> {
-    let conn = state.db.lock().await;
-    let raw = db::get_setting(&conn, "ai_config")?;
-    let cfg = AiConfigSnapshot::from_raw(raw.as_deref())?;
-    let not_found = || AppError::not_found(format!("article {article_id}"));
-    let (title, body_text, summary, summary_sig) =
-        db::get_article_for_summary(&conn, article_id)?.ok_or_else(not_found)?;
-    let (_title, html, translated, translated_sig) =
-        db::get_article_for_translation(&conn, article_id)?.ok_or_else(not_found)?;
-    let token = db::article_ai_commit_token(&conn, article_id)?.ok_or_else(not_found)?;
-    let summary_verified = signature_verified(
-        &summary,
-        &summary_sig,
-        &expected_signature(
+    crate::state::database_work(state.db.clone(), move |conn| {
+        let raw = db::get_setting(conn, "ai_config")?;
+        let cfg = AiConfigSnapshot::from_raw(raw.as_deref())?;
+        let not_found = || AppError::not_found(format!("article {article_id}"));
+        let (title, body_text, summary, summary_sig) =
+            db::get_article_for_summary(conn, article_id)?.ok_or_else(not_found)?;
+        let (_title, html, translated, translated_sig) =
+            db::get_article_for_translation(conn, article_id)?.ok_or_else(not_found)?;
+        let token = db::article_ai_commit_token(conn, article_id)?.ok_or_else(not_found)?;
+        let summary_verified = signature_verified(
+            &summary,
+            &summary_sig,
+            &expected_signature(
+                &cfg.cfg,
+                cfg.system_for(AiKind::Summary),
+                AiKind::Summary,
+                &title,
+                &token,
+                &body_text,
+            ),
+        );
+        let translation_signature = expected_signature(
             &cfg.cfg,
-            cfg.system_for(AiKind::Summary),
-            AiKind::Summary,
+            cfg.system_for(AiKind::Translation),
+            AiKind::Translation,
             &title,
             &token,
-            &body_text,
-        ),
-    );
-    let translation_signature = expected_signature(
-        &cfg.cfg,
-        cfg.system_for(AiKind::Translation),
-        AiKind::Translation,
-        &title,
-        &token,
-        &html,
-    );
-    let translation_verified =
-        signature_verified(&translated, &translated_sig, &translation_signature);
-    let translation_segments =
-        translation_segment_plan(&conn, article_id, &html, &translation_signature)?;
-    Ok(AiCacheCheck {
-        summary_verified,
-        translation_verified,
-        translation_segments,
+            &html,
+        );
+        let translation_verified =
+            signature_verified(&translated, &translated_sig, &translation_signature);
+        let translation_segments =
+            translation_segment_plan(conn, article_id, &html, &translation_signature)?;
+        Ok(AiCacheCheck {
+            summary_verified,
+            translation_verified,
+            translation_segments,
+        })
     })
+    .await
 }
 
 /// 保存 AI 配置（前端 AI tab 表单）。value 为整份 JSON。
 #[tauri::command]
 pub async fn save_ai_config(state: State<'_, AppState>, value: String) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_setting(&conn, "ai_config", &value)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::set_setting(conn, "ai_config", &value)
+    })
+    .await
 }
 
 /// 读 AI 配置（前端启动时恢复表单）。
@@ -343,14 +352,16 @@ pub async fn save_ai_config(state: State<'_, AppState>, value: String) -> AppRes
 /// 配置丢了而重新填写。读失败上报并留 warn。
 #[tauri::command]
 pub async fn get_ai_config(state: State<'_, AppState>) -> AppResult<Option<String>> {
-    let conn = state.db.lock().await;
-    match db::get_setting(&conn, "ai_config") {
-        Ok(value) => Ok(value),
-        Err(err) => {
-            log::warn!("ai: 读取 ai_config 失败: {err}");
-            Err(err)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        match db::get_setting(conn, "ai_config") {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                log::warn!("ai: 读取 ai_config 失败: {err}");
+                Err(err)
+            }
         }
-    }
+    })
+    .await
 }
 
 /// 连通性测试 + 拉模型列表（官方与 newapi 都支持 /models）。
@@ -465,19 +476,30 @@ async fn ai_summarize_inner(
 /// 签名与产物在**同一条 UPDATE** 内写入（db::set_article_ai_fields_checked），
 /// 不允许出现「新产物 + 旧签名」或「新签名 + 旧产物」。
 async fn commit_ai_product(
-    db_lock: &tokio::sync::Mutex<Connection>,
+    db_lock: &std::sync::Arc<tokio::sync::Mutex<Connection>>,
     article_id: i64,
     expected: &db::AiCommitToken,
     kind: AiKind,
     signature: &str,
     text: &str,
 ) -> AppResult<()> {
-    let product = match kind {
-        AiKind::Summary => db::AiProduct::Summary { text, signature },
-        AiKind::Translation => db::AiProduct::Translation { text, signature },
-    };
-    let conn = db_lock.lock().await;
-    let committed = db::set_article_ai_fields_checked(&conn, article_id, expected, product)?;
+    let expected = expected.clone();
+    let signature = signature.to_owned();
+    let text = text.to_owned();
+    let committed = crate::state::database_work(db_lock.clone(), move |conn| {
+        let product = match kind {
+            AiKind::Summary => db::AiProduct::Summary {
+                text: &text,
+                signature: &signature,
+            },
+            AiKind::Translation => db::AiProduct::Translation {
+                text: &text,
+                signature: &signature,
+            },
+        };
+        db::set_article_ai_fields_checked(conn, article_id, &expected, product)
+    })
+    .await?;
     if !committed {
         let what = match kind {
             AiKind::Summary => "摘要",
@@ -548,17 +570,16 @@ async fn ai_translate_inner(
     let segments = segment_plan.segments();
     let total = segments.len();
     // 同一签名下已完成的片段（恢复依据）：只重发缺失段，已完成段直接复用。
-    let completed: std::collections::HashMap<i64, String> = {
-        let conn = state.db.lock().await;
-        db::list_ai_segments(
-            &conn,
-            article_id,
-            db::AI_PRODUCT_TRANSLATION,
-            &snap.signature,
-        )?
-        .into_iter()
-        .collect()
-    };
+    let signature = snap.signature.clone();
+    let completed: std::collections::HashMap<i64, String> =
+        crate::state::database_work(state.db.clone(), move |conn| {
+            Ok(
+                db::list_ai_segments(conn, article_id, db::AI_PRODUCT_TRANSLATION, &signature)?
+                    .into_iter()
+                    .collect(),
+            )
+        })
+        .await?;
 
     let mut parts: Vec<String> = Vec::with_capacity(total);
     for (index, segment) in segments.iter().enumerate() {
@@ -611,19 +632,24 @@ async fn ai_translate_inner(
         let safe = crate::ai_segments::restore_list_semantics(&source, &safe)?;
         segment_plan.validate_part(index, &safe)?;
         {
-            let conn = state.db.lock().await;
+            let signature = snap.signature.clone();
+            let segment_text = safe.clone();
+            let epoch = snap.token.ai_epoch;
             // OPT-013 B3：片段写入带清除代次前提——生成在途时用户清除（ai_epoch
             // 前进）→ 拒绝写入并立即中止（迟到的片段不得在清除之后复活恢复记录，
             // 否则「清除后零恢复」被破坏、UI 可能重新显示 partial）。
-            let written = db::upsert_ai_segment(
-                &conn,
-                article_id,
-                db::AI_PRODUCT_TRANSLATION,
-                &snap.signature,
-                key,
-                &safe,
-                snap.token.ai_epoch,
-            )?;
+            let written = crate::state::database_work(state.db.clone(), move |conn| {
+                db::upsert_ai_segment(
+                    conn,
+                    article_id,
+                    db::AI_PRODUCT_TRANSLATION,
+                    &signature,
+                    key,
+                    &segment_text,
+                    epoch,
+                )
+            })
+            .await?;
             if !written {
                 return Err(AppError::new(
                     "aiStale",
@@ -674,13 +700,12 @@ async fn ai_translate_inner(
     // 清理故障时返回 Err 且不发 Done，而产物其实已提交，前端显示失败、下次命中
     // 缓存自愈，前后端状态互相矛盾）。残留旧片段不影响正确性：读段只按同一签名。
     {
-        let conn = state.db.lock().await;
-        if let Err(err) = db::delete_stale_ai_segments(
-            &conn,
-            article_id,
-            db::AI_PRODUCT_TRANSLATION,
-            &snap.signature,
-        ) {
+        let signature = snap.signature.clone();
+        if let Err(err) = crate::state::database_work(state.db.clone(), move |conn| {
+            db::delete_stale_ai_segments(conn, article_id, db::AI_PRODUCT_TRANSLATION, &signature)
+        })
+        .await
+        {
             log::warn!("ai: 提交成功后清理旧签名片段失败（忽略，不影响本笔成功）: {err}");
         }
     }

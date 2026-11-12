@@ -42,6 +42,7 @@ export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (s
         showName,
         cover: cover || get().player.cover,
         coverEntryId: cover ? (entryId ?? '') : get().player.coverEntryId,
+        coverPageUrl: cover ? get().entries.find(item => item.id === entryId)?.url : get().player.coverPageUrl,
         audioUrl,
         positionSec: 0,
         durationSec: 0,
@@ -110,3 +111,4 @@ export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (s
 
   togglePlayerExpanded: () => set((s) => ({ playerExpanded: !s.playerExpanded })),
 });
+

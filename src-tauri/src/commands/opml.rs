@@ -23,10 +23,10 @@ pub async fn opml_import(
     state: State<'_, AppState>,
     content: String,
 ) -> AppResult<OpmlImportReport> {
-    let report = {
-        let conn = state.db.lock().await;
-        opml_import_for_test(&conn, &content)?
-    };
+    let report = crate::state::database_work(state.db.clone(), move |conn| {
+        opml_import_for_test(conn, &content)
+    })
+    .await?;
     // OPT-009 B3：导入若已连接，订阅写回意图与本地导入同事务入队——锁外广播
     // 订阅写回回执（未连接/未入队时 notify 内部静默或同快照）。
     crate::sync::notify_subscription_outbox_changed(&state.db).await;
@@ -70,7 +70,7 @@ fn import_feeds(
     // transaction 用法对齐同库 mark_all_read_with_enqueue / persist_new_feed）。
     // 此前逐条自动提交：第 N 条失败会留下「部分源已导入」的半套状态，且报告
     // 以 Err 丢弃、已导入计数无处可查，用户重试会得到叠加结果。
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
 
     for f in feeds {
         // 已存在（URL 碰撞）→ 跳过。
@@ -152,10 +152,9 @@ fn import_feeds(
 /// 导出 OPML：全部源 + 目录名 → OPML 文档字符串。
 #[tauri::command]
 pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
-    let rows = {
-        let conn = state.db.lock().await;
-        db::export_feeds_with_folders(&conn)?
-    };
+    let rows =
+        crate::state::database_work(state.db.clone(), |conn| db::export_feeds_with_folders(conn))
+            .await?;
     crate::opml::build(&rows)
 }
 

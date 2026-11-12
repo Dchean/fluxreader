@@ -71,10 +71,10 @@ export async function run(ctx) {
   S.invokeCalls.length = 0;
   store.getState().updateSettings({ fontSize: 20, themeMode: 'light' });
   await nTick(0);   // api.setSetting 内部 await getInvoke()
-  const kWrite = S.invokeCalls.find((c) => c.cmd === 'set_setting');
-  const kPayload = kWrite ? JSON.parse(kWrite.args.value) : {};
+  const kWrite = S.invokeCalls.find((c) => c.cmd === 'patch_app_settings');
+  const kPayload = kWrite ? JSON.parse(S.settingsRaw) : {};
   checkNew('(k) updateSettings 合并进内存并落库（含新值且不丢基线键）',
-    store.getState().settings.fontSize === 20 && kWrite?.args.key === 'app_settings'
+    store.getState().settings.fontSize === 20 && kWrite?.args.patch.fontSize === 20
     && kPayload.fontSize === 20 && kPayload.themeMode === 'light'
     && typeof kPayload.markReadOnOpen === 'boolean' && kPayload.listWidth === store.getState().settings.listWidth);
 
@@ -90,7 +90,7 @@ export async function run(ctx) {
     && k5Bad.fetchConcurrency === k5Before.fetchConcurrency && k5Bad.listWidth === k5Before.listWidth);
   await nTick(0);   // api.setSetting 内部 await getInvoke()：等一拍才能观察到「有没有落库」
   checkNew('(D5) 整份补丁全非法 → 连落库 IPC 都不发（不留无效写、不空转落库）',
-    S.invokeCalls.filter((c) => c.cmd === 'set_setting').length === 0);
+    S.invokeCalls.filter((c) => c.cmd === 'patch_app_settings').length === 0);
   store.getState().updateSettings({ themeMode: 'neon', syncMode: 'p2p', defaultOpenMode: 'pdf', startupView: 'article' });
   const k5Enum = store.getState().settings;
   checkNew('(D5) 非法枚举被拦下：themeMode/syncMode/defaultOpenMode/startupView 保持原值',
@@ -109,7 +109,7 @@ export async function run(ctx) {
     k5Edge.fontSize === 13 && k5Edge.lineHeight === 240 && k5Edge.maxWidth === 1100
     && k5Edge.refreshInterval === 5 && k5Edge.fetchConcurrency === 1 && k5Edge.listWidth === 280);
   checkNew('(D5) 合法补丁照常落库（校验不误伤正常路径）',
-    S.invokeCalls.filter((c) => c.cmd === 'set_setting').length === 1);
+    S.invokeCalls.filter((c) => c.cmd === 'patch_app_settings').length === 1);
   const kSetKeys = Object.keys(store.getState().settings);
   checkNew('(D5) 校验表与设置键一一对应（漏配校验器会被 tsc 的 Record<keyof SettingsState,…> 拦下）',
     kSetKeys.every((key) => typeof k5.SETTINGS_VALIDATORS[key] === 'function')

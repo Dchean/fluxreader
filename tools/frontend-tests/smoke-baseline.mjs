@@ -7,7 +7,7 @@
 export const id = 'smoke-baseline';
 
 export async function run(ctx) {
-  const { S, store, check, SANITIZED, bodyOf, getBodyEntry, dropBodyEntry, overrideGlobal } = ctx;
+  const { S, store, check, SANITIZED, bodyOf, getBodyEntry, dropBodyEntry } = ctx;
 
 // ---- 启动装载（tauri 路径）----
 await store.getState().bootstrapFromBackend();
@@ -114,19 +114,6 @@ check('S-3a: 失败时不回退 mock（dataMode 保持 tauri、无假数据）',
 S.failBootstrap = false;
 await store.getState().retryBootstrap();
 check('S-3a: 重试后装载成功且错误态清除', store.getState().bootstrapError === null && store.getState().entries.length === 1);
-
-// S-3b：WebDAV 冲突 → 结构化 code 识别 → 确认后 force 重发
-let confirmCalls = 0;
-// R1：临时覆盖必须 finally 复原——原 window 上无 confirm，复原即 delete（不泄漏影子属性）
-const restoreConfirm = overrideGlobal(globalThis.window, 'confirm', () => { confirmCalls += 1; return true; });
-try {
-  await store.getState().githubLoginStart();
-  const ghCalls = S.invokeCalls.filter((c) => c.cmd === 'github_login_start');
-  check('S-3b: webdavConflict 弹确认并 force 重发', confirmCalls === 1 && ghCalls.length === 2 && ghCalls[1].args.force === true);
-  check('S-3b: force 成功后进入授权流程', store.getState().githubFlow?.user_code === 'WDJB-MJHT');
-} finally {
-  restoreConfirm();
-}
 
 // ---- S-4：卡片级翻译接线（P1-7 空壳修复）----
 /* 【TASK-122 改动理由】本用例模拟「通知卡对未水合条目就地翻译」：该文章在

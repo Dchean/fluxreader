@@ -2,7 +2,7 @@
 PRAGMA application_id = 1179796018;
 
 CREATE TABLE folders (
-            id            INTEGER PRIMARY KEY,
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
             name          TEXT NOT NULL,
             position      INTEGER NOT NULL DEFAULT 0,
             layout        TEXT NOT NULL DEFAULT 'article',
@@ -11,11 +11,12 @@ CREATE TABLE folders (
             collapsed     INTEGER NOT NULL DEFAULT 1,
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         , remote_id INTEGER, sync_id TEXT,
+            origin TEXT NOT NULL DEFAULT 'local' CHECK(origin IN ('local','remote')),
             summary_mode TEXT NOT NULL DEFAULT 'inherit' CHECK(summary_mode IN ('inherit','on','off')),
             translate_mode TEXT NOT NULL DEFAULT 'inherit' CHECK(translate_mode IN ('inherit','on','off')));
 
 CREATE TABLE feeds (
-            id              INTEGER PRIMARY KEY,
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
             feed_url        TEXT NOT NULL UNIQUE,
             site_url        TEXT,
             title           TEXT NOT NULL,
@@ -45,7 +46,7 @@ CREATE TABLE source_tombstones (
 );
 
 CREATE TABLE articles (
-            id            INTEGER PRIMARY KEY,
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
             feed_id       INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
             guid          TEXT NOT NULL,
             url           TEXT,
@@ -63,12 +64,14 @@ CREATE TABLE articles (
             published_at  TEXT,
             fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
             is_read       INTEGER NOT NULL DEFAULT 0,
+            body_retention_since INTEGER CHECK(body_retention_since IS NULL OR (typeof(body_retention_since)='integer' AND body_retention_since>=0)),
             is_starred    INTEGER NOT NULL DEFAULT 0, remote_id INTEGER, remote_origin_feed_id INTEGER, url_norm TEXT, read_version INTEGER NOT NULL DEFAULT 0, star_version INTEGER NOT NULL DEFAULT 0, content_id INTEGER REFERENCES contents(id), ai_epoch INTEGER NOT NULL DEFAULT 0, ai_summary_sig TEXT, translated_sig TEXT, first_seen_at TEXT, published_at_source TEXT NOT NULL DEFAULT 'legacy_unknown'
             CHECK (published_at_source IN ('feed', 'feed_clamped', 'inferred_fetch', 'legacy_unknown')),
             rss_content_id INTEGER REFERENCES contents(id),
             images_json TEXT NOT NULL DEFAULT '[]',
             image_count INTEGER NOT NULL DEFAULT 0,
             media_revision INTEGER NOT NULL DEFAULT 0,
+            local_sync_source TEXT,
             UNIQUE(feed_id, guid)
         );
 
@@ -147,6 +150,7 @@ CREATE VIRTUAL TABLE articles_trigram_idx USING fts5(
         );
 
 CREATE INDEX idx_articles_feed      ON articles(feed_id);
+CREATE INDEX idx_articles_sync_source_guid ON articles(local_sync_source,guid);
 
 CREATE INDEX idx_articles_published ON articles(published_at DESC);
 
@@ -199,6 +203,31 @@ CREATE INDEX idx_contents_url_norm ON contents(url_norm);
 
 CREATE INDEX idx_articles_content ON articles(content_id);
 CREATE INDEX idx_articles_rss_content ON articles(rss_content_id);
+CREATE INDEX idx_articles_body_retention ON articles(body_retention_since,id)
+    WHERE body_retention_since IS NOT NULL AND (content_id IS NOT NULL OR rss_content_id IS NOT NULL);
+CREATE INDEX idx_articles_body_retention_null ON articles(id)
+    WHERE body_retention_since IS NULL AND is_read=1 AND is_starred=0 AND (content_id IS NOT NULL OR rss_content_id IS NOT NULL);
+
+-- Device-local cache age, never a read register or publication timestamp.
+-- Replaying the same provider state or physical projection does not renew it.
+CREATE TRIGGER trg_articles_retention_ai AFTER INSERT ON articles
+WHEN NEW.is_read=1 AND NEW.is_starred=0 AND NEW.body_retention_since IS NULL
+BEGIN
+    UPDATE articles SET body_retention_since=CAST(strftime('%s','now') AS INTEGER) WHERE id=NEW.id;
+END;
+CREATE TRIGGER trg_articles_retention_state AFTER UPDATE OF is_read,is_starred ON articles
+WHEN NEW.is_read IS NOT OLD.is_read OR NEW.is_starred IS NOT OLD.is_starred
+BEGIN
+    UPDATE articles SET body_retention_since=CASE WHEN NEW.is_read=1 AND NEW.is_starred=0
+        THEN CAST(strftime('%s','now') AS INTEGER) END WHERE id=NEW.id;
+END;
+CREATE TRIGGER trg_articles_retention_restore AFTER UPDATE OF content_id ON articles
+WHEN OLD.content_id IS NULL AND NEW.content_id IS NOT NULL
+ AND EXISTS(SELECT 1 FROM contents WHERE id=NEW.content_id AND (COALESCE(content_html,'')!='' OR body_text!=''))
+BEGIN
+    UPDATE articles SET body_retention_since=CASE WHEN NEW.is_read=1 AND NEW.is_starred=0
+        THEN CAST(strftime('%s','now') AS INTEGER) END WHERE id=NEW.id;
+END;
 
 CREATE INDEX idx_subscription_outbox_url ON subscription_outbox(feed_url);
 
@@ -223,12 +252,14 @@ CREATE TRIGGER trg_articles_published_fallback_upd AFTER UPDATE OF published_at 
 
 CREATE TRIGGER trg_articles_recycle_ad AFTER DELETE ON articles BEGIN
             DELETE FROM contents WHERE id IN (old.content_id,old.rss_content_id)
-                AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = contents.id OR a.rss_content_id = contents.id);
+                AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = contents.id OR a.rss_content_id = contents.id)
+                AND NOT EXISTS (SELECT 1 FROM local_sync_body_hold h WHERE json_extract(h.body_ref,'$.primary')=contents.identity OR json_extract(h.body_ref,'$.rss')=contents.identity);
         END;
 
 CREATE TRIGGER trg_articles_recycle_au AFTER UPDATE OF content_id,rss_content_id ON articles BEGIN
             DELETE FROM contents WHERE id IN (old.content_id,old.rss_content_id)
-                AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = contents.id OR a.rss_content_id = contents.id);
+                AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = contents.id OR a.rss_content_id = contents.id)
+                AND NOT EXISTS (SELECT 1 FROM local_sync_body_hold h WHERE json_extract(h.body_ref,'$.primary')=contents.identity OR json_extract(h.body_ref,'$.rss')=contents.identity);
         END;
 
 CREATE TRIGGER trg_articles_trigram_ai AFTER INSERT ON articles BEGIN
@@ -332,6 +363,21 @@ CREATE TRIGGER trg_feeds_refresh_title_defaults_ins
 
 CREATE INDEX idx_articles_rss_group ON articles(feed_id,rss_content_id,title,id);
 CREATE UNIQUE INDEX idx_feeds_sync_id ON feeds(sync_id);
+CREATE TRIGGER trg_local_feed_folder_insert AFTER INSERT ON feeds
+WHEN NEW.origin!='remote' OR NEW.origin_was_local=1
+BEGIN
+    UPDATE folders SET origin='local' WHERE id=NEW.folder_id AND origin='remote';
+END;
+CREATE TRIGGER trg_local_feed_folder_update AFTER UPDATE OF folder_id,origin,origin_was_local ON feeds
+WHEN NEW.origin!='remote' OR NEW.origin_was_local=1
+BEGIN
+    UPDATE folders SET origin='local' WHERE id=NEW.folder_id AND origin='remote';
+END;
+CREATE TRIGGER trg_source_local_history AFTER UPDATE OF origin ON feeds
+WHEN OLD.origin!='remote' AND NEW.origin='remote' AND NEW.origin_was_local=0
+BEGIN
+    UPDATE feeds SET origin_was_local=1 WHERE id=NEW.id;
+END;
 CREATE TRIGGER trg_articles_media_au AFTER UPDATE OF content_id,image_url,enclosure_url,enclosure_mime,duration_sec ON articles
 WHEN NEW.images_json != (CASE WHEN COALESCE((SELECT image_count FROM contents WHERE id=NEW.content_id),0)>0 THEN (SELECT images_json FROM contents WHERE id=NEW.content_id) WHEN NEW.image_url IS NOT NULL AND trim(NEW.image_url)!='' THEN json_array(NEW.image_url) ELSE '[]' END)
   OR NEW.image_url IS NOT OLD.image_url
@@ -342,3 +388,149 @@ BEGIN
     UPDATE articles SET images_json=(CASE WHEN COALESCE((SELECT image_count FROM contents WHERE id=NEW.content_id),0)>0 THEN (SELECT images_json FROM contents WHERE id=NEW.content_id) WHEN NEW.image_url IS NOT NULL AND trim(NEW.image_url)!='' THEN json_array(NEW.image_url) ELSE '[]' END), image_count=json_array_length((CASE WHEN COALESCE((SELECT image_count FROM contents WHERE id=NEW.content_id),0)>0 THEN (SELECT images_json FROM contents WHERE id=NEW.content_id) WHEN NEW.image_url IS NOT NULL AND trim(NEW.image_url)!='' THEN json_array(NEW.image_url) ELSE '[]' END)),
         media_revision=media_revision+1 WHERE id=NEW.id;
 END;
+
+
+-- Durable local-library sync. Secrets remain in the protected settings store.
+CREATE TABLE local_sync_control (
+ id INTEGER PRIMARY KEY CHECK(id=1), actor TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+ library_id TEXT NOT NULL DEFAULT '', generation INTEGER NOT NULL DEFAULT 0,
+ capture INTEGER NOT NULL DEFAULT 0, initialized INTEGER NOT NULL DEFAULT 0, applying INTEGER NOT NULL DEFAULT 0,
+ seq INTEGER NOT NULL DEFAULT 0, lamport INTEGER NOT NULL DEFAULT 0,
+ frontier TEXT NOT NULL DEFAULT '{}', published_seq INTEGER NOT NULL DEFAULT 0,
+ publication INTEGER NOT NULL DEFAULT 0, last_state_sync INTEGER NOT NULL DEFAULT 0,
+ last_body_sync INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER NOT NULL DEFAULT 0,
+ failures INTEGER NOT NULL DEFAULT 0, last_error TEXT, data_revision INTEGER NOT NULL DEFAULT 0,
+ logical_revision INTEGER NOT NULL DEFAULT 0, accepted_job TEXT,
+ completed_frontier TEXT NOT NULL DEFAULT '{}', folding INTEGER NOT NULL DEFAULT 0,
+ bootstrap_cursor INTEGER NOT NULL DEFAULT 0,bootstrap_phase TEXT NOT NULL DEFAULT 'groups',
+ selected_baseline TEXT, selected_base TEXT, fast_stored_seq INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO local_sync_control(id) VALUES(1);
+CREATE TABLE local_sync_fields(key TEXT PRIMARY KEY, register TEXT NOT NULL);
+CREATE INDEX local_sync_article_guid ON local_sync_fields(json_extract(register,'$.value.value.guid')) WHERE key LIKE 'a/%/meta';
+CREATE TABLE local_sync_published_fields(key TEXT PRIMARY KEY, register TEXT NOT NULL);
+CREATE TABLE local_sync_journal(seq INTEGER PRIMARY KEY, lamport INTEGER NOT NULL, observed TEXT NOT NULL, patch TEXT NOT NULL);
+CREATE TABLE local_sync_epochs(source_key TEXT PRIMARY KEY, stamp TEXT NOT NULL);
+CREATE TABLE local_sync_pending(lane TEXT PRIMARY KEY CHECK(lane IN ('state','body')), generation INTEGER NOT NULL, publication INTEGER NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE local_sync_objects(actor TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(actor,kind,digest));
+CREATE TABLE local_sync_object_links(actor TEXT NOT NULL,kind TEXT NOT NULL,parent TEXT NOT NULL,child TEXT NOT NULL,PRIMARY KEY(actor,kind,parent,child));
+CREATE INDEX local_sync_object_child ON local_sync_object_links(actor,kind,child,parent);
+CREATE TABLE local_sync_object_pins(owner TEXT NOT NULL,actor TEXT NOT NULL,kind TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(owner,actor,kind,digest));
+CREATE TABLE local_sync_body_hold(id INTEGER PRIMARY KEY AUTOINCREMENT,
+ article_id INTEGER REFERENCES articles(id) ON DELETE SET NULL,
+ entry TEXT NOT NULL,body_ref TEXT NOT NULL,UNIQUE(entry,body_ref));
+CREATE INDEX local_sync_hold_article ON local_sync_body_hold(article_id);
+CREATE INDEX local_sync_body_ref ON local_sync_body_hold(body_ref);
+CREATE INDEX local_sync_hold_primary ON local_sync_body_hold(json_extract(body_ref,'$.primary'));
+CREATE INDEX local_sync_hold_rss ON local_sync_body_hold(json_extract(body_ref,'$.rss'));
+CREATE TABLE local_sync_body_receipts(manifest TEXT NOT NULL,entry TEXT NOT NULL,body_ref TEXT NOT NULL,PRIMARY KEY(manifest,entry,body_ref));
+CREATE TABLE local_sync_body_receipt_holds(manifest TEXT NOT NULL,
+ hold_id INTEGER NOT NULL REFERENCES local_sync_body_hold(id) ON DELETE CASCADE,
+ PRIMARY KEY(manifest,hold_id));
+CREATE INDEX local_sync_receipt_hold_id ON local_sync_body_receipt_holds(hold_id);
+CREATE TABLE local_sync_gc(path TEXT PRIMARY KEY,generation INTEGER NOT NULL);
+CREATE TABLE local_sync_lanes(kind TEXT PRIMARY KEY,last_sync INTEGER NOT NULL DEFAULT 0,next_retry INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,error TEXT);
+INSERT INTO local_sync_lanes(kind) VALUES('state'),('body');
+CREATE TABLE local_sync_downloads(actor TEXT NOT NULL,kind TEXT NOT NULL,manifest TEXT NOT NULL,PRIMARY KEY(actor,kind));
+
+-- F and one immutable accepted C form the only logical register read surface.
+-- Folding C into F is a physical move: it must leave this view unchanged.
+CREATE TABLE local_sync_receive (
+ id TEXT PRIMARY KEY, generation INTEGER NOT NULL, local_actor TEXT NOT NULL,
+ library_id TEXT NOT NULL, manifest TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'staging',
+ next_page INTEGER NOT NULL DEFAULT 0, validated_revision INTEGER,
+ validated_clock INTEGER NOT NULL DEFAULT 0, fold_cursor TEXT NOT NULL DEFAULT '',
+ rejected_code TEXT, rejected_reason TEXT
+);
+CREATE TABLE local_sync_candidates(job TEXT NOT NULL, key TEXT NOT NULL, register TEXT NOT NULL,
+ PRIMARY KEY(job,key), FOREIGN KEY(job) REFERENCES local_sync_receive(id) ON DELETE CASCADE);
+CREATE INDEX local_sync_fields_source ON local_sync_fields(json_extract(register,'$.value.value.source'),key) WHERE key LIKE 'a/%/meta';
+CREATE INDEX local_sync_fields_url ON local_sync_fields(json_extract(register,'$.value.value'),key) WHERE key LIKE 's/%/feed_url';
+CREATE INDEX local_sync_fields_body_rss ON local_sync_fields(json_extract(register,'$.value.value.rss'),key) WHERE key LIKE 'a/%/body';
+CREATE INDEX local_sync_candidates_source ON local_sync_candidates(job,json_extract(register,'$.value.value.source'),key) WHERE key LIKE 'a/%/meta';
+CREATE INDEX local_sync_candidates_guid ON local_sync_candidates(job,json_extract(register,'$.value.value.guid'),key) WHERE key LIKE 'a/%/meta';
+CREATE INDEX local_sync_candidates_url ON local_sync_candidates(job,json_extract(register,'$.value.value'),key) WHERE key LIKE 's/%/feed_url';
+CREATE INDEX local_sync_candidates_body_rss ON local_sync_candidates(job,json_extract(register,'$.value.value.rss'),key) WHERE key LIKE 'a/%/body';
+CREATE VIEW local_sync_winners AS
+ SELECT f.key,f.register FROM local_sync_fields f
+ WHERE NOT EXISTS(SELECT 1 FROM local_sync_candidates c
+   WHERE c.job=(SELECT accepted_job FROM local_sync_control WHERE id=1) AND c.key=f.key
+   AND (json_extract(c.register,'$.stamp.lamport'),json_extract(c.register,'$.stamp.actor'),json_extract(c.register,'$.stamp.seq'))
+     > (json_extract(f.register,'$.stamp.lamport'),json_extract(f.register,'$.stamp.actor'),json_extract(f.register,'$.stamp.seq')))
+ UNION ALL
+ SELECT c.key,c.register FROM local_sync_candidates c
+ WHERE c.job=(SELECT accepted_job FROM local_sync_control WHERE id=1)
+ AND NOT EXISTS(SELECT 1 FROM local_sync_fields f WHERE f.key=c.key
+   AND (json_extract(f.register,'$.stamp.lamport'),json_extract(f.register,'$.stamp.actor'),json_extract(f.register,'$.stamp.seq'))
+     >= (json_extract(c.register,'$.stamp.lamport'),json_extract(c.register,'$.stamp.actor'),json_extract(c.register,'$.stamp.seq')));
+-- Derived application predicates consume L immediately. These views neither
+-- allocate identity nor retain another winner; physical rows are only locators.
+CREATE VIEW local_sync_source_urls AS
+ SELECT substr(key,3,32) source,json_extract(register,'$.value.value') url
+ FROM local_sync_winners WHERE key LIKE 's/%/feed_url';
+CREATE VIEW local_sync_source_values AS
+ SELECT u.url,substr(w.key,36) field,w.key wire_key,w.register,
+ row_number() OVER(PARTITION BY u.url,substr(w.key,36) ORDER BY
+ json_extract(w.register,'$.stamp.lamport') DESC,json_extract(w.register,'$.stamp.actor') COLLATE BINARY DESC,json_extract(w.register,'$.stamp.seq') DESC,w.key COLLATE BINARY DESC) winner
+ FROM local_sync_source_urls u JOIN local_sync_winners w ON w.key>='s/'||u.source||'/' AND w.key<'s/'||u.source||'0';
+CREATE VIEW local_sync_source_state AS
+ SELECT u.source,u.url,COALESCE(json_extract(c.register,'$.value.value')=1,0) AND
+ (d.register IS NULL OR (r.register IS NOT NULL
+ AND (json_extract(r.register,'$.stamp.lamport'),json_extract(r.register,'$.stamp.actor'),json_extract(r.register,'$.stamp.seq'))>
+ (json_extract(d.register,'$.stamp.lamport'),json_extract(d.register,'$.stamp.actor'),json_extract(d.register,'$.stamp.seq'))
+ AND json_extract(r.register,'$.value.value.lamport')=json_extract(d.register,'$.stamp.lamport')
+ AND json_extract(r.register,'$.value.value.actor')=json_extract(d.register,'$.stamp.actor')
+ AND json_extract(r.register,'$.value.value.seq')=json_extract(d.register,'$.stamp.seq'))) active
+ FROM local_sync_source_urls u
+ LEFT JOIN local_sync_source_values c ON c.url=u.url AND c.field='created' AND c.winner=1
+ LEFT JOIN local_sync_source_values d ON d.url=u.url AND d.field='deleted' AND d.winner=1
+ LEFT JOIN local_sync_source_values r ON r.url=u.url AND r.field='reactivate' AND r.winner=1;
+CREATE VIEW local_sync_feed_state AS
+ SELECT f.id,COALESCE(s.url,f.feed_url) url,CASE WHEN s.source IS NULL OR (f.origin='remote' AND f.origin_was_local=0) THEN f.active ELSE s.active END active
+ FROM feeds f LEFT JOIN local_sync_source_state s ON s.source=f.sync_id;
+CREATE VIEW local_sync_article_locator AS
+ SELECT a.id,a.local_sync_source source,a.guid,
+ CASE WHEN (f.origin='remote' AND f.origin_was_local=0) OR (SELECT initialized=0 FROM local_sync_control WHERE id=1) THEN 0 ELSE 1 END managed,
+ EXISTS(SELECT 1 FROM local_sync_winners m WHERE m.key LIKE 'a/%/meta' AND json_extract(m.register,'$.value.value.source')=a.local_sync_source AND json_extract(m.register,'$.value.value.guid')=a.guid) valid
+ FROM articles a JOIN feeds f ON f.id=a.feed_id;
+CREATE VIEW local_sync_article_state AS
+ SELECT a.id,a.feed_id,CASE WHEN l.managed=0 THEN f.sync_id ELSE l.source END source,a.guid,
+ CASE WHEN l.managed=1 AND l.valid=0 THEN NULL ELSE COALESCE(own.url,fs.url) END url,
+ CASE WHEN l.managed=1 AND l.valid=0 THEN 1 ELSE COALESCE(own.active,fs.active) END active,
+ (l.managed=0 OR l.valid=1) identity_valid,
+ CASE WHEN l.managed=1 AND l.valid=0 THEN 0 ELSE COALESCE((SELECT json_extract(v.register,'$.value.value') FROM local_sync_source_urls u
+ JOIN local_sync_winners m ON m.key LIKE 'a/%/meta' AND json_extract(m.register,'$.value.value.source')=u.source AND json_extract(m.register,'$.value.value.guid')=a.guid
+ JOIN local_sync_winners v ON v.key=substr(m.key,1,66)||'/read' WHERE u.url=COALESCE(own.url,fs.url)
+ ORDER BY json_extract(v.register,'$.stamp.lamport') DESC,json_extract(v.register,'$.stamp.actor') COLLATE BINARY DESC,json_extract(v.register,'$.stamp.seq') DESC,v.key COLLATE BINARY DESC LIMIT 1),a.is_read) END is_read,
+ CASE WHEN l.managed=1 AND l.valid=0 THEN 0 ELSE COALESCE((SELECT json_extract(v.register,'$.value.value') FROM local_sync_source_urls u
+ JOIN local_sync_winners m ON m.key LIKE 'a/%/meta' AND json_extract(m.register,'$.value.value.source')=u.source AND json_extract(m.register,'$.value.value.guid')=a.guid
+ JOIN local_sync_winners v ON v.key=substr(m.key,1,66)||'/star' WHERE u.url=COALESCE(own.url,fs.url)
+ ORDER BY json_extract(v.register,'$.stamp.lamport') DESC,json_extract(v.register,'$.stamp.actor') COLLATE BINARY DESC,json_extract(v.register,'$.stamp.seq') DESC,v.key COLLATE BINARY DESC LIMIT 1),a.is_starred) END is_starred,
+ CASE WHEN l.managed=1 AND l.valid=0 THEN NULL ELSE (SELECT json_extract(v.register,'$.value.value') FROM local_sync_source_urls u
+ JOIN local_sync_winners m ON m.key LIKE 'a/%/meta' AND json_extract(m.register,'$.value.value.source')=u.source AND json_extract(m.register,'$.value.value.guid')=a.guid
+ JOIN local_sync_winners v ON v.key=substr(m.key,1,66)||'/body' WHERE u.url=COALESCE(own.url,fs.url)
+ ORDER BY json_extract(v.register,'$.stamp.lamport') DESC,json_extract(v.register,'$.stamp.actor') COLLATE BINARY DESC,json_extract(v.register,'$.stamp.seq') DESC,v.key COLLATE BINARY DESC LIMIT 1) END body_ref
+ FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN local_sync_feed_state fs ON fs.id=f.id
+ JOIN local_sync_article_locator l ON l.id=a.id LEFT JOIN local_sync_source_state own ON own.source=l.source AND l.valid=1;
+CREATE TABLE local_sync_work(job TEXT NOT NULL DEFAULT '',key TEXT NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL DEFAULT '', PRIMARY KEY(job,key));
+CREATE TABLE local_sync_known_actors(actor TEXT PRIMARY KEY);
+CREATE TABLE local_sync_intents(actor TEXT NOT NULL,seq INTEGER NOT NULL,intent TEXT NOT NULL,
+ PRIMARY KEY(actor,seq));
+CREATE TABLE local_sync_fast_pending(id INTEGER PRIMARY KEY CHECK(id=1),generation INTEGER NOT NULL,
+ actor TEXT NOT NULL,first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,path TEXT NOT NULL,bytes BLOB NOT NULL);
+CREATE TABLE local_sync_seen_batches(actor TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(actor,digest));
+CREATE TABLE local_sync_fast_objects(path TEXT PRIMARY KEY,actor TEXT NOT NULL,
+ first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,bytes BLOB NOT NULL,generation INTEGER NOT NULL);
+CREATE TABLE local_sync_roots(owner TEXT PRIMARY KEY,kind TEXT NOT NULL,reference TEXT NOT NULL);
+CREATE TABLE local_sync_baselines(id TEXT PRIMARY KEY,base TEXT NOT NULL,parent TEXT,ready INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE local_sync_baseline_fields(version TEXT NOT NULL,key TEXT NOT NULL,register TEXT NOT NULL,
+ PRIMARY KEY(version,key));
+CREATE INDEX local_sync_baseline_key ON local_sync_baseline_fields(key,version);
+CREATE VIEW local_sync_selected_fields AS
+ WITH RECURSIVE versions(id,parent,depth) AS (
+  SELECT b.id,b.parent,0 FROM local_sync_baselines b JOIN local_sync_control c ON c.selected_baseline=b.id
+  UNION ALL SELECT b.id,b.parent,v.depth+1 FROM local_sync_baselines b JOIN versions v ON b.id=v.parent WHERE v.depth<32
+ )
+ SELECT f.key,f.register FROM local_sync_baseline_fields f JOIN versions v ON v.id=f.version
+ WHERE NOT EXISTS(SELECT 1 FROM local_sync_baseline_fields newer JOIN versions n ON n.id=newer.version WHERE newer.key=f.key AND n.depth<v.depth);

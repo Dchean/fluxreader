@@ -87,7 +87,7 @@ const S = {
   },
 // 批量水合（get_articles）的可控行为：S-2 用例按场景改写
   getArticlesBehavior: { rows: [], reject: false },
-// S-3 可控行为：bootstrap 后端故障注入 / github 登录首调冲突
+// S-3 可控行为：bootstrap 后端故障注入
   failBootstrap: false,
 // 3) invoke mock：按命令返回
   invokeCalls: [],
@@ -131,7 +131,6 @@ const S = {
   aiCacheCheckPlan: null,
   pendingAiChecks: [],
   settingsRaw: null,     // get_setting('app_settings') 的返回值
-  ghLoginStatus: null,   // github_login_status 的返回值：null | {login} | 'reject'
   extractResult: null,   // extract_fulltext 的返回值：ExtractFulltextResult | 'reject' | null
                               // TASK-076：后端改为结构化 { html, degraded, reason }
 
@@ -206,13 +205,6 @@ if (S.failBootstrap && ['list_folders', 'list_feeds', 'list_articles', 'sync_sta
 }
 switch (cmd) {
   case 'article_index': return Promise.resolve(0);
-  case 'github_login_start': {
-    // P1-10：首调（不带 force）返回 webdavConflict 结构化错误；force 重发成功
-    if (args.force !== true) {
-      return Promise.reject({ code: 'webdavConflict', message: 'WebDAV conflict: existing data' });
-    }
-    return Promise.resolve({ user_code: 'WDJB-MJHT', verification_uri: 'https://github.com/login/device', interval: 3600 });
-  }
   case 'list_folders': return Promise.resolve([{ ...FOLDERS[0], id: 1, layout: 'article' }]);
   case 'list_feeds': case 'list_article_sources': return Promise.resolve([{ ...FEEDS[0], id: 1, folder_id: 1 }]);
   case 'list_article_member_ids': return Promise.resolve([S.articleRow.id]);
@@ -227,6 +219,7 @@ switch (cmd) {
   case 'get_article': return Promise.resolve(S.articleRow);
 
   case 'get_setting': return Promise.resolve(null);
+  case 'patch_app_settings': return Promise.resolve(JSON.stringify(args.patch));
   case 'set_setting': return Promise.resolve(null);
   // ai_translate / ai_summarize：args.onChannel 是 Channel mock
   case 'ai_translate': {
@@ -342,7 +335,8 @@ globalThis.__INVOKE__ = (cmd, args) => {
       }
       return Promise.resolve(S.getArticlesPlan ? S.getArticlesPlan.rows : []);
     }
-    case 'get_setting': return Promise.resolve(S.settingsRaw);
+    case 'get_setting': return Promise.resolve(args?.key === 'app_settings' ? S.settingsRaw : null);
+    case 'patch_app_settings': S.settingsRaw = JSON.stringify({ ...JSON.parse(S.settingsRaw ?? '{}'), ...args.patch }); return Promise.resolve(S.settingsRaw);
     case 'set_setting': return Promise.resolve(null);
     /* TASK-107：单条标读忠实落库（record_read_state 语义：仅该行自身，
        无本地同文副本传播）——单条计数一致性核查的根基 */
@@ -390,11 +384,6 @@ globalThis.__INVOKE__ = (cmd, args) => {
       }
       return Promise.resolve(affected);
     }
-    /* E1：GitHub 登录态恢复（bootstrapGithubAuth 定向断言用；null / {login} / 'reject'） */
-    case 'github_login_status':
-      return S.ghLoginStatus === 'reject'
-        ? Promise.reject({ message: 'ipc down' })
-        : Promise.resolve(S.ghLoginStatus);
     /* TASK-076：全文提取返回结构化结果（'reject' = 网络失败）。
        为兼容既有用例仍传裸字符串的写法，这里把字符串折算成「成功」形态：
        { html, degraded:false, reason:null }。 */
@@ -536,7 +525,6 @@ async function resetStore(extra) {
   S.indexPlan = null;
   S.pendingIndex = [];
   S.settingsRaw = null;
-  S.ghLoginStatus = null;
   S.extractResult = null;
   S.heldAi = [];
   S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
@@ -589,6 +577,9 @@ async function resetStore(extra) {
        避免跨用例残留（上一域的 local_only 计数被下一域读到）。 */
     subOutboxStats: null, subscriptionCapabilities: null,
     /* 同步账户/队列分类/成功短窗同样是跨用例真实事件源。 */
+    libraryGeneration: 0, libraryRestoreBusy: false,
+    localSyncState: null, localSyncBusy: null, localSyncError: null,
+    portableBackup: { busy: null, preview: null, result: null, error: null, refreshFailed: false },
     syncStatus: 'synced', backgroundSyncing: false, syncConnected: false,
     syncAccount: null, syncProtocol: null, syncEndpoint: null, syncLastSync: 0,
     syncSucceededAt: null, syncWaiting: 0, syncFailed: 0, syncLocalOnly: 0,

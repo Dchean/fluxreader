@@ -146,6 +146,8 @@ export interface ArticleEntry {
   enclosureUrl?: string;  // 附件/大图 enclosure
   /** 条目原文网页地址（「源网页」「查看原文」外链打开用） */
   url?: string;
+  /** 本次轻属性是否提供url；区分缺省未知与明确null，供短期全文目标撤销。 */
+  urlKnown?: boolean;
 }
 
 export type TabName =

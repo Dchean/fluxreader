@@ -5,6 +5,7 @@ import { openExternalWithFeedback } from '../../lib/external';
 import { api, extractError } from '../../lib/api';
 import { isComparableVersion, shouldOfferUpdate } from './compareVersions';
 import { DatabaseBackupSection } from './DatabaseBackupSection';
+import { PortableBackupSection } from './PortableBackupSection';
 
 /* ---------- TAB 8: 关于 ---------- */
 
@@ -83,7 +84,8 @@ export function AboutTab() {
         {updateState === 'upToDate' && <span className="about-update-hint">已是最新版本</span>}
         {updateState === 'failed' && <span className="about-update-hint">检查失败</span>}
       </SettingCard>
-      <DatabaseBackupSection />
+      <PortableBackupSection />
+      <details><summary className="settings-group-title">本机故障恢复（高级）</summary><DatabaseBackupSection /></details>
     </>
   );
 }

@@ -5,7 +5,6 @@ import {
   type RefreshSummary,
   type SubscriptionOutboxStats,
 } from '../../lib/api';
-import { openExternalWithFeedback } from '../../lib/external';
 import { appStore } from '../internals';
 import { syncFailureMessage } from '../syncErrors';
 import type {
@@ -17,7 +16,7 @@ import type {
   SyncActivityUpdate,
 } from '../types';
 
-/** 同步 slice：手动刷新状态机 + GitHub 设备流登录（模块级常驻轮询）。
+/** 同步 slice：RSS 服务手动刷新状态机。
  *
  *  Pick 的键集即本 slice 的全部键；与其它 slice 两两不相交（合起来 = 原 useAppStore 全集）。
  */
@@ -48,12 +47,6 @@ export type SyncSlice = Pick<
   | 'syncQueueLastError'
   | 'subOutboxStats'
   | 'subscriptionCapabilities'
-  | 'githubFlow'
-  | 'githubAccount'
-  | 'githubLoggingIn'
-  | 'githubLoginStartPending'
-  | 'githubPollPending'
-  | 'githubLoginCancelPending'
   | 'beginSyncActivity'
   | 'updateSyncActivity'
   | 'finishSyncActivity'
@@ -66,21 +59,14 @@ export type SyncSlice = Pick<
   | 'applySubscriptionOutboxChanged'
   | 'refreshSubscriptionOutboxStats'
   | 'loadSubscriptionCapabilities'
-  | 'githubLoginStart'
-  | 'githubLoginCancel'
-  | 'githubLoginDisconnect'
 >;
 
-/* GitHub 设备流轮询的模块级定时器：常驻不受组件生命周期影响。
-   poll 在成功/失败/被新登录覆盖时清掉；未授权期间按 interval 自续。 */
-let githubPollTimer: ReturnType<typeof setTimeout> | null = null;
-/* 一次登录发起/轮询/取消共享的代次。取消或新发起都会递增；所有异步回包
-   落地前复核代次，避免取消后迟到的 start/poll 重新写回 flow。 */
-let githubLoginGeneration = 0;
 /* OPT-022：手动同步是 store 级单飞任务。组件卸载/切页不影响在途 Promise；
    重复入口复用同一 Promise，避免两轮完整同步互相覆盖终态。 */
 let manualSyncInFlight: Promise<void> | null = null;
 let syncStatusRequestSeq = 0;
+/** 成功替换资料库后旧账号读取失去资格；普通同步不调用。 */
+export function invalidateRssStatusReadsForRestore(): void { ++syncStatusRequestSeq; }
 /* OPT-022 复审：所有生产同步链共享 generation 所有权。活动表保留每个真实
    在途操作；展示优先选启动序号更新的活动，全部结束后只接受序号更新的终态。
    因而旧请求可以完成自己的业务，但不能覆盖新请求已经发布的阶段/终态。 */
@@ -170,8 +156,6 @@ function syncActivityOwnerName(owner: SyncActivityOwner): string {
       return '添加订阅';
     case 'save-and-sync':
       return '保存并同步';
-    case 'github-disconnect':
-      return '断开 GitHub';
   }
 }
 
@@ -237,52 +221,6 @@ export function syncActivityLabel(activity: {
   return '同步中…';
 }
 
-function scheduleGithubPoll(intervalSec: number, generation: number) {
-  if (githubPollTimer) clearTimeout(githubPollTimer);
-  githubPollTimer = setTimeout(
-    () => void doGithubPoll(generation),
-    Math.max(3, intervalSec) * 1000,
-  );
-}
-
-function clearGithubPoll() {
-  if (githubPollTimer) {
-    clearTimeout(githubPollTimer);
-    githubPollTimer = null;
-  }
-}
-
-async function doGithubPoll(generation: number) {
-  githubPollTimer = null;
-  if (generation !== githubLoginGeneration) return;
-  appStore().setState({ githubPollPending: true });
-  try {
-    const acc = await api.githubLoginPoll();
-    if (generation !== githubLoginGeneration) return;
-    if (acc) {
-      clearGithubPoll();
-      appStore().setState({ githubAccount: acc, githubFlow: null });
-      appStore().getState().showToast(`已登录 GitHub：${acc.login}（Gist 同步已就绪）`);
-    } else {
-      const flow = appStore().getState().githubFlow;
-      if (flow) scheduleGithubPoll(flow.interval, generation);
-    }
-  } catch (e) {
-    if (generation !== githubLoginGeneration) return;
-    clearGithubPoll();
-    appStore().setState({ githubFlow: null });
-    appStore().getState().showToast(`GitHub 登录失败：${extractError(e)}`);
-  } finally {
-    appStore().setState({ githubPollPending: false });
-  }
-}
-
-/** 测试夹具：失效在途回包并清除轮询定时器（不写生产状态）。 */
-export function resetGithubLoginForTests() {
-  githubLoginGeneration += 1;
-  clearGithubPoll();
-}
-
 /** TASK-100 P3-3：sync_phase 失败的「未连接」判定。后端未配置/未连接时
     sync_phase 抛结构化错误 { code: 'notConnected', message: '未配置同步后端
     （Google Reader / Fever 凭据）' }
@@ -327,12 +265,6 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
      「无待办」；事件与挂载刷新写入同一状态源） */
   subOutboxStats: null,
   subscriptionCapabilities: null,
-  githubFlow: null,
-  githubAccount: null,
-  githubLoggingIn: false,
-  githubLoginStartPending: false,
-  githubPollPending: false,
-  githubLoginCancelPending: false,
 
   beginSyncActivity: (owner) => {
     const token = ++syncActivitySequence;
@@ -640,9 +572,10 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
   },
 
   refreshSyncQueueStats: async () => {
+    const generation = get().libraryGeneration;
     try {
       const stats = await api.syncQueueStats();
-      if (stats) get().applySyncQueueChanged(stats);
+      if (stats && generation === get().libraryGeneration) get().applySyncQueueChanged(stats);
     } catch {
       /* 纯提示性刷新失败保持原值（不写零冒充无待办） */
     }
@@ -659,134 +592,25 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
   },
 
   refreshSubscriptionOutboxStats: async () => {
+    const generation = get().libraryGeneration;
     try {
       const stats = await api.subscriptionOutboxStats();
       /* 读失败保持原值（不写零冒充「无待办」）；浏览器环境返回 null 同样跳过 */
-      if (stats) set({ subOutboxStats: stats });
+      if (stats && generation === get().libraryGeneration) set({ subOutboxStats: stats });
     } catch {
       /* 纯提示性读取失败：保持原值（Rust 侧读取失败为 Err，不返回零值） */
     }
   },
 
   loadSubscriptionCapabilities: async () => {
+    const generation = get().libraryGeneration;
     try {
       const caps = await api.subscriptionCapabilities();
       /* 失败保持原值（不折成 null 也不折成未连接——不伪造能力声明） */
-      if (caps) set({ subscriptionCapabilities: caps });
+      if (caps && generation === get().libraryGeneration) set({ subscriptionCapabilities: caps });
     } catch {
       /* 同上：纯提示性读取失败静默兜底 */
     }
   },
 
-  /* ================= GitHub 设备流登录（store 级常驻轮询） ================= *
-     GitHub 登录的发起/轮询放在 store 而非设置页组件：设备流等待授权
-     可能跨数十秒，期间用户可能切走/关闭设置弹窗——组件卸载即清定时器，
-     网页授权完成后软件再无反应（历史复现 bug）。模块级定时器不受组件
-     生命周期影响，登录状态常驻 AppState。 */
-
-  githubLoginStart: async () => {
-    if (
-      get().githubLoggingIn
-      || get().githubLoginStartPending
-      || get().githubPollPending
-      || get().githubLoginCancelPending
-    ) return;
-    const generation = ++githubLoginGeneration;
-    clearGithubPoll();
-    set({ githubLoggingIn: true, githubLoginStartPending: true, githubFlow: null });
-    try {
-      let start: Awaited<ReturnType<typeof api.githubLoginStart>>;
-      try {
-        start = await api.githubLoginStart();
-      } catch (first) {
-        if (generation !== githubLoginGeneration) return;
-        /* WebDAV 冲突：确认后带 force 重发（后端错误码 webdavConflict）。
-           用结构化 code 判定而非 String(e)——Tauri 拒绝值是对象，
-           String() 恒得 [object Object]，此前确认框永不弹出（P1-10） */
-        const code = first && typeof first === 'object' ? (first as { code?: unknown }).code : undefined;
-        const msg = extractError(first);
-        if (code === 'webdavConflict' || msg.includes('WebDAV')) {
-          if (!window.confirm(`${msg}
-
-确定切换为 GitHub Gist 同步吗？`)) return;
-          if (generation !== githubLoginGeneration) return;
-          start = await api.githubLoginStart(true);
-        } else {
-          throw first;
-        }
-      }
-      if (generation !== githubLoginGeneration) return;
-      set({ githubFlow: start });
-      await openExternalWithFeedback(start.verification_uri, { reportFailure: false, rethrow: true });
-      if (generation !== githubLoginGeneration) return;
-      get().showToast('已在浏览器打开授权页');
-      scheduleGithubPoll(start.interval, generation);
-    } catch (e) {
-      if (generation !== githubLoginGeneration) return;
-      clearGithubPoll();
-      set({ githubFlow: null });
-      get().showToast(`发起登录失败：${extractError(e)}`);
-    } finally {
-      set({ githubLoginStartPending: false });
-      if (generation === githubLoginGeneration) set({ githubLoggingIn: false });
-    }
-  },
-
-  githubLoginCancel: async () => {
-    if (get().githubLoginCancelPending) return;
-    if (!get().githubFlow && !get().githubLoggingIn) return;
-    const generation = ++githubLoginGeneration;
-    clearGithubPoll();
-    /* 不清 githubLoginStartPending / githubPollPending：在途 IPC 结算前
-       不得并发第二次发起；两者由各自 finally 清除。 */
-    set({ githubLoginCancelPending: true });
-    try {
-      // Note: 取消必须等后端递代次并清 flow；只清前端会让旧 poll 继续落库 — 见 .agents/notes/implemented/bug-fix/2026-11-04-GitHub设备流后端取消与代次.md
-      const result = await api.githubLoginCancel();
-      if (generation !== githubLoginGeneration) return;
-      set({ githubFlow: null, githubLoggingIn: false });
-      if (!result.cancelled) {
-        try {
-          const account = await api.githubLoginStatus();
-          if (generation !== githubLoginGeneration) return;
-          if (account) set({ githubAccount: account });
-          get().showToast(
-            account
-              ? `后端没有可取消的授权流；授权已完成：${account.login}`
-              : '后端没有可取消的授权流；本机已停止等待，登录状态未确认',
-          );
-        } catch {
-          if (generation !== githubLoginGeneration) return;
-          get().showToast('后端没有可取消的授权流；本机已停止等待，登录状态未确认');
-        }
-        return;
-      }
-      get().showToast('已停止本机等待；网页上的 GitHub 授权不会被撤销');
-    } catch (e) {
-      if (generation !== githubLoginGeneration) return;
-      /* 用户已要求停止本机展示，否则设置会被失败的后端锁永久卡住；
-         但不显示取消成功，并保留在途标记直到底层 IPC 结算。 */
-      set({ githubFlow: null, githubLoggingIn: false });
-      get().showToast(`取消失败：${extractError(e)}；后端授权流可能仍未结束`);
-    } finally {
-      set({ githubLoginCancelPending: false });
-    }
-  },
-
-  githubLoginDisconnect: async () => {
-    const syncToken = get().beginSyncActivity('github-disconnect');
-    set({ githubLoggingIn: true });
-    try {
-      await api.githubLoginDisconnect();
-      clearGithubPoll();
-      set({ githubAccount: null, githubFlow: null });
-      get().finishSyncActivity(syncToken, 'synced');
-      get().showToast('已断开 GitHub 登录');
-    } catch (e) {
-      get().finishSyncActivity(syncToken, 'error');
-      get().showToast(`断开失败：${extractError(e)}`);
-    } finally {
-      set({ githubLoggingIn: false });
-    }
-  },
 });

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useAppStore, bootstrapGithubAuth, selectVisibleEntries } from './store';
+import { useAppStore, selectVisibleEntries, readBackAppliedAppSettings, runAppSettingsApplyBoundary } from './store';
 import { Sidebar } from './components/Sidebar';
 import { Timeline } from './components/Timeline';
 import { Reader } from './components/Reader';
@@ -10,6 +10,8 @@ import { ErrorCenterDialog } from './components/ErrorCenter';
 import { ContextMenuHost } from './components/ContextMenu';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useTauriEvent } from './components/useTauriEvent';
+import { ModalOverlay } from './components/primitives';
+import { extractError } from './lib/api';
 import { anyOverlayOpen, isInteractiveSpaceTarget, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
 import type { SyncQueueStats } from './lib/api';
@@ -61,6 +63,19 @@ export default function App() {
   const playerExpanded = useAppStore((s) => s.playerExpanded);
   const dataLoading = useAppStore((s) => s.dataLoading);
   const bootstrapError = useAppStore((s) => s.bootstrapError);
+  const libraryRestoreBusy = useAppStore((s) => s.libraryRestoreBusy);
+  const libraryGeneration = useAppStore((s) => s.libraryGeneration);
+  const portablePhase = useAppStore((s) => s.portableBackup.busy);
+
+  useEffect(() => {
+    // 在任何全局/浮层快捷键之前处理。Tab 仍交给恢复对话框的 focus trap。
+    const blockDuringRestore = (event: KeyboardEvent) => {
+      if (!useAppStore.getState().libraryRestoreBusy || event.key === 'Tab') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+    };
+    window.addEventListener('keydown', blockDuringRestore, true);
+    return () => window.removeEventListener('keydown', blockDuringRestore, true);
+  }, []);
 
   // 日界刷新只更新当前会话属性/计数；下一次显式导航才捕获新的“今天”成员。
   useEffect(() => {
@@ -102,20 +117,26 @@ export default function App() {
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {
     /* 设置恢复与来源/计数元数据并行；完整成员查询等待启动筛选接受，随后原子落地。 */    void useAppStore.getState().bootstrapFromBackend();
-    /* GitHub 登录态恢复（设备流 token 持久化在 SQLite，启动即还原账户显示） */
-    void bootstrapGithubAuth();
+    if ('__TAURI_INTERNALS__' in window) {
+      void useAppStore.getState().refreshLocalSyncStatus().catch((error) => {
+        useAppStore.getState().showToast(`WebDAV 状态读取失败：${extractError(error)}`);
+      });
+    }
   }, []);
 
   /* ---------- 后台刷新调度器事件：新文章到达即重载列表 + toast ---------- */
   useTauriEvent<{
-          new_articles: number;
-          failed_feeds: number;
+    new_articles?: number;
+    failed_feeds?: number;
+    source?: 'local-sync' | 'portable-restore';
     /* OPT-007（F11）：后台同步的数据变化事件按实际变更集驱动——纯读藏
        对账（merged_states>0、无新文章）也会到达本监听器；两字段仅为
        可诊断性随 payload 下发，落地动作与两条既有通道一致。 */
     pulled_entries?: number;
     merged_states?: number;
   }>('feeds-updated', (e) => {
+    // restore 的全量重建由提交调用者单独拥有；重复事件不能再次清空新会话。
+    if (e.source === 'portable-restore' || useAppStore.getState().libraryRestoreBusy) return;
     const { new_articles, failed_feeds } = e;
     /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
     /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
@@ -123,10 +144,21 @@ export default function App() {
        OPT-007：纯对账变化（new_articles=0）同样走这条保位 reload——
        列表/计数/Reader 跟随更新，锚点保留；空变化不在 Rust 侧发事件。 */
     void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
-    if (new_articles > 0) {
+    if ((new_articles ?? 0) > 0) {
       useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);
-    } else if (failed_feeds > 0) {
+    } else if ((failed_feeds ?? 0) > 0) {
       useAppStore.getState().showToast(`后台刷新：${failed_feeds} 个源抓取失败`);
+    }
+  });
+
+  useTauriEvent<{ kind: 'state' | 'body' | 'restore'; ok: boolean }>('local-sync-updated', (event) => {
+    if (useAppStore.getState().libraryRestoreBusy || event.kind === 'restore') return;
+    void useAppStore.getState().refreshLocalSyncStatus().catch(() => {});
+    if (event.kind === 'state' && event.ok) {
+      // 普通同步刷新设置基线，不把启动筛选应用到正在阅读的会话。
+      void runAppSettingsApplyBoundary(() => readBackAppliedAppSettings({ applyViewFilters: false })).catch((error) => {
+        useAppStore.getState().showToast(`状态同步已完成，但设置回读失败：${extractError(error)}`);
+      });
     }
   });
 
@@ -175,6 +207,7 @@ export default function App() {
 
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
   useTauriEvent<string>('player-media', (action) => {
+    if (useAppStore.getState().libraryRestoreBusy) return;
     /* OPT-015：媒体键语义（play/pause 目标态幂等、toggle 才切换、未激活
        不启动、stop 关闭）单点在 store.applyMediaAction；这里只收窄
        payload，不再内联播放判定——此前 play/pause/toggle 全部
@@ -350,13 +383,14 @@ export default function App() {
       <div className="immersive-win-controls">
         <button className="win-btn" title="最小化" onClick={minimizeWindow}>—</button>
         <button className="win-btn" title="最大化/还原" onClick={toggleMaximizeWindow}>□</button>
-        <button className="win-btn close" title="关闭" onClick={closeWindow}>✕</button>
+        <button className="win-btn close" title="关闭" disabled={libraryRestoreBusy} onClick={closeWindow}>✕</button>
       </div>
 
       {/* 产品树错误边界：主内容 + 浮层 + toast 崩溃时出全屏兜底态；
           窗口控制留在边界外——无边框窗口在崩溃态下仍必须能最小化/关闭。
           Note: 归因与分层取舍见 .agents/notes/implemented/architecture/2026-11-01-产品树错误边界放顶层.md */}
       <ErrorBoundary>
+        <div inert={libraryRestoreBusy} style={{ display: 'contents' }}>
         <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${effectiveListWidth}px` } as React.CSSProperties}>
           {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
           {dataLoading ? (
@@ -392,8 +426,8 @@ export default function App() {
         <PlayerBar />
 
         {/* 浮层 */}
-        <SettingsModal />
-        <SearchModal />
+        <SettingsModal key={`settings:${libraryGeneration}`} />
+        <SearchModal key={`search:${libraryGeneration}`} />
         <Lightbox />
         <NewCategoryModal />
         <AddFeedModal />
@@ -404,6 +438,15 @@ export default function App() {
         <CloseAskDialog />
         {/* 全局右键菜单（替换 WebView2 默认菜单） */}
         <ContextMenuHost />
+        </div>
+        {libraryRestoreBusy && <div style={{ position: 'fixed', inset: 0, zIndex: 10000 }}>
+          <ModalOverlay open onClose={() => {}} ariaLabel="正在恢复资料库" contentWidth={420}>
+            <div className="mini-dialog" role="status" aria-live="polite" aria-busy="true">
+              <h3>{portablePhase === 'refresh' ? '恢复已完成，正在刷新界面…' : '正在恢复资料库…'}</h3>
+              <p>请稍候，完成前暂时不能编辑资料库。</p>
+            </div>
+          </ModalOverlay>
+        </div>}
 
         {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
             退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
