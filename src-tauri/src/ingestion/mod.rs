@@ -15,11 +15,16 @@ mod http;
 mod parse;
 mod staged;
 
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use staged::refresh_claim_hook;
+
 pub use http::{
-    build_client, conditional_get, decode_body_bytes, read_body_capped, Fetched, MAX_BODY_BYTES,
-    USER_AGENT,
+    build_client, conditional_get, decode_body_bytes, read_body_capped, read_error_detail,
+    read_text_capped, Fetched, MAX_BODY_BYTES, USER_AGENT,
 };
-pub use parse::{parse_feed, ParsedFeed};
+pub use parse::{parse_feed, ParsedArticle, ParsedFeed};
 pub use staged::{
-    apply_refresh_result, fetch_and_parse, read_feed_for_refresh, refresh_feed_staged,
+    apply_refresh_result, fetch_and_parse, refresh_feed_staged, FeedRefreshOutcome,
+    RefreshApplyOutcome, RefreshWriteContext,
 };

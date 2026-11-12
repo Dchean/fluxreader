@@ -41,7 +41,7 @@ async fn refresh_due(
     let mut f = 0;
     for id in due {
         match ingestion::refresh_feed_staged(db, client, id, false).await {
-            Ok(count) => n += count,
+            Ok(outcome) => n += outcome.new_articles(),
             Err(_) => f += 1,
         }
     }
@@ -185,7 +185,7 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
 
 /* ============================================================
 同步模式（syncMode）过滤语义：hybrid 跳过 Miniflux 源，direct 全含，
-手动全量入口（feeds_all_ids(true)）不受模式影响。
+手动/托盘全量也遵守同一模式：hybrid 只返回本地源，direct 才返回全部来源。
 ============================================================ */
 
 fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
@@ -249,17 +249,23 @@ fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
 }
 
 #[test]
-fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
+fn sync_mode_manual_refresh_scope_matches_hybrid_copy() {
     let tmp = common::unique_db_path(&format!("mode_{}_", line!()));
     let _cleanup = common::TempDbGuard::new(tmp.clone());
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
 
-    // 手动/托盘全量入口：无论模式，始终全部源（模式只影响后台定时）
+    // hybrid 的手动/托盘入口与「刷新本地订阅源」文案一致：只含 local。
+    let local_only = db::feeds_all_ids(&conn, false).unwrap();
+    assert!(
+        local_only.contains(&direct) && !local_only.contains(&mf),
+        "hybrid manual refresh must include local feeds only"
+    );
+    // direct 模式仍抓全部来源。
     let all = db::feeds_all_ids(&conn, true).unwrap();
     assert!(
         all.contains(&direct) && all.contains(&mf),
-        "manual refresh includes all feeds"
+        "direct manual refresh includes all feeds"
     );
 }
 

@@ -1,5 +1,7 @@
 import type { StateCreator } from 'zustand';
-import { api } from '../../lib/api';
+import { api, isTauri } from '../../lib/api';
+import { galleryImageUrls, galleryMediaKey, galleryStepIndex, galleryUpdatedIndex, type GalleryLightboxState } from '../../lib/galleryMedia';
+import type { ArticleEntry } from '../../types';
 import type { AppErrorEntry, AppState } from '../types';
 
 /** UI slice：弹层开关状态、关闭询问应答与 toast 队列 + 错误中心（OPT-017E）。
@@ -11,9 +13,13 @@ export type UiSlice = Pick<
   | 'settingsOpen'
   | 'settingsTab'
   | 'searchOpen'
+  | 'contextMenuOpen'
   | 'closeAskVisible'
   | 'lightboxUrl'
+  | 'mediaCapacityRevision'
   | 'lightboxEntryId'
+  | 'lightboxPageUrl'
+  | 'lightboxGallery'
   | 'newCategoryModalOpen'
   | 'addFeedModalOpen'
   | 'addFeedTargetCatId'
@@ -32,7 +38,11 @@ export type UiSlice = Pick<
   | 'openSearch'
   | 'closeSearch'
   | 'answerCloseAsk'
+  | 'dismissCloseAsk'
   | 'openLightbox'
+  | 'openGalleryLightbox'
+  | 'refreshGalleryLightbox'
+  | 'stepGalleryLightbox'
   | 'closeLightbox'
   | 'openNewCategoryModal'
   | 'openAddFeedModal'
@@ -113,13 +123,78 @@ export function clearToastTimers() {
   toastTimers.clear();
 }
 
-export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get) => ({
+export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get) => {
+  // 每个 store 单调递增；close、单图打开和新请求都使旧响应失效。测试清状态也不重用代次。
+  let galleryRequestId = 0;
+  // Note: 集合/请求归灯箱持有，不改阅读成员与正文缓存 — 见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md
+  const loadGallery = async (entry: ArticleEntry, previous: GalleryLightboxState | null) => {
+    if (get().libraryRestoreBusy) return;
+    const libraryGeneration = get().libraryGeneration;
+    const requestId = ++galleryRequestId;
+    const sourceKey = galleryMediaKey(entry);
+    const firstImageUrl = entry.imageUrl || null;
+    const opened = !!previous?.opened || !!firstImageUrl;
+    const gallery: GalleryLightboxState = {
+      entryId: entry.id, sourceKey, requestId,
+      mediaRevision: Math.max(entry.mediaRevision ?? 0, previous?.mediaRevision ?? 0),
+      // 重新取集合期间隐藏上一版图片；首次打开可立即展示列表给出的首图。
+      firstImageUrl: previous ? null : firstImageUrl, pageUrl: entry.url,
+      urls: previous?.urls ?? (firstImageUrl ? [firstImageUrl] : []),
+      index: previous?.index ?? 0, status: 'loading', opened,
+    };
+    set({ lightboxGallery: gallery, lightboxEntryId: entry.id,
+      lightboxUrl: firstImageUrl ?? (previous?.opened ? get().lightboxUrl : null) });
+    if (opened && !previous?.opened) get().markEntryOpened(entry.id);
+
+    const currentRequest = () => {
+      const current = get().lightboxGallery;
+      const liveEntry = get().entries.find((item) => item.id === entry.id);
+      return !get().libraryRestoreBusy && get().libraryGeneration === libraryGeneration
+        && current?.requestId === requestId && requestId === galleryRequestId
+        && liveEntry && !liveEntry.unavailable && galleryMediaKey(liveEntry) === sourceKey
+        && (current.opened || get().activeArticleId === entry.id)
+        ? current : null;
+    };
+    const finish = (urls: string[], revision: number) => {
+      const current = currentRequest();
+      if (!current) return;
+      const index = galleryUpdatedIndex(urls, current.urls[current.index], current.index);
+      const shouldOpen = urls.length > 0;
+      set({ lightboxGallery: { ...current, urls, index, mediaRevision: revision,
+        status: shouldOpen ? 'ready' : 'empty', opened: current.opened || shouldOpen },
+        lightboxUrl: urls[index] ?? get().lightboxUrl });
+      if (shouldOpen && !current.opened) get().markEntryOpened(entry.id);
+    };
+    try {
+      // 浏览器演示没有详情 IPC；只预览演示首图，不把非数字 id 送进后端。
+      const id = Number(entry.id);
+      if (!isTauri() || get().dataMode !== 'tauri' || !Number.isSafeInteger(id) || id <= 0) {
+        finish(firstImageUrl ? [firstImageUrl] : [], gallery.mediaRevision);
+        return;
+      }
+      const detail = await api.getArticle(id);
+      if (!currentRequest()) return;
+      if (!detail) { finish([], gallery.mediaRevision); return; }
+      if (String(detail.id) !== entry.id || String(detail.feed_id) !== entry.feedId
+        || detail.media_revision < gallery.mediaRevision) throw new Error('stale gallery detail');
+      finish(galleryImageUrls(detail.images), detail.media_revision);
+    } catch {
+      const current = currentRequest();
+      if (current) set({ lightboxGallery: { ...current, status: 'error' } });
+    }
+  };
+
+  return {
   settingsOpen: false,
   settingsTab: 'general',
   searchOpen: false,
+  contextMenuOpen: false,
   closeAskVisible: false,
   lightboxUrl: null,
+  mediaCapacityRevision: 0,
   lightboxEntryId: null,
+  lightboxPageUrl: undefined,
+  lightboxGallery: null,
   newCategoryModalOpen: false,
   addFeedModalOpen: false,
   addFeedTargetCatId: '',
@@ -157,8 +232,35 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
         ),
       );
   },
-  openLightbox: (url, entryId) => set({ lightboxUrl: url, lightboxEntryId: entryId ?? null }),
-  closeLightbox: () => set({ lightboxUrl: null, lightboxEntryId: null }),
+  dismissCloseAsk: () => set({ closeAskVisible: false }),
+  openLightbox: (url, entryId, pageUrl) => {
+    if (get().libraryRestoreBusy) return;
+    ++galleryRequestId;
+    set({ lightboxUrl: url, lightboxEntryId: entryId ?? null, lightboxPageUrl: pageUrl, lightboxGallery: null });
+  },
+  openGalleryLightbox: (entryId) => {
+    const entry = get().entries.find((item) => item.id === entryId);
+    if (entry && !entry.unavailable) void loadGallery(entry, null);
+  },
+  refreshGalleryLightbox: () => {
+    const previous = get().lightboxGallery;
+    if (!previous) return;
+    const entry = get().entries.find((item) => item.id === previous.entryId);
+    if (!entry || entry.unavailable) { get().closeLightbox(); return; }
+    if (previous.status === 'loading' && previous.sourceKey === galleryMediaKey(entry)) return;
+    void loadGallery(entry, previous);
+  },
+  stepGalleryLightbox: (delta) => {
+    const gallery = get().lightboxGallery;
+    const entry = get().entries.find((item) => item.id === gallery?.entryId);
+    if (!gallery || !entry || gallery.status !== 'ready' || galleryMediaKey(entry) !== gallery.sourceKey) return;
+    const index = galleryStepIndex(gallery.index, delta, gallery.urls.length);
+    set({ lightboxGallery: { ...gallery, index }, lightboxUrl: gallery.urls[index] });
+  },
+  closeLightbox: () => {
+    ++galleryRequestId;
+    set({ lightboxUrl: null, lightboxEntryId: null, lightboxPageUrl: undefined, lightboxGallery: null });
+  },
   openNewCategoryModal: () => set({ newCategoryModalOpen: true }),
   openAddFeedModal: (catId) => set({ addFeedModalOpen: true, addFeedTargetCatId: catId }),
   openEditFeedModal: (feedId) => set({ editFeedModalOpen: true, editFeedTargetId: feedId }),
@@ -251,4 +353,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   endSaveAndSync: (owner) => set((s) => (
     s.saveAndSyncBusyOwner === owner ? { saveAndSyncBusyOwner: null } : {}
   )),
-});
+  };
+};
+
+

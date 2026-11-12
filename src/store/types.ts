@@ -8,7 +8,25 @@ import type {
   ThemeMode,
   ViewFilterType,
 } from '../types';
-import type { SubscriptionCapabilities, SubscriptionOutboxStats, TranslationSegmentPlan } from '../lib/api';
+import type {
+  SubscriptionCapabilities,
+  SubscriptionOutboxStats,
+  SyncQueueStats,
+  SyncStatusInfo,
+  TranslationSegmentPlan,
+  LocalSyncConnection,
+  LocalSyncStatus,
+  PortableBackupInfo,
+  PortableBackupPreview,
+} from '../lib/api';
+import type { ReadingSession } from './readingSession';
+import type { GalleryLightboxState } from '../lib/galleryMedia';
+
+export interface ArticleSource {
+  feed: FeedItem;
+  folderId: string | null;
+  layout: ContentLayoutType;
+}
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -20,6 +38,7 @@ export interface PodcastPlayerState {
   /** cover 所属文章条目 id（TASK-092：封面失效上报用）。新剧集没给 cover 时沿用旧 cover，
       id 也随之沿用旧值，保证上报的 (id, url) 与实际显示的封面一致；空 = 未知 */
   coverEntryId?: string;
+  coverPageUrl?: string;
   /** 真实音频地址（enclosure_url）；空 = 无可播放源 */
   audioUrl: string;
   /** 当前播放位置（秒，PlayerBar 从 audio 元素同步） */
@@ -50,7 +69,17 @@ export type SyncActivityOwner =
   | 'manual'
   | 'feed-add'
   | 'save-and-sync'
-  | 'github-disconnect';
+  | 'background';
+
+export interface BackendSyncActivityEvent {
+  id: number;
+  sequence: number;
+  source: string;
+  phase: 'started' | 'stage' | 'finished';
+  stage?: 'feeds' | 'states' | null;
+  outcome?: 'success' | 'partial' | 'error' | 'cancelled' | 'not_configured' | null;
+  message?: string | null;
+}
 
 export interface SyncActivityUpdate {
   stage?: ManualSyncStage | null;
@@ -81,8 +110,11 @@ export interface SettingsState {
   listWidth: number;
   showReadTime: boolean;
   defaultOpenMode: 'rss' | 'fulltext';
-  /** 智能去重：同 URL 文章跨源只保留首个（入库层拦截） */
-  smartDedup: boolean;
+  articleAutoSummary: boolean;
+  articleAutoTranslate: boolean;
+  socialAutoTranslate: boolean;
+  notificationAutoSummary: boolean;
+  notificationAutoTranslate: boolean;
   /** 关闭按钮 → 最小化到托盘（默认开；托盘「退出」才是真退出） */
   closeToTray: boolean;
   /** 首次关闭询问已展示（true 后关窗直接按 closeToTray 走，不再问） */
@@ -93,8 +125,10 @@ export interface SettingsState {
   autoSync: boolean;
   /** 同步模式（UI 词条：本机抓取 / 跟随服务端——命名直指差异点"内容从哪来"）：
    *  'direct' 本机抓取（默认）：全部源由 FluxReader 直连抓取，Miniflux 只同步状态；
-   *  'hybrid' 跟随服务端：后台刷新跳过服务端来源的源，内容由 Miniflux 同步提供 */
+   *  'hybrid' 跟随服务端：后台/手动/托盘刷新都只抓本地来源的源，内容由服务端同步提供 */
   syncMode: 'direct' | 'hybrid';
+  /** 已读且未收藏正文的保留天数；0=永久，正文期限执行由后端统一负责。 */
+  readBodyRetentionDays: number;
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
@@ -148,25 +182,39 @@ export interface CountsRow {
 /** OPT-013 B3：AI 产物种类（摘要/翻译；与后端 AiKind 的 id 域逐字一致）。 */
 export type AiProductKind = 'summary' | 'translation';
 
+/** 校验时的本地输入快照；仅用于拒收过时响应，签名正确性仍由后端判定。 */
+export interface AiStatusInput {
+  revision: number;
+  mutation: number;
+  feedId: string;
+  title: string;
+  url: string;
+  snippet: string;
+  contentId: number | null;
+  contentRevision: number;
+  fulltextExtracted: boolean;
+  /** 有 DB 身份时不复制正文；无身份/全文提取的兼容路径按实际 HTML 比较。 */
+  content: string | null;
+  summarySig: string | null;
+  translationSig: string | null;
+}
+
 /** OPT-013 B3：单个条目的 AI 校验状态（`ai_cache_check` 成功结果的最小快照）。
  *  只在校验成功时写入；失败保留现有值——校验故障既不得把可用产物误标为
  *  已过期，也不触发重新生成（B1 保守语义）。五态判定（slices/ai.ts 的
  *  selectAiProductState）以它为「签名是否与当前输入匹配」的唯一验证数据源：
  *  没有它就不存在 complete（不存在「产物非空 = complete」的回退路径）。 */
 export interface AiCacheStatus {
+  input: AiStatusInput;
   summaryVerified: boolean;
   translationVerified: boolean;
   /** 当前签名下的翻译分段进度（partial 判定与「已 N/M 段」展示的数据源） */
   translationSegments: TranslationSegmentPlan;
 }
 
-/** OPT-008B R1：scope_counts 的 store 快照（带来源元数据）。
-    布局是快照的一部分：选择器只在该 layout 与当前 activeContentLayout 相等时
-    消费（旧布局快照不得按新布局显示）；`dedup` 记录产生快照时的开关值（口径
-    标签）。分类分组计数在 `folders`（键 'cat-N'）。 */
+/** scope_counts 精确计数带布局身份；旧布局响应不按新布局显示。分类键为 cat-N。 */
 export interface ScopeCountsSnapshot {
   layout: ContentLayoutType;
-  dedup: boolean;
   all: CountsRow;
   folders: Map<string, CountsRow>;
 }
@@ -199,10 +247,11 @@ export interface AppState {
 
   /* ---------- 数据（Tauri 环境 = SQLite 快照；浏览器环境 = 演示数据） ---------- */
   categories: CategoryGroup[];
-  /** 当前视图下应展示的条目完整集合。「全部」视图 = 分页快照（最新 N 篇 +
-      滚动加载）；收藏/未读/今天视图 = 切换时按后端筛选拉取完整列表替换。
-      条目的内容布局由「订阅源布局绑定 → 分类布局」在查询时动态解析。 */
+  /** 已加载的轻量行属性，另可含搜索注入的Reader目标；列表成员与排序只由readingSession拥有。 */
   entries: ArticleEntry[];
+  readingSession: ReadingSession | null;
+  /** 完整来源索引包含退订收藏；categories/feedIndex 只承载活动订阅导航。 */
+  sourceIndex: Map<string, ArticleSource>;
 
   /** feedId → feed 引用的解析表（派生 selector 的公共底座） */
   feedIndex: Map<string, { feed: FeedItem; cat: CategoryGroup }>;
@@ -214,11 +263,7 @@ export interface AppState {
       过滤求和——聚合角标回退路径的底座。 */
   feedCounts: Map<string, { total: number; unread: number; starred: number; today: number }>;
 
-  /** OPT-008B R1：smartDedup 显示集合的 **scope 精确计数快照**
-      （scope_counts：全部 / 每分类 / 每源，按 snapshot.layout 布局过滤）。
-      仅开关开启且取到数据时非空——选择器只在 `layout === activeContentLayout`
-      时消费（旧布局快照不得按新布局显示）；缺快照回退按源求和。
-      独立于 feedCounts：feedCounts 是布局无关的源计数，不得被单布局快照覆盖。 */
+  /** 当前分区的范围精确计数。缺快照回退来源计数；跨源不聚合、同源等价组由后端统一计数。 */
   scopeCounts: ScopeCountsSnapshot | null;
 
   /* ---------- 播客播放器 ---------- */
@@ -228,11 +273,16 @@ export interface AppState {
   settingsOpen: boolean;
   settingsTab: string;
   searchOpen: boolean;
+  contextMenuOpen: boolean;
   /** 首次关闭询问弹窗（Rust close-ask 事件驱动） */
   closeAskVisible: boolean;
   lightboxUrl: string | null;
+  mediaCapacityRevision: number;
   /** 灯箱图片所属文章条目 id（封面失效上报用；正文图等非封面场景为 null） */
   lightboxEntryId: string | null;
+  lightboxPageUrl?: string;
+  /** 画廊按条目的有序图片集合；单图调用保持 null。 */
+  lightboxGallery: GalleryLightboxState | null;
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
   addFeedTargetCatId: string;
@@ -262,22 +312,45 @@ export interface AppState {
   syncStage: ManualSyncStage | null;
   /** 当前同步活动开始时刻；阶段推进不重置，用于如实显示已等待时长。 */
   syncStartedAt: number | null;
-  /** 当前轮次是否已收到“远端状态队列已清空”的证据。它只确认远端写回，
-   *  绝不代表 pull_entries / refreshAllFeeds / reload 已完成。 */
+  /** 当前轮次最近一次收到的“远端状态队列已清空”证据。后续任一未同步分类
+   *  非零会撤销；它绝不代表 pull_entries / refreshAllFeeds / reload 已完成。 */
   syncRemoteWriteConfirmed: boolean;
   /** 最新同步 activity 的失败阶段与原因（手动/添加/保存后同步等共用）；
    *  成功终态会清空。 */
   syncFailure: ManualSyncFailure | null;
-  /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
+  /** 后端活动表尚有未结束轮次，按活动 ID 收敛。 */
   backgroundSyncing: boolean;
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
   syncConnected: boolean;
-  /** TASK-116 四态展示：同步队列现存行数（「等待同步 N 条」）。
+  /** 后端同步服务账户名（唯一来源：sync_status.account；不得复用 GitHub login）。 */
+  syncAccount: string | null;
+  /** 当前同步协议（sync_status.protocol；null = 未连接/未知）。 */
+  syncProtocol: 'greader' | 'fever' | null;
+  /** 当前同步服务 Endpoint（sync_status.endpoint；null = 未连接）。 */
+  syncEndpoint: string | null;
+  /** 后端记录的上次同步时间（Unix 秒；0 = 从未）。 */
+  syncLastSync: number;
+  /** 最近一次手动/保存链成功终态时刻；Status 圆点短时显示「同步完成」。 */
+  syncSucceededAt: number | null;
+  /** TASK-116 四态展示：后端 sync_queue_stats.waiting（可推送且未确认的队列行数）。
+   *  只含 bound_pending + retry_wait；local_only/等待身份/过期项分别见下。
    *  启动装载（bootstrap/reload）与手动同步完成后的 reload 刷新；
    *  TASK-124 起 sync-queue-changed 事件即时刷新（同一状态源）。 */
   syncWaiting: number;
-  /** TASK-116：队列中推送失败过的行数（attempts>0，「部分失败」） */
+  /** TASK-116：失败可见计数 = retry_wait + 终态 failed（用于既有「部分失败」文案）。 */
   syncFailed: number;
+  /** 无远端身份、当前不可推送的本地意图。 */
+  syncLocalOnly: number;
+  /** 同源已绑定、等待具体条目身份。 */
+  syncBindableRetry: number;
+  /** 已有 remote_id、等待推送。 */
+  syncBoundPending: number;
+  /** 失败但仍在自动重试窗口。 */
+  syncRetryWait: number;
+  /** 终态 failed（与 retry_wait 分开保存）。 */
+  syncTerminalFailed: number;
+  /** 超过保留期、停止自动推送但保留本地状态。 */
+  syncExpiredUnconfirmed: number;
   /** TASK-124：队列最近一次推送失败的错误摘要（「部分失败」的错误行）。
    *  sync-queue-changed 事件 / reload 顺带刷新写入；未失败为 null。 */
   syncQueueLastError: string | null;
@@ -290,12 +363,27 @@ export interface AppState {
    *  （界面省略能力句，不伪造能力）。 */
   subscriptionCapabilities: SubscriptionCapabilities | null;
 
-  /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
-  githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
-  /** 已登录账户（设置页显示「已登录：username」） */
-  githubAccount: { login: string } | null;
-  /** 登录进行中（按钮防抖） */
-  githubLoggingIn: boolean;
+  /** 只在资料库替换成功时推进；普通后台同步不改变阅读会话代际。 */
+  libraryGeneration: number;
+  libraryRestoreBusy: boolean;
+  localSyncState: LocalSyncStatus | null;
+  localSyncError: string | null;
+  localSyncBusy: 'connect' | 'disconnect' | 'run' | null;
+  refreshLocalSyncStatus: () => Promise<LocalSyncStatus>;
+  connectLocalSync: (connection: LocalSyncConnection) => Promise<boolean>;
+  disconnectLocalSync: () => Promise<void>;
+  runLocalSync: () => Promise<void>;
+  portableBackup: {
+    busy: 'export' | 'preview' | 'restore' | 'refresh' | null;
+    preview: { path: string; info: PortableBackupPreview } | null;
+    result: { kind: 'export' | 'restore'; info: PortableBackupInfo } | null;
+    error: string | null;
+    refreshFailed: boolean;
+  };
+  choosePortableBackup: (save: boolean) => Promise<void>;
+  cancelPortablePreview: () => void;
+  restorePortableBackup: () => Promise<void>;
+  retryRestoredLibraryRefresh: () => Promise<void>;
 
   /* ---------- 数据源模式 ---------- */
   /** tauri = 真实 SQLite 后端；mock = 浏览器开发回退 */
@@ -315,13 +403,7 @@ export interface AppState {
       TASK-117：仅作 loaded 计数镜像（供 mock 兜底与调试观察），分页续拉不再
       消费它——续拉游标见 articlesCursor。 */
   articlesLimit: number;
-  /** per-scope 分页游标表：scopeKey（'all' | feedId | 'cat-N'）→ keyset 游标。
-      TASK-117（审计 P1-1）：从「已加载条数（OFFSET）」改为 keyset 锚
-      （ArticlesCursorState）——可变筛选集合（WHERE is_read=0 / is_starred=1）上
-      OFFSET 不等价于已看条数（读 500 标读后集合收缩，下一页仍 OFFSET 500 会跳过
-      500 篇并假 exhausted）；keyset 以已加载窗口最后一行的 (published_at 原文, id)
-      为锚，与集合增删无关地指向「已看过的最后一篇」。
-      详见 internals.scopePageKey 的取舍说明与 ArticlesCursorState 契约注释。 */
+  /** 既有视图缓存的进度镜像；新会话续页只消费 readingSession 的固定成员与 loadedCount。 */
   articlesCursor: Record<string, ArticlesCursorState>;
   /** 正在加载下一批文章（列表底部加载动画） */
   articlesLoading: boolean;
@@ -332,33 +414,29 @@ export interface AppState {
   backendReloadsInFlight: number;
   /** 已加载完所有文章（列表底部显示「到底了」） */
   articlesExhausted: boolean;
-  /** TASK-111②：后台刷新保位信号（nonce）。内容刷新路径（feeds-updated /
-      手动同步 / 单源刷新）的 reload 落地时 bump；导航路径不 bump。Timeline
-      订阅它，变化时消费顶条锚（timelineAnchor）做程序性回位。 */
+  /** 后台属性刷新或同上下文显式重筛落地的保位信号。Timeline消费
+      lib/readingPosition的当前活锚；真正切换返回不走这个通道。 */
   positionRestoreNonce: number;
-  /** TASK-115①：切换返回恢复信号（nonce）。nav 三路径（selectLayout /
-      selectView / selectFeed）**缓存命中**同步恢复 entries 时 bump；cache-miss
-      （重拉新语境）与切排序不 bump。Timeline 订阅它，变化时消费 per-filterKey
-      锚存档（timelineAnchor.peekReturnAnchor）做一次性定位。
+  /** 切换返回恢复信号（nonce）。新会话已准备覆盖真实存档锚的窗口并落地后bump；
+      cache-miss与切排序不bump，同上下文重筛也不消费旧存档。Timeline消费per-filterKey
+      锚存档（readingPosition.peekReturnAnchor）做一次性定位。
       与 positionRestoreNonce（TASK-111 刷新保位）是两个独立信号：切换返回是
       「一次性定位」，刷新保位是「持续跟踪」——触发源/消费路径/锚来源（存档 vs
       活锚）完全分离，互不发出、互不消费对方信号（不叠加保证，见
-      timelineAnchor.ts 头注规则表）。 */
+      readingPosition.ts 头注规则表）。 */
   switchRestoreNonce: number;
   /** TASK-115②：阅读器关闭信号（nonce，不透明计数器）。clearReaderSelection
       关闭阅读器（App.tsx 唯一关闭路径）时 bump。原选中卡 id 不经 store 传递：
       由 Timeline 在 activeArticleId 跟随 effect 里用 ref 记账（关闭 commit 时
       该 ref 保留关闭前值），Timeline 的 readerClose effect 消费本信号把焦点
       归还原选中卡（原卡不在当前列表 → 归零回落）。选型与消费细节见
-      Timeline.tsx readerClose effect 注释与 timelineAnchor.ts 头注 X2 节；
+      Timeline.tsx readerClose effect 注释与 readingPosition.ts 头注 X2 节；
       nonce 而非布尔/id 字段：连续两次开关同一篇文章也要每次触发归还
       （id 字段值不变无法重触发 effect）。 */
   readerCloseNonce: number;
   /** 滚动到底部时按需拉取下一批文章（追加到 entries）。 */
   loadMoreArticles: () => Promise<void>;
-  /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表并替换 entries。
-      这些视图需要完整数据，而「全部」视图的 entries 是分页快照。
-      TASK-111②：opts.keepReadingPosition 仅由后台刷新透传（保位信号）。 */
+  /** 旧调用入口统一到当前会话刷新；成员重建由显式导航失效决定。 */
   reloadFilteredEntries: (view: ViewFilterType, opts?: { keepReadingPosition?: boolean }) => Promise<void>;
   /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
       （而非从头拉 500 篇），并选中该文章。解决「搜索结果是很老的文章时，
@@ -386,6 +464,8 @@ export interface AppState {
 
   /* ---------- Actions: 阅读器 ---------- */
   selectArticle: (id: string) => void;
+  /** 文章打开、图片预览与播放共用的自动标读入口；显式手动标读不走此策略。 */
+  markEntryOpened: (id: string) => void;
   clearReaderSelection: () => void;
   toggleCurrentReadStatus: () => void;
   toggleCurrentStar: () => void;
@@ -399,6 +479,8 @@ export interface AppState {
   triggerReaderSummary: (opts?: { silent?: boolean }) => void;
   /** 列表卡片就地摘要（通知布局）：按文章 id 流式生成，不依赖阅读器选中态 */
   summarizeEntry: (id: string, opts?: { silent?: boolean }) => void;
+  /** 组件提供仍在阅读的资格函数，验签后/收费请求前再检查；不自动重试失败。 */
+  startAutomaticAi: (id: string, kind: AiProductKind, isCurrent: () => boolean) => void;
   /** 滚动触发的批量已读（滚出列表/正文到底）：静默、只标未读项 */
   markEntriesReadBulk: (ids: string[]) => void;
   /** 卡片级翻译（社交/通知卡）：按 id 流式生成该条目译文，不依赖 Reader 选中态（P1-7） */
@@ -412,11 +494,13 @@ export interface AppState {
       验证数据源，见 AiCacheStatus 注释）。写入点收口在 slices/ai.ts：
       checkCache / hintSegmentPlan / refreshAiStatus（生成结束后的刷新也经它）。 */
   aiStatusById: Record<string, AiCacheStatus>;
+  /** 已保存 AI 配置/批量清理的本地代次；不承载配置或后端签名。 */
+  aiStatusRevision: number;
   /** OPT-013 B3：拉取后端权威校验状态并缓存（Reader 打开文章、生成结束等时机；
       在途去重，失败保留现有状态）。 */
   refreshAiStatus: (id: string) => void;
-  /** OPT-013 B3：仅当本会话尚无该条目校验状态时拉取（卡片展示路径的惰性补齐；
-      已存在状态不重复 IPC——动作时刻仍走 ai_cache_check 权威复核）。 */
+  /** 当前输入尚无有效校验时惰性拉取；相同输入复用，输入改变重新只读校验。
+      动作时刻仍走 ai_cache_check 权威复核。 */
   ensureAiStatus: (id: string) => void;
   /** OPT-013 B3「清除」入口：调用后端清除命令（删除该条目该产物在**所有签名**
       下的持久化片段与整篇产物/签名、推进清除代次），成功后清前端状态——该条目
@@ -465,6 +549,7 @@ export interface AppState {
 
   /* ---------- Actions: 弹层 ---------- */
   openSettings: () => void;
+  /** 设置关闭的唯一入口。 */
   closeSettings: () => void;
   switchSettingsTab: (tab: string) => void;
   openSettingsTab: (tab: string) => void;
@@ -472,7 +557,12 @@ export interface AppState {
   closeSearch: () => void;
   /** 首次关闭询问的应答（Rust resolve_close 执行隐藏/退出；remember 时同步设置镜像） */
   answerCloseAsk: (action: 'tray' | 'exit', remember: boolean) => void;
-  openLightbox: (url: string, entryId?: string) => void;
+  /** 取消首次关闭询问：只隐藏弹窗，不提交 resolve_close，也不写记住选择。 */
+  dismissCloseAsk: () => void;
+  openLightbox: (url: string, entryId?: string, pageUrl?: string) => void;
+  openGalleryLightbox: (entryId: string) => void;
+  refreshGalleryLightbox: () => void;
+  stepGalleryLightbox: (delta: -1 | 1) => void;
   closeLightbox: () => void;
   openNewCategoryModal: () => void;
   openAddFeedModal: (catId: string) => void;
@@ -518,11 +608,22 @@ export interface AppState {
   ) => boolean;
   /** 发起一轮手动同步；重复点击返回同一在途 Promise，终态后释放忙锁。 */
   triggerManualSync: () => Promise<void>;
+  applyBackendSyncActivity: (event: BackendSyncActivityEvent) => void;
+  /** 写入一份 sync_status 快照（连接/断开/保存后由调用方提供真值）。 */
+  applySyncStatus: (status: SyncStatusInfo | null) => void;
+  /** 主动读取 sync_status 并原子更新连接态/账户/协议/上次同步；失败保持原值。
+   * `beforeApply` 在最新响应写入 store 前调用，供表单先登记已应用 identity，
+   * 避免 store 更新反向触发表单重复读取。 */
+  refreshSyncStatus: (
+    beforeApply?: (status: SyncStatusInfo) => void,
+  ) => Promise<SyncStatusInfo | null>;
+  /** 主动读取同步队列统计并走与事件相同的落点。 */
+  refreshSyncQueueStats: () => Promise<void>;
   /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
-   *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。
-   *  写队列三字段，并可在手动同步 states 阶段补记远端写回确认；绝不触碰
-   *  syncConnected，也不以队列清空结束整轮 syncing。 */
-  applySyncQueueChanged: (stats: { waiting: number; failed: number; last_error: string | null }) => void;
+   *  payload = Rust sync_queue_stats 生命周期分类。
+   *  写队列分类字段，并按最新统计设置或撤销手动同步 states 阶段的远端写回
+   *  确认；绝不触碰 syncConnected，也不以队列清空结束整轮 syncing。 */
+  applySyncQueueChanged: (stats: SyncQueueStats) => void;
   /** OPT-009 B3：subscription-outbox-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust 当前账号回执 `{pending, failed, local_only, last_error}`。
    *  只写回执字段，绝不触碰队列统计与 syncConnected（越权防护；未配置同步
@@ -549,8 +650,8 @@ export interface AppState {
   refreshOneFeed: (feedId: string) => void;
   updateCatLayout: (catId: string, layout: ContentLayoutType) => void;
   updateFeedLayout: (catId: string, feedId: string, layout: string) => void;
-  toggleCatSummary: (catId: string, val: boolean) => void;
-  toggleCatTranslate: (catId: string, val: boolean) => void;
+  toggleCatSummary: (catId: string, mode: FeedAiMode) => void;
+  toggleCatTranslate: (catId: string, mode: FeedAiMode) => void;
   /** OPT-011：源级三态开关（'inherit' | 'on' | 'off'）——显式关闭压过分类开启 */
   toggleFeedSummary: (catId: string, feedId: string, mode: FeedAiMode) => void;
   toggleFeedTranslate: (catId: string, feedId: string, mode: FeedAiMode) => void;
@@ -558,8 +659,6 @@ export interface AppState {
   toggleAllFolders: () => void;
   toggleSettingsCatCollapse: (catId: string) => void;
 
-  /** 发起 GitHub 设备流登录（轮询不依赖组件生命周期） */
-  githubLoginStart: () => Promise<void>;
-  /** 断开 GitHub 登录 */
-  githubLoginDisconnect: () => Promise<void>;
 }
+
+

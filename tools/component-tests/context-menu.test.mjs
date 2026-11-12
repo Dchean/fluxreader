@@ -36,10 +36,11 @@ const openMenuOn = async (act, card) => {
   await flush(2);
 };
 
-componentTest('ContextMenu 键盘导航：打开即焦点入首项、↑↓ 循环、Home/End、Enter 激活、Esc 关闭', { timeout: 40000 }, async () => {
+componentTest('ContextMenu 键盘导航：打开即焦点入首项、↑↓ 循环、Home/End、Enter 激活、Esc 关闭', { timeout: 40000 }, async (t) => {
   installBackend();
   resetStore();
   seedFromRows(ROWS, { layout: 'article' });
+  t.after(() => { delete globalThis.__OPEN_URL_ERROR__; });
 
   const { createElement, act } = await import('react');
   const { default: App } = await import('../../src/App.tsx');
@@ -86,6 +87,29 @@ componentTest('ContextMenu 键盘导航：打开即焦点入首项、↑↓ 循�
   assert.ok(!document.querySelector('.ctx-menu'), 'Enter 激活后菜单应关闭');
   assert.equal(useAppStore.getState().entries.find((e) => e.id === '101')?.isStarred, true,
     'Enter 激活「收藏」应真实翻转 isStarred');
+
+  // ---- 「查看原文」：成功打开保留；opener 失败时给统一可执行提示 ----
+  globalThis.__OPEN_URLS__ = [];
+  delete globalThis.__OPEN_URL_ERROR__;
+  await openMenuOn(act, card);
+  let viewOriginal = menuItems().find((item) => item.textContent.includes('查看原文'));
+  assert.ok(viewOriginal, '文章菜单包含查看原文');
+  await act(async () => { viewOriginal.click(); });
+  await flush(2);
+  assert.ok((globalThis.__OPEN_URLS__ ?? []).includes('https://example.com/a'),
+    '链接存在时右键查看原文正常打开');
+
+  globalThis.__OPEN_URL_ERROR__ = new Error('no default browser');
+  await act(async () => { useAppStore.setState({ toasts: [] }); });
+  await openMenuOn(act, card);
+  viewOriginal = menuItems().find((item) => item.textContent.includes('查看原文'));
+  assert.ok(viewOriginal, '失败用例菜单包含查看原文');
+  await act(async () => { viewOriginal.click(); });
+  await flush(2);
+  assert.ok(useAppStore.getState().toasts.some((toast) =>
+    toast.text.includes('无法在浏览器中打开此链接')
+    && toast.text.includes('检查默认浏览器设置')),
+    '右键查看原文失败显示统一 toast');
 });
 
 componentTest('ContextMenu 打开时 j/k/s/m 被截停：不冒泡到 App 全局监听、背后文章状态不变（P2-2）', { timeout: 40000 }, async () => {
@@ -134,4 +158,92 @@ componentTest('ContextMenu 打开时 j/k/s/m 被截停：不冒泡到 App 全局
   });
   await flush(2);
   assert.equal(art('102')?.isStarred, true, '关菜单后 s 应真实收藏当前文章（判别键路本身畅通）');
+});
+
+componentTest('刷新文案随 store.syncMode 在真实右键菜单与命令面板中同步切换', { timeout: 40000 }, async () => {
+  installBackend();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  const { createElement, act } = await import('react');
+  const { default: App } = await import('../../src/App.tsx');
+  const entry = await mount(createElement(App));
+  await waitFor(() => entry.container.querySelectorAll('.article-card').length === 2,
+    { label: 'App 启动后文章卡出现', timeout: 8000 });
+
+  const setMode = async (syncMode) => {
+    await act(async () => {
+      useAppStore.setState((s) => ({
+        settings: { ...s.settings, syncMode },
+      }));
+    });
+    await flush(2);
+  };
+  const openGlobalMenu = async () => {
+    await act(async () => {
+      document.body.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 40, clientY: 40,
+      }));
+    });
+    await flush(2);
+  };
+  const globalRefreshLabel = () => menuItems()
+    .map((item) => item.textContent.trim())
+    .find((text) => text.includes('刷新'));
+  const closeMenu = async () => {
+    await pressOnFocused(act, 'Escape');
+    assert.ok(!document.querySelector('.ctx-menu'), '菜单应已关闭');
+  };
+
+  await setMode('direct');
+  await openGlobalMenu();
+  assert.equal(globalRefreshLabel(), '刷新全部订阅源',
+    'direct 模式右键菜单应真实渲染「全部」');
+  await closeMenu();
+
+  await setMode('hybrid');
+  await openGlobalMenu();
+  assert.equal(globalRefreshLabel(), '刷新本地订阅源',
+    'hybrid 模式右键菜单应真实渲染「本地」');
+  await closeMenu();
+
+  await act(async () => { useAppStore.getState().openSearch(); });
+  await flush(2);
+  const paletteRefreshLabel = () => [...document.querySelectorAll('.cp-label')]
+    .map((node) => node.textContent.trim())
+    .find((text) => text.includes('刷新'));
+  assert.equal(paletteRefreshLabel(), '刷新本地订阅源',
+    '命令面板打开时应按当前 hybrid 模式渲染');
+  await setMode('direct');
+  assert.equal(paletteRefreshLabel(), '刷新全部订阅源',
+    '命令面板保持打开时也必须跟随 store.syncMode 更新');
+});
+
+componentTest('NF3 待决聚焦帧在菜单接管后失效；焦点离开菜单时全局快捷键仍让路', { timeout: 40000 }, async (t) => {
+  installBackend(); resetStore(); seedFromRows(ROWS, { layout: 'article' });
+  const { createElement, act } = await import('react');
+  const { default: App } = await import('../../src/App.tsx');
+  const entry = await mount(createElement(App));
+  await waitFor(() => entry.container.querySelectorAll('.article-card').length === 2, { label: 'two cards' });
+  const originalFrame = globalThis.requestAnimationFrame;
+  const originalCancel = globalThis.cancelAnimationFrame;
+  let sequence = 0;
+  const frames = new Map();
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++sequence, callback); return sequence; };
+  globalThis.cancelAnimationFrame = (frame) => frames.delete(frame);
+  t.after(() => { globalThis.requestAnimationFrame = originalFrame; globalThis.cancelAnimationFrame = originalCancel; });
+  await act(async () => { useAppStore.getState().selectArticle('102'); });
+  const pending = [...frames.values()];
+  assert.ok(pending.length > 0, '真实选中动作已排入聚焦帧');
+  const card = entry.container.querySelector('.article-card[data-id="101"]');
+  await openMenuOn(act, card);
+  const menuFocus = document.activeElement;
+  const before = invokeCalls.filter((call) => ['set_read', 'set_starred'].includes(call.cmd)).length;
+  // 即使已取消的帧被交给执行端，也必须由所有权守卫拒绝。
+  await act(async () => { for (const callback of pending) callback(performance.now()); });
+  assert.ok(document.activeElement === menuFocus, '旧帧不能抢走菜单焦点');
+  await act(async () => { card.focus(); });
+  for (const key of ['j', 'k', 's', 'm']) await pressOnFocused(act, key);
+  assert.equal(useAppStore.getState().activeArticleId, '102', '菜单打开时背后选择保持');
+  assert.equal(invokeCalls.filter((call) => ['set_read', 'set_starred'].includes(call.cmd)).length, before, '不新增读藏写入');
 });

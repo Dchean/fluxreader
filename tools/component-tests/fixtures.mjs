@@ -7,7 +7,7 @@
 import { useAppStore } from './harness.mjs';
 
 const { articleRowToEntry, folderRowsToCategories } = await import('../../dist-test/lib/api.js');
-const { buildFeedIndex } = await import('../../dist-test/store/internals.js');
+const { buildFeedIndex, buildSourceIndex } = await import('../../dist-test/store/internals.js');
 
 /* ------------------------------------------------------------------
    规范夹具：与 tools/frontend-regression.mjs 同形的后端行（snake_case）。
@@ -15,14 +15,14 @@ const { buildFeedIndex } = await import('../../dist-test/store/internals.js');
    各自有真实数据源——列表快照按布局维度下发（与生产后端同一口径）。
    ------------------------------------------------------------------ */
 export const FOLDERS = [
-  { id: 1, name: '技术', layout: 'article', auto_summary: false, auto_translate: false, collapsed: false },
+  { id: 1, name: '技术', layout: 'article', summary_mode: 'off', translate_mode: 'off', collapsed: false },
 ];
 export const FEEDS = [
-  { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'social', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 12, folder_id: 1, feed_url: 'https://c.example/rss', site_url: null, title: '源C', favicon_url: null, layout: 'image', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 13, folder_id: 1, feed_url: 'https://d.example/rss', site_url: null, title: '源D', favicon_url: null, layout: 'podcast', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 14, folder_id: 1, feed_url: 'https://e.example/rss', site_url: null, title: '源E', favicon_url: null, layout: 'notification', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'social', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 12, folder_id: 1, feed_url: 'https://c.example/rss', site_url: null, title: '源C', favicon_url: null, layout: 'image', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 13, folder_id: 1, feed_url: 'https://d.example/rss', site_url: null, title: '源D', favicon_url: null, layout: 'podcast', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 14, folder_id: 1, feed_url: 'https://e.example/rss', site_url: null, title: '源E', favicon_url: null, layout: 'notification', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
 ];
 export const COUNTS = [
   { feed_id: 10, total: 2, unread: 2, starred: 0, today: 0 },
@@ -43,6 +43,8 @@ export function mkRow(overrides = {}) {
   return {
     id: 0, feed_id: 10, title: '标题', author: '作者', snippet: '摘要片段',
     image_url: null, enclosure_url: null, enclosure_mime: null, duration_sec: null,
+    gallery_first_image_url: overrides.image_url ?? null, image_count: overrides.image_url ? 1 : 0,
+    media_revision: 1, retained: false, body_missing: false, images: [],
     ai_summary: null, source: 'direct', published_at: '2026-10-01T10:00:00Z',
     is_read: false, is_starred: false, url: 'https://example.com/a',
     content_html: null, translated_content: null, fulltext_extracted: false,
@@ -75,6 +77,7 @@ export function rowsForLayout(rows, layout) {
    ------------------------------------------------------------------ */
 export const invokeCalls = [];
 let plan = {};
+let persistedSettings = {};
 let installed = null;
 
 export function clearInvokeCalls() { invokeCalls.length = 0; }
@@ -82,13 +85,41 @@ export function clearInvokeCalls() { invokeCalls.length = 0; }
 /** 覆写命令行为；未覆写的命令回落默认实现。 */
 export function setPlan(next) { plan = { ...plan, ...next }; }
 
-export function resetPlan() { plan = {}; }
+export function resetPlan() { plan = {}; persistedSettings = {}; }
+
+export function syncRunFixture(phase = () => Promise.resolve({ errors: [] })) {
+  return async () => ({
+    activity_id: 1,
+    feeds: await phase({ which: 'feeds', full: false }),
+    states: await phase({ which: 'states', full: true }),
+    error: null,
+  });
+}
 
 /** 默认行为：完美行——但 hydrate 场景由用例显式覆写 get_articles（延迟/缺行/失败）。 */
 function defaultHandler(cmd, args) {
   switch (cmd) {
     case 'list_folders': return Promise.resolve(FOLDERS);
     case 'list_feeds': return Promise.resolve(FEEDS);
+    case 'list_article_sources': return Promise.resolve(FEEDS);
+    case 'list_article_member_ids': {
+      const a = args.args;
+      const matching = currentRows.filter((row) => (!a.layout || layoutOfFeed(row.feed_id) === a.layout)
+        && (!a.feed_id || row.feed_id === a.feed_id)
+        && (!a.folder_id || FEEDS.find((feed) => feed.id === row.feed_id)?.folder_id === a.folder_id)
+        && (!a.only_unread || !row.is_read) && (!a.only_starred || row.is_starred)
+        && (a.since_ms == null || Date.parse(row.published_at) >= a.since_ms)
+        && (a.until_ms == null || Date.parse(row.published_at) < a.until_ms));
+      matching.sort((aRow, bRow) => (a.newest_first === false ? 1 : -1)
+        * (Date.parse(aRow.published_at) - Date.parse(bRow.published_at) || aRow.id - bRow.id));
+      return Promise.resolve(matching.map((row) => row.id));
+    }
+    case 'get_article_updates': {
+      const ids = new Set(args.ids);
+      const items = currentRows.filter((row) => ids.has(row.id)).sort((a, b) => a.id - b.id);
+      const found = new Set(items.map((row) => row.id));
+      return Promise.resolve({ items, missing_ids: args.ids.filter((id) => !found.has(id)) });
+    }
     case 'feed_counts': return Promise.resolve(COUNTS);
     /* OPT-008B R2（N2/P3-4）：reload / 写后对账的唯一计数 IPC——同一次调用内
        返回源计数（布局无关）+ scope 计数（当前布局）。组件夹具不提供 scope
@@ -113,37 +144,32 @@ function defaultHandler(cmd, args) {
     }
     case 'set_read': case 'set_starred': case 'set_setting': case 'resolve_close': return Promise.resolve(null);
     case 'set_read_bulk': return Promise.resolve(null);
-    case 'get_setting': return Promise.resolve(null);
+    case 'get_setting': return Promise.resolve(args?.key === 'app_settings' ? JSON.stringify(persistedSettings) : null);
+    case 'patch_app_settings': persistedSettings = { ...persistedSettings, ...args.patch }; return Promise.resolve(JSON.stringify(persistedSettings));
+    case 'local_sync_status': return Promise.resolve({ connected: false, endpoint: null, username: null, mode: 'scheduled', interval_minutes: 15, generation: 0, library_id: 'fixture', pending_operations: 0, pending_bodies: 0, pending_publications: 0, last_state_sync: 0, last_body_sync: 0, next_retry_at: 0, last_error: null });
     case 'sync_status': return Promise.resolve({ connected: false, endpoint: null, account: null, last_sync: 0 });
-    case 'sync_queue_stats': return Promise.resolve({ waiting: 0, failed: 0, last_error: null });
+    case 'sync_queue_stats': return Promise.resolve({
+      account_generation: 0,
+      waiting: 0, failed: 0, local_only: 0, bindable_retry: 0,
+      bound_pending: 0, retry_wait: 0, expired_unconfirmed: 0, last_error: null,
+    });
+    case 'sync_run': return syncRunFixture()();
     /* OPT-009 B3：订阅写回只读 IPC 的缺省（未连接/无待办——与真实后端未连接
        态同形；用例需要时经 setPlan 覆写）。 */
     case 'subscription_outbox_stats': return Promise.resolve({ pending: 0, failed: 0, local_only: 0, last_error: null });
-    /* OPT-010：配置预览（只读）缺省——无变更的合并预览；用例需要结构化清单时
-       经 setPlan 覆写。 */
-    case 'config_sync_plan': return Promise.resolve({
-      mode: args?.mode ?? 'merge',
-      snapshotHash: 'default-hash',
-      currentVersion: 'default-version',
-      affectedArticleCount: 0,
-      additions: [], updates: [], removals: [],
-      settingsChangedKeys: [], settingsRemovedKeys: [],
-      pendingConnection: false, warnings: [],
-    });
     case 'subscription_capabilities': return Promise.resolve({
       connected: false,
       protocol: null,
-      overview: '未连接同步：本地操作照常保存；不产生远端写回。',
-      subscribe: { support: 'LocalOnly', detail: '未连接同步：仅本地新增。' },
-      edit_title: { support: 'LocalOnly', detail: '未连接同步：仅本地生效。' },
-      move_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地生效。' },
-      unsubscribe: { support: 'LocalOnly', detail: '未连接同步：仅本地删除。' },
-      rename_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地改名。' },
-      delete_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地删除。' },
-      empty_folder_remote: { support: 'Unsupported', detail: '未连接同步：无远端写回。' },
+      overview: '未连接同步服务；本地操作照常保存。连接后可在「同步本地订阅」中确认推送。',
+      subscribe: { support: 'LocalOnly', detail: '未连接同步：新订阅只保存在本机。' },
+      edit_title: { support: 'LocalOnly', detail: '未连接同步：编辑只保存在本机。' },
+      move_folder: { support: 'LocalOnly', detail: '未连接同步：分类变化只保存在本机。' },
+      unsubscribe: { support: 'LocalOnly', detail: '未连接同步：删除只移除本机订阅。' },
+      rename_folder: { support: 'LocalOnly', detail: '未连接同步：分类改名只在本机生效。' },
+      delete_folder: { support: 'LocalOnly', detail: '未连接同步：分类删除只在本机生效。' },
+      empty_folder_remote: { support: 'Unsupported', detail: '未连接同步：空分类只从本机删除或改名。' },
       limitations: [],
     });
-    case 'github_login_status': return Promise.resolve(null);
     /* OPT-013 B1：缓存签名校验（前端命中判定的后端权威）。夹具缺省「命中」——
        行里携带的产物都生成于同一份夹具配置下；测「未标记版本/旧签名不短路」
        的用例经 setPlan 覆写为未命中。 */
@@ -181,6 +207,7 @@ export function seedFromRows(rows, { layout = 'article', dataMode = 'tauri' } = 
   useAppStore.setState({
     categories,
     feedIndex: buildFeedIndex(categories),
+    sourceIndex: buildSourceIndex(categories),
     feedCounts: new Map(COUNTS.map((c) => [String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today }])),
     /* 快照只装当前布局的条目（与后端下发口径一致；切布局由真实 selectLayout
        重拉替换）。 */

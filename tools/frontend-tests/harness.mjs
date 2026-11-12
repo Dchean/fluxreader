@@ -39,14 +39,14 @@ const SANITIZED = '<p>安全译文，无脚本</p>';
    feed 10 inherit → cat-1(article)；feed 11 显式 social（feed 级覆盖）；
    feed 12 inherit → cat-1(article)；feed 20 inherit → cat-2(social) */
 const FOLDERS = [
-  { id: 1, name: '技术', layout: 'article', auto_summary: false, auto_translate: false, collapsed: false },
-  { id: 2, name: '社交', layout: 'social', auto_summary: false, auto_translate: false, collapsed: false },
+  { id: 1, name: '技术', layout: 'article', summary_mode: 'off', translate_mode: 'off', collapsed: false },
+  { id: 2, name: '社交', layout: 'social', summary_mode: 'off', translate_mode: 'off', collapsed: false },
 ];
 const FEEDS = [
-  { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'social', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 12, folder_id: 1, feed_url: 'https://d.example/rss', site_url: null, title: '源D', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
-  { id: 20, folder_id: 2, feed_url: 'https://c.example/rss', site_url: null, title: '源C', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'social', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 12, folder_id: 1, feed_url: 'https://d.example/rss', site_url: null, title: '源D', favicon_url: null, layout: 'inherit', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
+  { id: 20, folder_id: 2, feed_url: 'https://c.example/rss', site_url: null, title: '源C', favicon_url: null, layout: 'inherit', summary_mode: 'off', translate_mode: 'off', fetch_failed: false, fetch_error: null, last_fetched_at: null },
 ];
 const COUNTS = [
   { feed_id: 10, total: 5, unread: 3, starred: 1, today: 2 },
@@ -87,7 +87,7 @@ const S = {
   },
 // 批量水合（get_articles）的可控行为：S-2 用例按场景改写
   getArticlesBehavior: { rows: [], reject: false },
-// S-3 可控行为：bootstrap 后端故障注入 / github 登录首调冲突
+// S-3 可控行为：bootstrap 后端故障注入
   failBootstrap: false,
 // 3) invoke mock：按命令返回
   invokeCalls: [],
@@ -96,6 +96,10 @@ const S = {
   failReload: null,      // 非 null → folders/feeds/feed_counts 拒绝（bootstrap 失败注入）
   listPlan: null,        // { mode: 'reject' | 'defer', error } —— list_articles 行为
   pendingList: [],       // defer 模式挂起项 { args, resolve }
+  memberPlan: null,      // 新会话成员命令：{mode:'defer'|'reject',error}，结果严格为number[]
+  pendingMembers: [],
+  updatesPlan: null,     // 固定ID轻属性命令：{mode:'defer'|'reject',error}
+  pendingUpdates: [],
   indexPlan: null,       // { mode: 'defer' } —— article_index 行为
   pendingIndex: [],      // defer 模式挂起项 { articleId, value, resolve }
   detailImpl: (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null }),
@@ -109,8 +113,8 @@ const S = {
      与行级数据刻意不一致，大量断言依赖）；函数 = 按 backendRows 忠实聚合
      （计数对账用例：markCurrentViewAllRead 成功后重取的计数必须等于后端口径）。 */
   feedCountsImpl: null,
-  /* OPT-008B：scope_counts 行为（smartDedup 显示集合的 scope 精确计数——
-     全部/每分类/每源）。null = 返回 null（关闭开关/旧后端路径）；
+  /* scope_counts 行为（当前显示组的范围精确计数——
+     全部/每分类/每源）。null = 未提供scope部分，测试按源回退路径；
      函数 = (layout) => ScopeCountsDetailRow 形态（getInvoke 透传）。 */
   scopeCountsImpl: null,
   /* TASK-119：feed_counts 挂起计划（{ mode: 'defer' }，一次性）+ 挂起项——
@@ -127,7 +131,6 @@ const S = {
   aiCacheCheckPlan: null,
   pendingAiChecks: [],
   settingsRaw: null,     // get_setting('app_settings') 的返回值
-  ghLoginStatus: null,   // github_login_status 的返回值：null | {login} | 'reject'
   extractResult: null,   // extract_fulltext 的返回值：ExtractFulltextResult | 'reject' | null
                               // TASK-076：后端改为结构化 { html, degraded, reason }
 
@@ -150,6 +153,8 @@ function queryRows(a = {}) {
   if (a.only_unread) out = out.filter((r) => !r.is_read);
   if (a.only_starred) out = out.filter((r) => r.is_starred);
   if (a.only_today) out = out.filter((r) => localDayKey(Date.parse(r.published_at)) === localDayKey(NOW));
+  if (a.since_ms != null) out = out.filter((r) => Date.parse(r.published_at) >= a.since_ms);
+  if (a.until_ms != null) out = out.filter((r) => Date.parse(r.published_at) < a.until_ms);
   const dir = a.newest_first === false ? 1 : -1;
   out.sort((x, y) => (dir * (Date.parse(x.published_at) - Date.parse(y.published_at))) || (dir * (x.id - y.id)));
   if (a.last_published != null && a.last_id != null) {
@@ -200,15 +205,10 @@ if (S.failBootstrap && ['list_folders', 'list_feeds', 'list_articles', 'sync_sta
 }
 switch (cmd) {
   case 'article_index': return Promise.resolve(0);
-  case 'github_login_start': {
-    // P1-10：首调（不带 force）返回 webdavConflict 结构化错误；force 重发成功
-    if (args.force !== true) {
-      return Promise.reject({ code: 'webdavConflict', message: 'WebDAV conflict: existing data' });
-    }
-    return Promise.resolve({ user_code: 'WDJB-MJHT', verification_uri: 'https://github.com/login/device', interval: 3600 });
-  }
-  case 'list_folders': return Promise.resolve([]);
-  case 'list_feeds': return Promise.resolve([]);
+  case 'list_folders': return Promise.resolve([{ ...FOLDERS[0], id: 1, layout: 'article' }]);
+  case 'list_feeds': case 'list_article_sources': return Promise.resolve([{ ...FEEDS[0], id: 1, folder_id: 1 }]);
+  case 'list_article_member_ids': return Promise.resolve([S.articleRow.id]);
+  case 'get_article_updates': return Promise.resolve({ items: [S.articleRow], missing_ids: [] });
   case 'list_articles': return Promise.resolve([S.articleRow]);
   case 'sync_status': return Promise.resolve({ connected: false });
   case 'get_articles': {
@@ -219,6 +219,7 @@ switch (cmd) {
   case 'get_article': return Promise.resolve(S.articleRow);
 
   case 'get_setting': return Promise.resolve(null);
+  case 'patch_app_settings': return Promise.resolve(JSON.stringify(args.patch));
   case 'set_setting': return Promise.resolve(null);
   // ai_translate / ai_summarize：args.onChannel 是 Channel mock
   case 'ai_translate': {
@@ -252,6 +253,21 @@ globalThis.__INVOKE__ = (cmd, args) => {
   switch (cmd) {
     case 'list_folders': return S.failReload ? Promise.reject(S.failReload) : Promise.resolve(FOLDERS);
     case 'list_feeds': return S.failReload ? Promise.reject(S.failReload) : Promise.resolve(FEEDS);
+    case 'list_article_sources': return S.failReload ? Promise.reject(S.failReload) : Promise.resolve(FEEDS);
+    case 'list_article_member_ids': {
+      const a = args?.args ?? {};
+      if (S.memberPlan?.mode === 'reject') return Promise.reject(S.memberPlan.error);
+      if (S.memberPlan?.mode === 'defer') return new Promise((resolve, reject) => S.pendingMembers.push({ args: a, resolve, reject }));
+      const rows = queryRows({ ...a, limit: null, offset: 0 }).filter((row) => !a.layout || effectiveFeedLayout(row.feed_id) === a.layout);
+      return Promise.resolve(rows.map(row => row.id));
+    }
+    case 'get_article_updates': {
+      if (S.updatesPlan?.mode === 'reject') return Promise.reject(S.updatesPlan.error);
+      if (S.updatesPlan?.mode === 'defer') return new Promise((resolve, reject) => S.pendingUpdates.push({ ids: [...args.ids], resolve, reject }));
+      const items = S.backendRows.filter(row => args.ids.includes(row.id)).sort((a, b) => a.id - b.id);
+      const found = new Set(items.map(row => row.id));
+      return Promise.resolve({ items, missing_ids: args.ids.filter(id => !found.has(id)) });
+    }
     /* TASK-107：feedCountsImpl 非空时按 backendRows 忠实聚合（计数对账用例）；
        缺省仍返回静态 COUNTS——既有断言基线依赖它（与行级夹具刻意不一致） */
     case 'feed_counts': {
@@ -263,9 +279,8 @@ globalThis.__INVOKE__ = (cmd, args) => {
       }
       return Promise.resolve(S.feedCountsImpl ? S.feedCountsImpl() : COUNTS);
     }
-    /* OPT-008B：scope_counts——smartDedup 显示集合的 scope 精确计数
-       （全部/每分类/每源；与 list/search/markAll 同一谓词族）。缺省 null =
-       未提供（开关关闭/旧后端 → 前端回退按源求和）。 */
+    /* scope_counts：缺省null仅覆盖前端缺scope回退。组语义不由设置开关控制，
+       dedup-display的独立夹具覆盖同源组与完整scope快照。 */
     case 'scope_counts': {
       if (S.failReload) return Promise.reject(S.failReload);
       return Promise.resolve(S.scopeCountsImpl ? S.scopeCountsImpl(args && args.layout) : null);
@@ -289,6 +304,10 @@ globalThis.__INVOKE__ = (cmd, args) => {
       return Promise.resolve(payload());
     }
     case 'sync_status': return Promise.resolve({ connected: false });
+    case 'sync_run': return Promise.resolve({
+      activity_id: 1, feeds: null, states: null,
+      error: { stage: 'feeds', code: 'notConnected', message: '未配置同步服务' },
+    });
     case 'list_articles': {
       if (S.listPlan && S.listPlan.mode === 'reject') return Promise.reject(S.listPlan.error);
       const a = (args && args.args) || {};
@@ -316,17 +335,19 @@ globalThis.__INVOKE__ = (cmd, args) => {
       }
       return Promise.resolve(S.getArticlesPlan ? S.getArticlesPlan.rows : []);
     }
-    case 'get_setting': return Promise.resolve(S.settingsRaw);
+    case 'get_setting': return Promise.resolve(args?.key === 'app_settings' ? S.settingsRaw : null);
+    case 'patch_app_settings': S.settingsRaw = JSON.stringify({ ...JSON.parse(S.settingsRaw ?? '{}'), ...args.patch }); return Promise.resolve(S.settingsRaw);
     case 'set_setting': return Promise.resolve(null);
     /* TASK-107：单条标读忠实落库（record_read_state 语义：仅该行自身，
        无本地同文副本传播）——单条计数一致性核查的根基 */
     case 'set_read': {
       const row = S.backendRows.find((r) => r.id === Number(args.id));
+      const changed = row && row.is_read !== (args.read === true) ? [{id:row.id,feed_id:row.feed_id}] : [];
       /* TASK-107 R2/F3：mutation 用布尔——Rust Serialize 的 wire 格式是 bool，
          数字 1/0 会让 reload 后的 entry.isRead 变成 number，破坏 `=== true` 形态
          的守卫/断言（快照替换场景因此失真） */
       if (row) row.is_read = args.read === true;
-      return Promise.resolve(null);
+      return Promise.resolve(changed);
     }
     /* TASK-117：单条收藏忠实落库（record_star_state 语义：仅该行自身）——
        取消收藏场景的续拉回归（t117-2）需要后端集合真实收缩。 */
@@ -338,11 +359,13 @@ globalThis.__INVOKE__ = (cmd, args) => {
     /* TASK-117：批量标读忠实落库（apply_read_bulk 语义：逐 id 翻转自身行）——
        阅读中连续翻页回归（t117-1）需要 is_read=0 的筛选集合真实收缩。 */
     case 'set_read_bulk': {
+      const changed = [];
       for (const id of args.ids ?? []) {
         const row = S.backendRows.find((r) => r.id === Number(id));
+        if (row && row.is_read !== (args.read === true)) changed.push({id:row.id,feed_id:row.feed_id});
         if (row) row.is_read = args.read === true;
       }
-      return Promise.resolve(null);
+      return Promise.resolve(changed);
     }
     /* TASK-107：mark_all_read 忠实落库（apply_mark_all_read 语义：整个
        范围×布局×视图口径的未读行置已读，返回受影响行数）——600/1 探针
@@ -361,11 +384,6 @@ globalThis.__INVOKE__ = (cmd, args) => {
       }
       return Promise.resolve(affected);
     }
-    /* E1：GitHub 登录态恢复（bootstrapGithubAuth 定向断言用；null / {login} / 'reject'） */
-    case 'github_login_status':
-      return S.ghLoginStatus === 'reject'
-        ? Promise.reject({ message: 'ipc down' })
-        : Promise.resolve(S.ghLoginStatus);
     /* TASK-076：全文提取返回结构化结果（'reject' = 网络失败）。
        为兼容既有用例仍传裸字符串的写法，这里把字符串折算成「成功」形态：
        { html, degraded:false, reason:null }。 */
@@ -452,16 +470,17 @@ const store = useAppStore;
 const results = [];      // 既有（check）
 const newResults = [];   // 新增（checkNew）
 let currentDomain = '';
-function record(kind, name, cond) {
+function record(kind, name, cond, details) {
   const item = { domain: currentDomain, pass: !!cond, name };
   (kind === 'existing' ? results : newResults).push(item);
   console.log(((cond ? '✅' : '❌') + (kind === 'new' ? ' 🆕 ' : ' ') + name));
+  if (!cond && details != null) console.log('  观察值:', details);
 }
-function check(name, cond) {
-  record('existing', name, cond);
+function check(name, cond, details) {
+  record('existing', name, cond, details);
 }
-function checkNew(name, cond) {
-  record('new', name, cond);
+function checkNew(name, cond, details) {
+  record('new', name, cond, details);
 }
 const nTick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
@@ -491,16 +510,21 @@ function overrideGlobal(target, key, value) {
 // ---- 复位 / 规范化装载（原文件逐字迁移，S. 归属重写）----
 /* ---------- 状态复位 / 规范化装载 ---------- */
 async function resetStore(extra) {
+  const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+  await awaitLocalFlagWriteFrontier();
   /* TASK-107：行对象深拷贝——假后端的 set_read / mark_all_read 会就地翻转
      is_read（忠实模拟落库），浅引用会让突变跨用例残留（污染 BASE_ROWS） */
   S.backendRows = BASE_ROWS.map((r) => ({ ...r }));
   S.failReload = null;
   S.listPlan = null;
   S.pendingList = [];
+  S.memberPlan = null;
+  S.pendingMembers = [];
+  S.updatesPlan = null;
+  S.pendingUpdates = [];
   S.indexPlan = null;
   S.pendingIndex = [];
   S.settingsRaw = null;
-  S.ghLoginStatus = null;
   S.extractResult = null;
   S.heldAi = [];
   S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
@@ -538,19 +562,30 @@ async function resetStore(extra) {
     activeContentLayout: 'article', activeViewFilter: 'all', activeFeedFilter: 'all',
     timelineFilter: 'all', timelineSort: 'newest',
     activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false,
+    lightboxGallery: null, lightboxUrl: null, lightboxEntryId: null,
     /* rawTranslatedIds 与 translatingIds 同批复位（与 slice 初始值一致）——
        流式半截用例留下的未消毒标记不得跨夹具存活（b3-6 暴露）。 */
     summarizingIds: {}, translatingIds: {}, rawTranslatedIds: {}, translating: false, summaryErrors: {}, translateErrors: {},
     /* OPT-013 B3：校验状态缓存是 store 状态（five-state 显示的数据源）——随夹具
        复位，避免上一用例的验证结论/分段进度被下一个用例读到。 */
     aiStatusById: {},
+    aiStatusRevision: 0,
     hydrationErrors: {}, hydratedIds: {}, openedReadIds: {}, toasts: [],
     /* OPT-017E：错误中心（带重试错误的持久可达层）随基线清空——跨用例隔离。 */
     errors: [], errorCenterOpen: false,
     /* OPT-009 B3：订阅写回回执与能力矩阵（事件/挂载写入）随基线清空，
        避免跨用例残留（上一域的 local_only 计数被下一域读到）。 */
     subOutboxStats: null, subscriptionCapabilities: null,
-    entries: [], categories: [], feedIndex: new Map(), feedCounts: new Map(), scopeCounts: null,
+    /* 同步账户/队列分类/成功短窗同样是跨用例真实事件源。 */
+    libraryGeneration: 0, libraryRestoreBusy: false,
+    localSyncState: null, localSyncBusy: null, localSyncError: null,
+    portableBackup: { busy: null, preview: null, result: null, error: null, refreshFailed: false },
+    syncStatus: 'synced', backgroundSyncing: false, syncConnected: false,
+    syncAccount: null, syncProtocol: null, syncEndpoint: null, syncLastSync: 0,
+    syncSucceededAt: null, syncWaiting: 0, syncFailed: 0, syncLocalOnly: 0,
+    syncBindableRetry: 0, syncBoundPending: 0, syncRetryWait: 0,
+    syncTerminalFailed: 0, syncExpiredUnconfirmed: 0, syncQueueLastError: null,
+    entries: [], categories: [], feedIndex: new Map(), sourceIndex: new Map(), readingSession: null, feedCounts: new Map(), scopeCounts: null,
     articlesLimit: 0, articlesLoading: false, articlesExhausted: false,
     player: { isActive: false, isPlaying: false, speed: 1, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
     playerExpanded: false,
@@ -562,6 +597,26 @@ async function resetStore(extra) {
 async function bootFixture(extra) {
   await resetStore(extra);
   await store.getState().bootstrapFromBackend();
+}
+
+/** 实体/AI/写入单元域显式布置离屏实体；不是启动列表结果。
+ * 真实启动仍只查询当前分区，附加实体经同一个生产API/适配器读取；
+ * 清除列表会话，明确这是实体/无会话动作单元夹具；不能据此宣称会话导航/标读范围已验证。
+ * 完整ReadingSession链由bootstrap/pagination和正式组件16项承担。 */
+async function entityFixture(extra) {
+  await bootFixture(extra);
+  const { api, articleRowToEntry } = await import('../../dist-test/lib/api.js');
+  const result = await api.getArticleUpdates(S.backendRows.map(row => row.id));
+  if (!result) throw new Error('entityFixture 缺少属性快照');
+  store.setState({ entries: result.items.map(articleRowToEntry), readingSession: null });
+}
+
+async function waitUntil(predicate, label = '条件', timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`waitUntil超时：${label}`);
+    await nTick(0);
+  }
 }
 
 // ---- 主 store 派生面（同一 dist-test 模块图）----
@@ -584,6 +639,8 @@ export function createHarness() {
     overrideGlobal,
     resetStore,
     bootFixture,
+    entityFixture,
+    waitUntil,
     useMainBackend: installMainBackend,
     useSmokeBackend: installSmokeBackend,
     beginDomain: (id) => {

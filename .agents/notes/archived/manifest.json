@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "files": {
+    "archived/feature/2026-11-01-五调色盘WCAG全量批量收敛.md": "sha256:91f4458be322dcc6fa007f3b78bc0f3de642ff87b0d1e6e3ac8d9a86aba17257",
+    "archived/process/2026-10-08-主控与代码执行分离.md": "sha256:0cd8d8e35a9d387082ca2419bb789c1e62daaa8ff14653402b891bd20d2af72e",
+    "archived/process/2026-10-31-审计修复收敛路线.md": "sha256:67f1a436168558adcbabc3943210856c193cd31a00cfe16d90877700e64b7f6f",
+    "archived/process/2026-11-01-第五轮细粒度审计优化路线.md": "sha256:e563cd0a6ead3b0273097760b63d330d29bc4300483c693e02accb5d2c5dd763",
+    "archived/process/2026-11-01-审计修复路线与子代理派发纪律.md": "sha256:91821de80cbdc6be7301ff7d8fab2f4ea8f8c77443152d7dd05d58907aed08df",
+    "archived/process/2026-11-02-第六轮收尾批次路线.md": "sha256:4d90b569a883202a4db5a7468f84b78c1cdc5fa21cf9da6480c1873b140171b1",
+    "archived/process/2026-11-02-第七轮批准项批次与全量再审计.md": "sha256:6b4f31945e327368ee8c52500bbcaeccab97deb4cb5fa757ff235557e730f185"
+  }
+}

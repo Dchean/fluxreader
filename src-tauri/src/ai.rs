@@ -124,10 +124,12 @@ impl AiConfig {
 /// - `v1-flat`（B1）：整篇一次性发送，无分段。
 /// - `v2-html-blocks-8192`（B2）：按 HTML 节点边界、单段预算
 ///   [`TRANSLATE_SEGMENT_MAX_BYTES`] 的确定性分段（见 `crate::ai_segments`）。
+/// - `v3-list-boundaries-8192`：沿同一源 DOM 的分段边界重组列表及跨段 li；
+///   旧策略片段不能与新计划混用。共用策略字段也使旧摘要签名保守失效。
 ///
 /// 策略（算法/预算/边界规则/摘要超预算语义）任何变化都必须递增本常量：
 /// 它进签名输入，旧签名与旧片段因此不再被当成同一策略的缓存/可恢复片段。
-pub const SEGMENT_POLICY_VERSION: &str = "v2-html-blocks-8192";
+pub const SEGMENT_POLICY_VERSION: &str = "v3-list-boundaries-8192";
 
 /// 翻译分段的单段预算（UTF-8 字节）。取 8192：约 2.7k 汉字 / 8k ASCII 字符，
 /// 按最宽估算其译文输出仍小于 [`TRANSLATE_MAX_TOKENS`]（4096 token）的模型
@@ -149,7 +151,7 @@ pub const SUMMARY_INPUT_MAX_BYTES: usize = 64 * 1024;
 ///
 /// Note: 命中判定 / 同锁快照 / 提交与代次守卫 — 见
 /// .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
-/// 末节「OPT-013 B1 追加（2026-10-15）」。
+/// 「输入身份与提交条件」一节。
 #[derive(Debug, Clone, Copy)]
 pub struct AiCacheInputs<'a> {
     /// 产物类型标识（"summary" / "translation"；改动即让全部旧签名失效）。
@@ -268,13 +270,16 @@ pub async fn list_models(client: &Client, cfg: &AiConfig) -> AppResult<Vec<Strin
         .await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let detail = resp.text().await.unwrap_or_default();
+        let detail = crate::ingestion::read_error_detail(resp)
+            .await
+            .unwrap_or_default();
         return Err(AppError::new(
             "aiConnectivity",
             format!("HTTP {status}: {detail}"),
         ));
     }
-    let v: Value = resp.json().await?;
+    let body = crate::ingestion::read_text_capped(resp, crate::ingestion::MAX_BODY_BYTES).await?;
+    let v: Value = serde_json::from_str(&body)?;
     let mut models: Vec<String> = v["data"]
         .as_array()
         .map(|arr| {
@@ -560,7 +565,7 @@ fn strip_line_ending(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-/// 驱动 SSE 响应流：按规范切帧（流首 BOM / 空行事件 / 多行 data / CRLF）+
+/// 驱动 SSE 响应流：按规范切帧（流首 BOM / 空行事件 / 多行 data / LF/CR/CRLF）+
 /// 严格完成语义。每条完整行在复制/解析前受行缓冲预算约束，未结束残留同样
 /// 受限——超限的注释行也会被拒绝（text 预算只管正文，替代不了框架预算）。
 async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<ChatOutcome> {
@@ -568,7 +573,9 @@ async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<Chat
         resp
     } else {
         let status = resp.status();
-        let detail = resp.text().await.unwrap_or_default();
+        let detail = crate::ingestion::read_error_detail(resp)
+            .await
+            .unwrap_or_default();
         return Err(AppError::new(
             "aiStream",
             format!("AI API {status}: {detail}"),
@@ -578,11 +585,31 @@ async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<Chat
     let mut buf: Vec<u8> = Vec::new();
     let mut parser = SseParser::new();
     let mut at_start = true; // 流首 BOM 判定（可跨 chunk）
+    let mut skip_lf = false; // CR 已经结束一行；跨 chunk 的紧邻 LF 不另派发空行
+    let mut cr_line_bytes = 0;
 
     while let Some(chunk) = resp.chunk().await? {
         buf.extend_from_slice(&chunk);
         strip_leading_bom(&mut at_start, &mut buf);
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        loop {
+            if skip_lf {
+                if buf.is_empty() {
+                    break;
+                }
+                if buf[0] == b'\n' {
+                    if cr_line_bytes + 1 > MAX_SSE_BUFFER {
+                        return Err(AppError::new(
+                            "aiStream",
+                            "SSE 单行超过行缓冲上限（8 MiB），响应不是正常的 SSE 流",
+                        ));
+                    }
+                    buf.remove(0);
+                }
+                skip_lf = false;
+            }
+            let Some(pos) = buf.iter().position(|&b| b == b'\n' || b == b'\r') else {
+                break;
+            };
             // 完整行先过预算再复制/解析（8 MiB-ε 残行 + 下一 chunk 补 newline 不能漏）
             if pos + 1 > MAX_SSE_BUFFER {
                 return Err(AppError::new(
@@ -591,6 +618,8 @@ async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<Chat
                 ));
             }
             let raw: Vec<u8> = buf.drain(..=pos).collect();
+            skip_lf = raw.last() == Some(&b'\r');
+            cr_line_bytes = raw.len();
             // 严格 UTF-8：跨 TCP chunk 的多字节序列在完整行内重组；
             // 真出现非法字节就让请求失败，而不是 lossy 替换后当成功。
             // 行结束符（LF 与其前 CR）在进状态机前剥除，值不再携带 EOL。
@@ -1020,7 +1049,7 @@ mod tests {
     /// 现值，防"改了预算忘了改版本"）。
     #[test]
     fn segment_policy_constants_are_versioned() {
-        assert_eq!(SEGMENT_POLICY_VERSION, "v2-html-blocks-8192");
+        assert_eq!(SEGMENT_POLICY_VERSION, "v3-list-boundaries-8192");
         assert_eq!(TRANSLATE_SEGMENT_MAX_BYTES, 8192);
         assert_eq!(SUMMARY_INPUT_MAX_BYTES, 64 * 1024);
         // 分段预算必须显著小于分段策略命名所描述的量级（防手误改坏版本语义）

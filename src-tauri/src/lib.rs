@@ -2,22 +2,27 @@
 pub mod ai;
 pub mod ai_segments;
 pub mod commands;
-pub mod config_sync;
+pub mod connection_suggestion;
 pub mod credentials;
 pub mod db;
+pub mod diagnostics;
 pub mod endpoint_resolve;
 pub mod error;
 pub mod extraction;
 pub mod fever;
-pub mod github_auth;
 pub mod greader;
+mod image_requests;
 pub mod ingestion;
+pub mod local_sync;
 pub mod media;
+pub mod navigation;
 pub mod opml;
 pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod sync;
+mod sync_http;
+pub mod webdav_transport;
 
 // 冷启动窗口恢复（OPT-015）：仅本 crate 使用，不进集成测试公共面
 mod window_startup;
@@ -40,18 +45,28 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 /// 读取 closeToTray 设置（缺省 true：关闭即最小化到托盘）
 async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
-    let conn = db.lock().await;
     /* TASK-068：收口为类型化助手（默认值语义不变） */
-    crate::db::app_settings_bool(&conn, "closeToTray", true)
+    state::database_work(db.clone(), |conn| {
+        Ok(crate::db::app_settings_bool(conn, "closeToTray", true))
+    })
+    .await
+    .unwrap_or(true)
 }
 
 /// 首次关闭询问是否已展示过（app_settings.closePromptShown，缺省 false）
 async fn read_close_prompt_shown(
     db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> bool {
-    let conn = db.lock().await;
     /* TASK-068：收口为类型化助手（默认值语义不变） */
-    crate::db::app_settings_bool(&conn, "closePromptShown", false)
+    state::database_work(db.clone(), |conn| {
+        Ok(crate::db::app_settings_bool(
+            conn,
+            "closePromptShown",
+            false,
+        ))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// 用户在首次关闭询问弹窗里做出选择：
@@ -66,16 +81,14 @@ async fn resolve_close(
     let to_tray = action == "tray";
     let db = app.state::<state::AppState>().db.clone();
     if remember {
-        let conn = db.lock().await;
-        let raw = crate::db::get_setting(&conn, "app_settings")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "{}".into());
-        let mut v: serde_json::Value =
-            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-        v["closeToTray"] = serde_json::json!(to_tray);
-        v["closePromptShown"] = serde_json::json!(true);
-        let _ = crate::db::set_setting(&conn, "app_settings", &v.to_string());
+        state::database_work(db, move |conn| {
+            crate::commands::apply_app_settings_patch(
+                conn,
+                &serde_json::json!({"closeToTray":to_tray,"closePromptShown":true}),
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
         /* 设置页的开关镜像由前端在 `answerCloseAsk` 调用点自行同步
         （store/slices/ui.ts，本次会话即时一致；下次启动由 bootstrapSettings
         恢复）。OPT-017F：原 `close-resolved` emit 全仓零监听，已删除——见
@@ -97,12 +110,16 @@ pub fn run() {
     // 后台循环收到信号即停发新请求并退出，不残留任务。
     let cover_shutdown = scheduler::ShutdownToken::new();
     let setup_shutdown = cover_shutdown.clone();
+    let exit_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exit_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     tauri::Builder::default()
         // 单实例：二实例启动 → 聚焦既有窗口后自行退出。必须第一个注册。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(navigation::init())
         // 窗口状态记忆：尺寸/位置/最大化跨启动保留。
         // OPT-015：main 跳过插件的初始自动恢复——冷启动恢复统一由 setup 里
         // window_startup 模块一次性执行（窗口已创建未展示时恢复几何再显式
@@ -141,7 +158,8 @@ pub fn run() {
                 log::error!("window-startup: 未找到主窗口，跳过启动恢复");
             }
 
-            // 数据库放应用数据目录（LocalAppData/FluxReader/fluxreader.db）
+            // 数据库放应用数据目录（%APPDATA%\com.fluxreader.app\fluxreader.db）；
+            // %LOCALAPPDATA%\com.fluxreader.app 是 WebView profile，不含主库。
             // P3（2026-09-22 复查）：这两行此前是 `.expect(...)`——与 :140 托盘图标
             // 已修的同类问题：取不到应用数据目录、或数据库被占用/损坏时，会**直接 panic
             // 导致启动即崩**，且用户只看到进程消失、没有任何可操作的提示。
@@ -151,14 +169,25 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("无法确定应用数据目录（app_data_dir 不可用）：{e}"))?;
             std::fs::create_dir_all(&app_dir)?;
-            let db_path = app_dir.join("fluxreader.db");
+            if diagnostics::install(&app_dir.join("diagnostics")).is_err() {
+                log::warn!("无法创建同步诊断目录");
+            }
+            // The new format has its own data space. Never rewrite or delete the old DB,
+            // including its WAL/SHM files, just because legacy migration is unsupported.
+            let db_path = app_dir.join("fluxreader-v2.db");
+            let announce_new_space = !db_path.exists() && app_dir.join("fluxreader.db").exists();
             let conn = db::open(&db_path)
                 .map_err(|e| format!("打开数据库失败（{}）：{e}", db_path.display()))?;
+            if announce_new_space {
+                db::set_setting(&conn, "startup_data_notice", "已启用新版数据空间。旧版订阅和文章未导入，原 fluxreader.db 及其附属文件完整保留在应用数据目录；可继续在新版添加订阅或恢复新版备份。")?;
+            }
+            let initial_sync_mode = db::app_settings_str(&conn, "syncMode", "direct");
             let http = ingestion::build_client(30);
             // SMTC 媒体控制线程（失败降级为 inactive，不影响播放）
             let media = media::spawn_media_thread(app.handle());
 
             app.manage(state::AppState::new(conn, http, media));
+            sync::runtime::init_events(app.handle().clone());
 
             // TASK-124：sync-queue-changed 事件目标注册（本地入队提交 / 推送确认·
             // 失败 / 认证·网络阻塞后发，前端 pill/摘要卡实时跟随）。集成测试不注册
@@ -173,12 +202,21 @@ pub fn run() {
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
+            local_sync::runtime::spawn(app.handle().clone());
             // 封面后台补全（摘要型源 og:image 兜底，低优先级；退出可终止）
             scheduler::spawn_cover_backfill(app.handle().clone(), setup_shutdown.clone());
 
-            // 系统托盘：显示/刷新全部/退出
+            // 系统托盘：显示/刷新/退出。刷新文案跟随 syncMode（hybrid = 本地源），
+            // 设置页切换模式时由 commands::settings::set_setting 就地更新。
             let show = MenuItem::with_id(app, "show", "显示 FluxReader", true, None::<&str>)?;
-            let refresh = MenuItem::with_id(app, "refresh", "刷新全部订阅", true, None::<&str>)?;
+            let refresh = MenuItem::with_id(
+                app,
+                "refresh",
+                scheduler::refresh_all_menu_label(&initial_sync_mode),
+                true,
+                None::<&str>,
+            )?;
+            scheduler::register_tray_refresh_item(refresh.clone());
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &refresh, &quit])?;
             let mut tray = TrayIconBuilder::with_id("main-tray");
@@ -194,13 +232,20 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
                     "refresh" => {
-                        // 复用调度器的全量刷新路径：抓全部源并广播事件
+                        // 复用调度器的全量刷新路径：按 syncMode 抓全部来源或
+                        // 排除服务端来源，并广播事件。
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = app.state::<state::AppState>();
                             let db = state.db.clone();
                             let http = state.http.clone();
-                            let (n, f) = scheduler::refresh_all(&db, &http).await;
+                            let (n, f) = match scheduler::refresh_all(&db, &http).await {
+                                Ok(summary) => summary,
+                                Err(error) => {
+                                    log::error!("tray: 托盘刷新失败: {error}");
+                                    return;
+                                }
+                            };
                             let _ = app.emit(
                                 "feeds-updated",
                                 serde_json::json!({ "new_articles": n, "failed_feeds": f }),
@@ -248,7 +293,7 @@ pub fn run() {
                         // 首次：前端弹选择对话框（选完调 resolve_close 执行）。
                         // 10s 兜底：前端监听失败/重载中没回 ack → 按默认（托盘）
                         // 执行——绝不出现"窗口关不掉"的僵尸态。
-                        // resolve_close 也会触发 ack（视为已处理，走它自己的路径）。
+                        // ack 由前端收到 close-ask 时发送；resolve_close 只执行选择。
                         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
                         let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
                         let unlisten = {
@@ -292,8 +337,10 @@ pub fn run() {
             commands::update_folder_layout,
             commands::set_folder_collapsed,
             commands::set_folder_ai_flags,
+            commands::set_folder_ai_modes,
             // 订阅源
             commands::list_feeds,
+            commands::list_article_sources,
             commands::add_feed,
             commands::delete_feed,
             commands::update_feed,
@@ -306,6 +353,8 @@ pub fn run() {
             commands::article_index,
             commands::get_article,
             commands::get_articles,
+            commands::get_article_updates,
+            commands::list_article_member_ids,
             commands::report_broken_cover,
             commands::search_articles,
             commands::set_read,
@@ -323,12 +372,18 @@ pub fn run() {
             // 设置
             commands::get_setting,
             commands::set_setting,
+            commands::patch_app_settings,
+            // 数据库备份（手动完整快照；恢复边界见 docs/backup.md）
+            commands::create_database_backup,
+            commands::take_startup_backup_warning,
             // 更新检查（OPT-014：固定目的地，无 URL 入参）
             commands::check_for_updates,
             // Miniflux 同步
             commands::sync_test,
             commands::sync_save,
             commands::sync_phase,
+            sync::runtime::sync_run,
+            commands::sync_retry_expired,
             commands::sync_disconnect,
             commands::sync_local_feeds,
             commands::sync_status,
@@ -357,33 +412,71 @@ pub fn run() {
             commands::extract_fulltext,
             // 图片代理（防盗链兼容）
             commands::fetch_image,
+            commands::cancel_image,
             // OPML 导入导出
             commands::opml_import,
             commands::opml_export,
             // SMTC 系统媒体控制
             media::media_update_full,
             media::media_stop,
-            // 配置同步（Gist / WebDAV）
-            config_sync::config_sync_save_credentials,
-            config_sync::config_sync_upload,
-            config_sync::config_sync_download,
-            // OPT-010：两段式——预览（只读）→ 确认后应用（hash/版本 CAS）
-            config_sync::config_sync_plan,
-            config_sync::config_sync_apply,
-            config_sync::config_sync_status,
-            // GitHub 设备流登录
-            github_auth::github_login_start,
-            github_auth::github_login_poll,
-            github_auth::github_login_status,
-            github_auth::github_login_disconnect,
+            local_sync::runtime::local_sync_status,
+            local_sync::runtime::local_sync_connect,
+            local_sync::runtime::local_sync_disconnect,
+            local_sync::runtime::local_sync_run,
+            local_sync::backup::choose_portable_backup_file,
+            local_sync::backup::export_portable_backup,
+            local_sync::backup::preview_portable_backup,
+            local_sync::backup::restore_portable_backup,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(move |_app, event| {
+        .run(move |app, event| {
+            use std::sync::atomic::Ordering;
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                if !exit_ready.load(Ordering::Acquire) {
+                    api.prevent_exit();
+                    if !exit_pending.swap(true, Ordering::AcqRel) {
+                        cover_shutdown.trigger();
+                        let runtime = app
+                            .try_state::<state::AppState>()
+                            .map(|state| state.sync_runtime.clone());
+                        if let Some(runtime) = &runtime {
+                            runtime.stop();
+                        }
+                        let local_runtime=app.try_state::<state::AppState>().map(|state|state.local_sync.clone());
+                        if let Some(runtime)=&local_runtime {runtime.stop();}
+                        let app = app.clone();
+                        let ready = exit_ready.clone();
+                        let code = code.unwrap_or(0);
+                        tauri::async_runtime::spawn(async move {
+                            let drained = match runtime {
+                                Some(runtime) => {
+                                    runtime.drain(std::time::Duration::from_secs(3)).await
+                                }
+                                None => true,
+                            };
+                            let local_drained=match local_runtime {Some(runtime)=>runtime.drain(std::time::Duration::from_secs(3)).await,None=>true};
+                            let drained=drained&&local_drained;
+                            diagnostics::record(
+                                0,
+                                "shutdown",
+                                if drained { "stopped" } else { "timeout" },
+                                None,
+                            );
+                            ready.store(true, Ordering::Release);
+                            app.exit(code);
+                        });
+                    }
+                }
+            }
             // OPT-017D：应用退出前触发封面补全终止信号（循环停发新请求、
             // 在途请求取消、子任务随 round 返回结束）。
             if matches!(event, tauri::RunEvent::Exit) {
                 cover_shutdown.trigger();
+                if let Some(state) = app.try_state::<state::AppState>() {
+                    state.sync_runtime.stop();
+                    state.local_sync.stop();
+                }
             }
         });
 }

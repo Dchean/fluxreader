@@ -253,29 +253,13 @@ fn maps_select_rows_per_feed_not_globally() {
     let (aid_b, _) =
         db::upsert_article_with_feed(&conn, 2, &article("http://x/news", "gb"), false).unwrap();
 
-    let norm = db::normalize_url("http://x/news");
     let maps = db::sync_match_maps(&conn).unwrap();
-    assert_eq!(
-        maps.feed_url_to_id.get(&(1, norm.clone())).copied(),
-        Some(aid_a),
-        "feed A 的 URL 兜底只能选到自己源的行"
-    );
-    assert_eq!(
-        maps.feed_url_to_id.get(&(2, norm.clone())).copied(),
-        Some(aid_b),
-        "feed B 的 URL 兜底只能选到自己源的行（旧全局映射会选最小 id 行）"
-    );
     assert_eq!(
         maps.id_to_feed_mf.get(&aid_a).copied().flatten(),
         Some(10),
         "每行暴露自己的 feed remote id"
     );
     assert_eq!(maps.id_to_feed_mf.get(&aid_b).copied().flatten(), Some(20));
-    // 同文行集（已读广播选择集）：两行都要在
-    let mut ids = maps.url_norm_to_ids.get(&norm).cloned().unwrap_or_default();
-    ids.sort_unstable();
-    assert_eq!(ids, vec![aid_a, aid_b], "同文行集包含跨源两行");
-
     // 绑定后：mf_id_to_article 各自成键
     db::set_article_remote_id(&conn, aid_a, 100).unwrap();
     db::set_article_remote_id(&conn, aid_b, 200).unwrap();
@@ -290,59 +274,5 @@ fn maps_select_rows_per_feed_not_globally() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// 已读广播目标集（推送侧消费）：同文兄弟的 remote_id + 旧 CSV 记账的
-/// 有限兼容，去重且排除自身。
-#[test]
-fn read_broadcast_targets_cover_siblings_and_legacy_csv() {
-    let (conn, tmp) = setup("broadcast_targets");
-
-    db::insert_feed(
-        &conn,
-        "http://x/1.xml",
-        None,
-        "F1",
-        None,
-        1,
-        "inherit",
-        false,
-        false,
-    )
-    .unwrap();
-    db::insert_feed(
-        &conn,
-        "http://x/2.xml",
-        None,
-        "F2",
-        None,
-        1,
-        "inherit",
-        false,
-        false,
-    )
-    .unwrap();
-    let (a1, _) =
-        db::upsert_article_with_feed(&conn, 1, &article("http://x/b", "g1"), false).unwrap();
-    let (a2, _) =
-        db::upsert_article_with_feed(&conn, 2, &article("http://x/b", "g2"), false).unwrap();
-    db::set_article_remote_id(&conn, a1, 100).unwrap();
-    db::set_article_remote_id(&conn, a2, 200).unwrap();
-    // 旧 CSV 记账：远端 feed 未绑定时的历史副本（有限兼容）
-    db::add_article_dup_entry(&conn, a1, 300).unwrap();
-    db::add_article_dup_entry(&conn, a1, 200).unwrap(); // 与兄弟重复 → 去重
-
-    let targets = db::read_broadcast_targets(&conn, a1).unwrap();
-    assert_eq!(
-        targets,
-        vec![200, 300],
-        "目标集 = 同文兄弟 remote_id + CSV 记账（去重、升序、不含自身 100）"
-    );
-
-    // 不相关 URL 的行不进广播集
-    let (a3, _) =
-        db::upsert_article_with_feed(&conn, 1, &article("http://x/other", "g3"), false).unwrap();
-    db::set_article_remote_id(&conn, a3, 400).unwrap();
-    let targets = db::read_broadcast_targets(&conn, a1).unwrap();
-    assert_eq!(targets, vec![200, 300], "不同 URL 的行不参与广播");
-
-    let _ = std::fs::remove_file(&tmp);
-}
+// 跨源广播目标已退役；网络层精确目标/部分ACK守卫由
+// entry_identity_e2e、sync_ack_verification_e2e、refactor_acceptance_e2e承担。

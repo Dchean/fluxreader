@@ -1,7 +1,8 @@
+import { bindImageCapacityListener } from './lib/imageProxy';
 import { create } from 'zustand';
 import type { AppState } from './store/types';
 import { bindAppStore } from './store/internals';
-import { bindBodyCacheNotify } from './store/bodyCache';
+import { bindBodyCacheNotify, getBodyEntry } from './store/bodyCache';
 import { createNavSlice } from './store/slices/nav';
 import { createReaderSlice } from './store/slices/reader';
 import { createAiSlice } from './store/slices/ai';
@@ -9,8 +10,11 @@ import { createBootstrapSlice } from './store/slices/bootstrap';
 import { createPlayerSlice } from './store/slices/player';
 import { createUiSlice } from './store/slices/ui';
 import { createSyncSlice } from './store/slices/sync';
+import { createLocalLibrarySlice } from './store/slices/localLibrary';
 import { createFeedsSlice } from './store/slices/feeds';
 import { createSettingsSlice } from './store/slices/settings';
+import { bindExternalOpenFailureHandler } from './lib/external';
+import { bindAiCacheInvalidationHandler } from './lib/api';
 
 /* ============================================================
    全局客户端状态机 —— 对应规范 §2.2 + 原型交互引擎
@@ -30,7 +34,8 @@ import { createSettingsSlice } from './store/slices/settings';
    不参与任何取值——不会出现同名 key 被后展开的 slice 覆盖。
    ============================================================ */
 
-export { bootstrapGithubAuth, confirmAppliedConfig } from './store/slices/bootstrap';
+export { confirmAppliedConfig } from './store/slices/bootstrap';
+export { enqueueAiConfigWrite } from './components/settings/aiConfig';
 /* OPT-011 R5：配置应用/上传的协调入口经 store 公开面导出——组件一律经本模块
    （测试工具链把 src/store.ts 别名到唯一 store 实例）消费协调协议，避免深层
    子路径在别名体系下形成第二个协议实例（写队列/屏障必须与 store 的写入口同一份）。 */
@@ -57,25 +62,52 @@ export const useAppStore = create<AppState>((...a) => ({
   ...createPlayerSlice(...a),
   ...createUiSlice(...a),
   ...createSyncSlice(...a),
+  ...createLocalLibrarySlice(...a),
   ...createFeedsSlice(...a),
   ...createSettingsSlice(...a),
 }));
 
 /* 注入 store 句柄：供跨 slice 的模块级 helper（视图缓存、标读/收藏收口、
-   GitHub 轮询）读写。与原实现时序一致——模块求值期不会调用它们。 */
+   同步活动）读写。与原实现时序一致——模块求值期不会调用它们。 */
 bindAppStore(useAppStore);
+// One scalar wake-up on saturated→available, not one transport waiter per component.
+bindImageCapacityListener(() => useAppStore.setState(s => ({ mediaCapacityRevision: s.mediaCapacityRevision + 1 })));
+bindExternalOpenFailureHandler((message) => useAppStore.getState().showToast(message));
+bindAiCacheInvalidationHandler(() => useAppStore.setState((s) => ({ aiStatusRevision: s.aiStatusRevision + 1 })));
 
 /* TASK-122：注入 bodyById 写入通知——模块级正文/AI 缓存的每次真实写入 bump
    AppState.bodyCacheNonce，使经 useAppStore 订阅 entryNeedsHydration /
    selectArticleBody 的组件在记录变化时重算 selector（机制见 bodyCache.ts
    「写入通知」节）。 */
-bindBodyCacheNotify(() => useAppStore.setState((s) => ({ bodyCacheNonce: s.bodyCacheNonce + 1 })));
+bindBodyCacheNotify((changedId, safeTranslation) => useAppStore.setState((s) => {
+  // 按本次变动的实体投影草稿归属：安全水合解除raw，未水合行的raw回退
+  // 进缓存时仍须保持raw。只写store、不回写bodyCache，无通知递归；摘要不改翻译owner。
+  const raw = { ...s.rawTranslatedIds };
+  let entries = s.entries;
+  let changed = false;
+  for (const id of changedId ? [changedId] : Object.keys(raw)) {
+    const body = getBodyEntry(id);
+    // 只有曾持草稿的行保留过渡镜像；缓存接管为安全产物后同时转交值/签名/归属，
+    // 防后续LRU/释放回退到旧未消毒文本。普通已水合行不复制正文/产物。
+    if (safeTranslation && body && body.translationDraftOwner === undefined && entries.some((e) => e.id === id && e.translationDraftOwner)) {
+      entries = entries.map((e) => e.id === id && e.translationDraftOwner
+        ? { ...e, translatedContent: body.translatedContent, translatedSig: body.translatedSig, translationDraftOwner: undefined }
+        : e);
+    }
+    const draft = body ? body.translationDraftOwner : s.entries.find((e) => e.id === id)?.translationDraftOwner;
+    if (draft && !raw[id]) { raw[id] = true; changed = true; }
+    else if (!draft && raw[id]) { delete raw[id]; changed = true; }
+  }
+  return { bodyCacheNonce: s.bodyCacheNonce + 1, ...(changed ? { rawTranslatedIds: raw } : {}),
+    ...(entries !== s.entries ? { entries } : {}),
+  };
+}));
 
 export * from './store/selectors';
 
 /* OPT-013 B3：AI 五态单点真值——判定与生成入口/在途表同一 slice，Reader 与卡片
    一律经本导出消费（不在组件内复制判定逻辑）。 */
-export { selectAiProductState } from './store/slices/ai';
+export { selectAiProductState, selectAiStatusInput, selectAiCacheStatus, selectAiGenerationInput, sameAiGenerationInput } from './store/slices/ai';
 export type { AiProductState } from './store/slices/ai';
 
 export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage, AppErrorEntry } from './store/types';
@@ -86,3 +118,4 @@ export { ERROR_CENTER_MAX } from './store/slices/ui';
 /* OPT-018：toast 退场定时器清理入口——组件回归夹具经本模块（dist-test/store.js
    的唯一 store 实例）调用，避免深层子路径在别名体系下形成第二个模块实例。 */
 export { clearToastTimers } from './store/slices/ui';
+

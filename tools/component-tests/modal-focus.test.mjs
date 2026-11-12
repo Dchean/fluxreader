@@ -7,8 +7,7 @@
 //   自己的代码路径）；关闭后焦点还原到打开前的触发元素。
 // - ConfirmDialog（FeedsTab 删除源确认，portal 挂 body）：同契约抽查。
 // 证据边界：jsdom 无布局/无焦点遍历，「浏览器默认 Tab 会走到背景」这一半只能由
-//   源码形态断言（ui-contracts 域）+ 真实浏览器行为佐证，本文件锁的是 trap 自身
-//   的拦截与回绕逻辑（不依赖 jsdom 遍历）。
+//   真实浏览器行为佐证；本文件直接检查事件拦截与焦点结果，不要求实现函数名。
 
 import assert from 'node:assert/strict';
 import { componentTest, mount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
@@ -125,4 +124,31 @@ componentTest('W4 模态焦点陷阱：ConfirmDialog 同契约（role/aria-label
   await flush(1);
   assert.equal(tabEv.defaultPrevented, true, '末元素 Tab 应被 trap 拦截');
   assert.equal(document.activeElement, first, '末元素 Tab 应回绕到首个按钮');
+});
+
+componentTest('ModalOverlay：空面板 Tab 留在容器，portal 控件 Tab 交还控件自身', { timeout: 40000 }, async () => {
+  installBackend();
+  resetStore();
+  const { createElement, act } = await import('react');
+  const { createPortal } = await import('react-dom');
+  const { ModalOverlay } = await import('../../src/components/primitives.tsx');
+  const entry = await mount(createElement(ModalOverlay, { open: true, ariaLabel: '焦点测试面板', onClose() {} },
+    createPortal(createElement('button', { id: 'focus-portal-control' }, '浮层下拉控件'), document.body)));
+  const panel = entry.container.querySelector('[role="dialog"]');
+  assert.ok(panel && document.activeElement === panel, '面板打开后焦点在容器');
+  assert.equal(panel.querySelectorAll('button, input, [tabindex]').length, 0, '面板 DOM 内没有可聚焦后代');
+  for (const shift of [false, true]) {
+    let event;
+    await act(async () => { event = pressTab(panel, { shift }); });
+    assert.equal(event.defaultPrevented, true, '空面板双向 Tab 均阻止默认逃逸');
+    assert.ok(document.activeElement === panel, '空面板 Tab 后焦点仍在容器');
+  }
+
+  const portal = document.getElementById('focus-portal-control');
+  assert.ok(portal && !panel.contains(portal), 'portal 位于 React 子树内、面板 DOM 外');
+  await act(async () => { portal.focus(); });
+  let portalEvent;
+  await act(async () => { portalEvent = pressTab(portal); });
+  assert.equal(portalEvent.defaultPrevented, false, 'portal 冒泡到面板时不拦截其 Tab');
+  assert.ok(document.activeElement === portal, '面板不得抢回 portal 控件焦点');
 });

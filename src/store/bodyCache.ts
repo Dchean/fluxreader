@@ -47,7 +47,7 @@
         落地即执行本对齐——这就是清理链路的显式失效点）；
       - 行 AI 产物非空且与记录不同（ready 记录）→ 对齐为行真值（含他端再生）；
       - 行 snippet 与记录所对应的视图行不同 → 该文章已被源站重新同步，正文可能
-        陈旧 → 记录失效（删记录回未请求态，懒水合自动重取）——探针 P4
+        陈旧 → 记录置 cleared 并推进失效戳，懒水合自动重取——探针 P4
         「snippet 更新后正文陈旧、entryNeedsHydration=false 不重取」的修复本体。
         判据 = 「新行 snippet ≠ 被替换视图行的 snippet」：记录存活意味着其水合后
         未曾失效，视图行 snippet 即水合时基线；不按 aiWrittenAt 豁免（正文陈旧
@@ -92,15 +92,35 @@
 /** 正文/AI 记录状态（判别态；语义表见模块头注） */
 export type BodyState = 'loading' | 'ready' | 'cleared' | 'missing' | 'failed';
 
+/** 全文操作属于已水合实体，既不替代正文状态，也不随 Reader 切篇迁移。 */
+export interface FulltextTarget {
+  readonly contentId: number | null;
+  readonly contentRev: number;
+  readonly anchor: string | null;
+  readonly url: string;
+  /** 已知内容接管后不可再用；只由仍持有它的命令/有界错误闭包保留。 */
+  revoked: boolean;
+}
+
+export interface FulltextRequest {
+  readonly stamp: number;
+  readonly target: FulltextTarget;
+  readonly kind: 'extract' | 'verify' | 'media';
+  /** 命令已被结算或后继操作接管；不等同于目标内容已更新。 */
+  retired: boolean;
+}
+
 /** 单篇文章的正文/AI 实体记录（bodyById 的值） */
 export interface BodyEntry {
   state: BodyState;
   /** 渲染态正文 HTML（Readability 全文提取后 = 全文；空串 = 后端无正文） */
   content: string;
-  /** RSS 原始正文（「全文 ↔ RSS 正文」切换回跳用） */
+  /** 本会话实际持有的 RSS 正文；详情仅返回提取全文时为空，不冒充 RSS 来源。 */
   rawContent: string;
   /** 译文（cleared 后为空串） */
   translatedContent: string;
+  /** 仅内存：当前未消毒译文属于哪笔请求。正文水合替换产物时不能继承旧owner。 */
+  translationDraftOwner?: symbol;
   /** AI 摘要（cleared 后为空串） */
   aiSummary: string;
   /** OPT-013 B1：两类产物的缓存签名（null = 旧无签名产物/未生成——B3 五态判定
@@ -128,6 +148,54 @@ export interface BodyEntry {
   aiWrittenAt: number;
   /** missing/failed 的呈现文案（missing = 固定文案；failed = 错误消息） */
   message: string;
+  fulltextRequest?: FulltextRequest;
+  fulltextFailure?: { ticket: FulltextRequest; message: string };
+  /** 成功提交后的媒体回读归属，回读结束即释放；不持有HTML或正文记录。 */
+  fulltextReadback?: FulltextRequest;
+}
+
+function fulltextTickets(rec: BodyEntry | undefined): FulltextRequest[] {
+  return rec ? [rec.fulltextRequest, rec.fulltextFailure?.ticket, rec.fulltextReadback]
+    .filter((ticket): ticket is FulltextRequest => ticket !== undefined) : [];
+}
+
+/** 同身份详情可以换记录对象；媒体变化不参与正文目标资格。 */
+export function matchesFulltextTarget(target: FulltextTarget, actual: {
+  contentId: number | null; contentRev: number; anchor: string | null; url?: string | null;
+}): boolean {
+  return target.contentId === actual.contentId && target.contentRev === actual.contentRev
+    && (target.anchor === null || actual.anchor === null || target.anchor === actual.anchor)
+    && (actual.url === undefined || target.url === actual.url);
+}
+
+/** 唯一正文目标判据；调用方另外检查库代、忙态和其request/failure的命令归属。 */
+export function isFulltextTargetCurrent(rec: BodyEntry, ticket: FulltextRequest): boolean {
+  if (ticket.retired || ticket.target.revoked || rec.contentRevision !== ticket.stamp) return false;
+  // LRU核验创建的loading/failed/missing没有可猜的正文身份；仍由该读取的对象owner守卫。
+  if (ticket.kind === 'verify' && rec.state !== 'ready') return true;
+  return rec.state !== 'missing'
+    && matchesFulltextTarget(ticket.target, { contentId: rec.contentId, contentRev: rec.contentRev, anchor: rec.entryAnchor });
+}
+
+/** 已接受的缓存写可永久撤销旧操作，但不改变普通正文/AI/水合的任何字段。 */
+function reconcileFulltextTickets(previous: BodyEntry | undefined, next: BodyEntry): BodyEntry {
+  const retained = fulltextTickets(next);
+  for (const ticket of fulltextTickets(previous)) {
+    if (!retained.includes(ticket)) ticket.retired = true;
+  }
+  let changed = false;
+  for (const ticket of retained) {
+    if (!isFulltextTargetCurrent(next, ticket)) {
+      if (!ticket.retired) ticket.target.revoked = true;
+      changed = true;
+    }
+  }
+  if (!changed) return next;
+  return { ...next,
+    fulltextRequest: next.fulltextRequest && !isFulltextTargetCurrent(next, next.fulltextRequest) ? undefined : next.fulltextRequest,
+    fulltextFailure: next.fulltextFailure && !isFulltextTargetCurrent(next, next.fulltextFailure.ticket) ? undefined : next.fulltextFailure,
+    fulltextReadback: next.fulltextReadback && !isFulltextTargetCurrent(next, next.fulltextReadback) ? undefined : next.fulltextReadback,
+  };
 }
 
 /** 正文缓存条数上限（LRU）。取值依据见模块头注「内存预算」。 */
@@ -153,6 +221,7 @@ class BodyLru extends Map<string, BodyEntry> {
   }
 
   set(key: string, value: BodyEntry): this {
+    value = reconcileFulltextTickets(super.get(key), value);
     super.delete(key);
     super.set(key, value);
     while (super.size > this.max) {
@@ -165,6 +234,13 @@ class BodyLru extends Map<string, BodyEntry> {
 }
 
 const bodyById: Map<string, BodyEntry> = new BodyLru(BODY_CACHE_MAX);
+// 淘汰/重试后新请求也不得复用旧戳；只保存单调序号，不另留每文章墓碑。
+let bodyRevisionSequence = 0;
+function nextRevision(current?: number): number {
+  const revision = current === undefined ? bodyRevisionSequence + 1 : current + 1;
+  bodyRevisionSequence = Math.max(bodyRevisionSequence, revision);
+  return revision;
+}
 
 /* ── 写入通知（响应性接线）────────────────────────────────────
    本缓存是模块级状态（不在 store 快照内），而组件经 useAppStore 的 selector
@@ -174,16 +250,16 @@ const bodyById: Map<string, BodyEntry> = new BodyLru(BODY_CACHE_MAX);
    在 bindAppStore 后注入「bump AppState.bodyCacheNonce」的实现，选择器引用该
    nonce 建立订阅依赖（见 selectors.ts）。notify 由宿主注入而非直接 import
    store：保持本模块零 store 依赖（internals ← bodyCache 单向，无环）。 */
-let notifyWrite: (() => void) | null = null;
+let notifyWrite: ((id?: string, safeTranslation?: boolean) => void) | null = null;
 
 /** 宿主（store.ts）注入写入通知；多次注入以后一次为准（测试重装载同）。 */
-export function bindBodyCacheNotify(fn: () => void): void {
+export function bindBodyCacheNotify(fn: (id?: string, safeTranslation?: boolean) => void): void {
   notifyWrite = fn;
 }
 
 /** 每个真实写入的公共尾：触发通知（未注入时静默——纯函数级测试场景）。 */
-function touch(): void {
-  notifyWrite?.();
+function touch(id?: string, safeTranslation = false): void {
+  notifyWrite?.(id, safeTranslation);
 }
 
 /** 读记录（命中即刷新 LRU 新鲜度）。无记录 = 未请求/已淘汰。 */
@@ -204,7 +280,7 @@ function emptyRecord(state: BodyState): BodyEntry {
     aiSummarySig: null,
     translatedSig: null,
     fulltextExtracted: false,
-    contentRevision: 0,
+    contentRevision: nextRevision(),
     contentId: null,
     contentRev: 0,
     entryAnchor: null,
@@ -224,9 +300,10 @@ function emptyRecord(state: BodyState): BodyEntry {
 export function markBodyLoading(id: string): number {
   const existing = bodyById.get(id);
   if (existing && existing.state !== 'cleared') return existing.contentRevision;
-  const revision = existing?.contentRevision ?? 0;
-  bodyById.set(id, { ...emptyRecord('loading'), contentRevision: revision });
-  touch();
+  const next = { ...emptyRecord('loading'), ...(existing ?? {}), state: 'loading' as const };
+  const revision = next.contentRevision;
+  bodyById.set(id, next);
+  touch(id);
   return revision;
 }
 
@@ -234,7 +311,7 @@ export function markBodyLoading(id: string): number {
     刷新 AI 写入时刻。state 由调用方给定（生成 → ready 解除 cleared；
     失效 → cleared）。 */
 function withExplicitAiWrite(rec: BodyEntry, state: BodyState): BodyEntry {
-  return { ...rec, state, contentRevision: rec.contentRevision + 1, aiWrittenAt: Date.now() };
+  return { ...rec, state, contentRevision: nextRevision(rec.contentRevision), aiWrittenAt: Date.now() };
 }
 
 /** OPT-008B R3：由后端行（详情/批量水合）计算条目身份锚。行缺 feed_id/title
@@ -249,16 +326,17 @@ function anchorOfRow(row: { feed_id?: number | null; title?: string | null }): s
       本响应过期，整行丢弃（cleared/最新状态不被旧响应复活）；
     - aiFallback：行 AI 列为 NULL 时保留的现值（流式半截/未落库产物，
       规则见模块头注「水合 AI 列的回退规则」）；
-    - 无记录（LRU 淘汰后迟到落地等）→ 以空记录为底新建，stamp=0 恒匹配。 */
+    - 无记录（LRU 淘汰后迟到落地等）→ 拒绝；下次请求签发新的戳，旧请求不复活记录。
+    返回值同时决定详情轻字段是否有资格落地。 */
 export function applyBodyRow(
   id: string,
   row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null; content_id?: number | null; content_revision?: number | null; feed_id?: number | null; title?: string | null; ai_summary_sig?: string | null; translated_sig?: string | null },
   stamp: number,
-  aiFallback: { translatedContent: string; aiSummary: string },
-): void {
+  aiFallback: { translatedContent: string; aiSummary: string; translationDraftOwner?: symbol },
+): boolean {
   const current = bodyById.get(id);
-  if (current && current.contentRevision !== stamp) return; // 显式失效在途 → 响应过期
-  const base = current ?? emptyRecord('ready');
+  if (!current || current.contentRevision !== stamp) return false;
+  const base = current;
   /* OPT-013 B1：签名随产物来源走——行携带产物（非 NULL）时签名取行值
      （行缺省签名字段 = 旧无签名产物 → null）；行产物为 NULL（回退到 aiFallback
      的流式半截）时保留记录现值（签名不脱离产物独立改写）。 */
@@ -268,8 +346,11 @@ export function applyBodyRow(
     ...base,
     state: 'ready',
     content: row.content_html ?? '',
-    rawContent: row.content_html ?? '',
+    rawContent: row.fulltext_extracted ? base.rawContent : row.content_html ?? '',
     translatedContent: row.translated_content ?? aiFallback.translatedContent,
+    translationDraftOwner: row.translated_content == null
+      ? aiFallback.translationDraftOwner ?? (aiFallback.translatedContent === base.translatedContent ? base.translationDraftOwner : undefined)
+      : undefined,
     aiSummary: row.ai_summary ?? aiFallback.aiSummary,
     aiSummarySig: summarySig,
     translatedSig,
@@ -283,7 +364,8 @@ export function applyBodyRow(
     aiWrittenAt: Date.now(),
     message: '',
   });
-  touch();
+  touch(id, row.translated_content != null);
+  return true;
 }
 
 /** OPT-008B 第二阶段：正文真值修订变化（列表快照合并发现条目引用的 contents
@@ -317,36 +399,109 @@ export function invalidateContentRevision(
     contentId,
     contentRev: revision,
     entryAnchor: anchor ?? current.entryAnchor,
-    contentRevision: current.contentRevision + 1,
+    contentRevision: nextRevision(current.contentRevision),
   });
-  touch();
+  touch(id);
   return true;
 }
 
 /** 水合响应缺行（含空 rows）：文章不存在终态。stamp 比对同 applyBodyRow。 */
 export function markBodyMissing(id: string, stamp: number): void {
   const current = bodyById.get(id);
-  if (current && current.contentRevision !== stamp) return;
+  if (!current || current.contentRevision !== stamp) return;
   bodyById.set(id, { ...(current ?? emptyRecord('missing')), state: 'missing', message: BODY_MISSING_MESSAGE });
-  touch();
+  touch(id);
 }
 
 /** 水合失败：failed 终态 + 错误文案（内联重试依据）。stamp 比对同 applyBodyRow。 */
 export function markBodyFailed(id: string, stamp: number, message: string): void {
   const current = bodyById.get(id);
-  if (current && current.contentRevision !== stamp) return;
+  if (!current || current.contentRevision !== stamp) return;
   bodyById.set(id, { ...(current ?? emptyRecord('failed')), state: 'failed', message });
-  touch();
+  touch(id);
 }
 
 /** 删除记录 → 回「未请求」态：retryHydration 的重试入口、以及未来任何需要
     强制重取的路径。LRU 淘汰与删除语义相同。 */
 export function dropBodyEntry(id: string): void {
-  if (bodyById.delete(id)) touch();
+  if (bodyById.delete(id)) touch(id);
+}
+
+export function beginFulltextRequest(id: string, url: string): FulltextRequest | undefined {
+  const current = bodyById.get(id);
+  if (!current || current.fulltextRequest) return;
+  const request: FulltextRequest = { stamp: current.contentRevision, retired: false, kind: 'extract',
+    target: { contentId: current.contentId, contentRev: current.contentRev, anchor: current.entryAnchor, url, revoked: false } };
+  bodyById.set(id, { ...current, fulltextRequest: request, fulltextFailure: undefined, fulltextReadback: undefined });
+  touch(id);
+  return request;
+}
+
+/** 只结束自己的操作；失效后不能留下旧错误，也不能清掉后继请求。 */
+export function finishFulltextRequest(id: string, request: FulltextRequest, message?: string): boolean {
+  const current = bodyById.get(id);
+  if (!current || current.fulltextRequest !== request) return false;
+  const accepted = isFulltextTargetCurrent(current, request);
+  bodyById.set(id, { ...current, fulltextRequest: undefined,
+    fulltextFailure: accepted && message ? { ticket: request, message } : current.fulltextFailure });
+  touch(id);
+  return accepted;
+}
+
+/** 详情已被applyBodyRow接受后核实际行目标，补上缓存未持有的URL/NULL事实。
+ * 拒绝的详情不得调用；Reader单篇/批量/private与AI离屏水合共用这一出口。 */
+export function reconcileFulltextTargetRow(id: string, row: {
+  content_id?: number | null; content_revision?: number | null;
+  feed_id?: number | null; title?: string | null; url?: string | null;
+}): void {
+  const current = bodyById.get(id);
+  if (!current) return;
+  let changed = false;
+  for (const ticket of fulltextTickets(current)) {
+    if (!matchesFulltextTarget(ticket.target, { contentId: row.content_id ?? null,
+      contentRev: row.content_revision ?? 0, anchor: anchorOfRow(row), url: row.url ?? null })) {
+      ticket.target.revoked = true; changed = true;
+    }
+  }
+  if (changed) { bodyById.set(id, { ...current }); touch(id); }
+}
+
+/** 已接受轻属性只确认位置，不以列表旧CID/rev裁决新正文（保留提取后的快照基线）。
+ * url undefined=本次未提供，null=明确无原文；两者不得混成同一个撤销依据。 */
+export function reconcileFulltextLocation(id: string, location: {
+  url?: string | null; anchor: string | null; unavailable?: boolean;
+}): void {
+  const current = bodyById.get(id);
+  if (!current) return;
+  let changed = false;
+  for (const ticket of fulltextTickets(current)) {
+    if (location.unavailable || (location.url !== undefined && location.url !== ticket.target.url)
+      || (location.anchor !== null && ticket.target.anchor !== null && location.anchor !== ticket.target.anchor)) {
+      ticket.target.revoked = true; changed = true;
+    }
+  }
+  if (changed) { bodyById.set(id, { ...current }); touch(id); }
+}
+
+/** 明确提交后新建轻目标，旧提取ticket已由成功写入撤销，不复用旧失败闭包。 */
+export function beginFulltextReadback(id: string, target: string | FulltextTarget): FulltextRequest | undefined {
+  const current = bodyById.get(id);
+  if (!current) return;
+  const ticket: FulltextRequest = { stamp: current.contentRevision, retired: false,
+    kind: typeof target === 'string' ? 'media' : 'verify',
+    target: typeof target === 'string' ? { contentId: current.contentId, contentRev: current.contentRev,
+      anchor: current.entryAnchor, url: target, revoked: false } : target };
+  bodyById.set(id, { ...current, fulltextReadback: ticket });
+  return ticket;
+}
+
+export function finishFulltextReadback(id: string, ticket: FulltextRequest): void {
+  const current = bodyById.get(id);
+  if (current?.fulltextReadback === ticket) bodyById.set(id, { ...current, fulltextReadback: undefined });
 }
 
 /** 全文提取成功：正文被 Readability 结果覆盖（rawContent 保留 RSS 原文）。
-    AI 字段不动；不 bump revision（非显式失效，同一实体的正文内容更新）。
+    AI 字段不动；推进失效戳，提取前在途的旧详情不得覆盖已提交的新全文。
     无记录 = 未水合，提取前提不成立（调用方守卫），此处防御性忽略。
     OPT-008B R3：identity = 提取响应携带的提交后 (contentId, contentRev)
     ——落记录使下一次 reload 的修订比较**相等**（DB 行已是该修订），刚成功
@@ -361,12 +516,15 @@ export function applyExtractedFulltext(
   bodyById.set(id, {
     ...current,
     content: html,
+    contentRevision: nextRevision(current.contentRevision),
     fulltextExtracted: true,
+    fulltextRequest: undefined,
+    fulltextFailure: undefined,
     state: 'ready',
     contentId: identity ? identity.contentId : current.contentId,
     contentRev: identity ? identity.contentRev : current.contentRev,
   });
-  touch();
+  touch(id);
 }
 
 /** AI 生成完成（摘要/译文回读 DB 消毒版后落账）：解除 cleared、bump revision。
@@ -382,14 +540,17 @@ export function applyAiProduct(
   field: 'aiSummary' | 'translatedContent',
   value: string,
   signature?: string | null,
+  draftOwner?: symbol,
 ): boolean {
   const current = bodyById.get(id);
   if (!current) return false;
   const sigPatch: Partial<BodyEntry> = signature === undefined
     ? {}
     : (field === 'aiSummary' ? { aiSummarySig: signature } : { translatedSig: signature });
-  bodyById.set(id, withExplicitAiWrite({ ...current, [field]: value, ...sigPatch }, 'ready'));
-  touch();
+  bodyById.set(id, withExplicitAiWrite({ ...current, [field]: value, ...sigPatch,
+    ...(field === 'translatedContent' ? { translationDraftOwner: draftOwner } : {}),
+  }, 'ready'));
+  touch(id, field === 'translatedContent' && draftOwner === undefined);
   return true;
 }
 
@@ -397,16 +558,27 @@ export function applyAiProduct(
     （保护流式产物不被旧行对齐清除），cleared 期间生成视为再次生成的开始
     （回 ready，完成时 applyAiProduct 再 bump）；无记录 → 返回 false，
     调用方回退写视图行。 */
-export function appendAiDelta(id: string, field: 'aiSummary' | 'translatedContent', delta: string): boolean {
+export function appendAiDelta(id: string, field: 'aiSummary' | 'translatedContent', delta: string, draftOwner?: symbol): boolean {
   const current = bodyById.get(id);
   if (!current) return false;
   bodyById.set(id, {
     ...current,
     [field]: (current[field] || '') + delta,
+    ...(field === 'translatedContent' ? { translationDraftOwner: draftOwner } : {}),
     state: current.state === 'cleared' ? 'ready' : current.state,
     aiWrittenAt: Date.now(),
   });
-  touch();
+  touch(id);
+  return true;
+}
+
+/** 失效请求只能丢弃自己的未消毒草稿。保留正文state/水合stamp，不能让旧流清理
+ * 把cleared误变ready或废掉已开始的新正文水合。安全回读/水合已替换的产物不动。 */
+export function discardTranslationDraft(id: string, owner: symbol): boolean {
+  const current = bodyById.get(id);
+  if (!current || current.translationDraftOwner !== owner) return false;
+  bodyById.set(id, { ...current, translatedContent: '', translatedSig: null, translationDraftOwner: undefined });
+  touch(id, true);
   return true;
 }
 
@@ -437,12 +609,13 @@ export function reconcileBodyEntities(
     if (isGenerating(id)) continue;
     const fact = facts.get(id);
     if (!fact) continue;
-    /* P4（探针 P4 修复本体）：行 snippet 变化 = 文章被重新同步 → 正文可能陈旧
-       → 删记录回未请求态（懒水合自动重取）。见模块头注「显式失效规则 1」。 */
+    /* snippet 与内容身份同时变化也必须保留失效记录，旧响应资格不能因删档复活。 */
     const prevSnippet = prevSnippets.get(id);
     if (prevSnippet !== undefined && prevSnippet !== fact.snippet) {
-      bodyById.delete(id);
-      touch();
+      if (rec.state !== 'cleared' || rec.content !== '') {
+        bodyById.set(id, { ...rec, state: 'cleared', content: '', rawContent: '', fulltextExtracted: false, contentRevision: nextRevision(rec.contentRevision) });
+        touch(id);
+      }
       continue;
     }
     const hadAi = rec.aiSummary !== '' || rec.translatedContent !== '';
@@ -451,19 +624,26 @@ export function reconcileBodyEntities(
     if (rec.aiWrittenAt > rowsFetchedAt) continue; // 记录比行新（生成刚落库、行是旧查询）
     if (hadAi && !rowHasAi) {
       // DB 已删除 AI 产物（清理 AI 缓存）→ 显式失效：cleared + bump（不再被 reload 复活）
-      bodyById.set(id, withExplicitAiWrite({ ...rec, aiSummary: '', translatedContent: '', aiSummarySig: null, translatedSig: null }, 'cleared'));
-      touch();
+      bodyById.set(id, withExplicitAiWrite({ ...rec, aiSummary: '', translatedContent: '', aiSummarySig: null, translatedSig: null, translationDraftOwner: undefined }, 'cleared'));
+      touch(id, true);
     } else if (rec.state === 'ready' && (rec.aiSummary !== fact.aiSummary || rec.translatedContent !== fact.translatedContent)) {
       // 行带来不同的 DB 真值（他端再生/本端未见过）→ 对齐为行真值（不解除 cleared）；
       // OPT-013 B1：签名随行真值一起对齐（产物与签名成对，不出现新产物配旧签名）
-      bodyById.set(id, { ...rec, aiSummary: fact.aiSummary, translatedContent: fact.translatedContent, aiSummarySig: fact.aiSummarySig, translatedSig: fact.translatedSig, aiWrittenAt: rowsFetchedAt });
-      touch();
+      bodyById.set(id, { ...rec, aiSummary: fact.aiSummary, translatedContent: fact.translatedContent, aiSummarySig: fact.aiSummarySig, translatedSig: fact.translatedSig,
+        translationDraftOwner: rec.translatedContent === fact.translatedContent && rec.translatedSig === fact.translatedSig ? rec.translationDraftOwner : undefined,
+        aiWrittenAt: rowsFetchedAt });
+      touch(id, rec.translatedContent !== fact.translatedContent || rec.translatedSig !== fact.translatedSig);
     }
   }
 }
 
 /** 测试专用：清空全部记录（frontend-regression 的夹具复位；生产代码不得调用） */
 export function resetBodyCacheForTests(): void {
+  clearLibraryBodyCache();
+}
+
+/** 恢复后清掉旧库正文；保留单调 revision sequence，旧 hydration stamp 永不复用。 */
+export function clearLibraryBodyCache(): void {
   bodyById.clear();
   touch();
 }

@@ -1,53 +1,80 @@
 # FluxReader
 
-本地优先的 Windows 桌面 RSS 客户端，使用 Tauri 2、Rust、React、TypeScript、Zustand 与 SQLite。核心能力：文章 / 社交 / 画廊 / 播客 / 通知五种内容布局，面向 FreshRSS / Miniflux 的 Google Reader / Fever 协议同步，AI 摘要与翻译，全文提取，OPML 导入导出，播客播放与桌面集成。
+FluxReader 是一款本地优先的 Windows 桌面 RSS 客户端：全部数据存于本机 SQLite，直连抓取订阅源，支持与 FreshRSS / Miniflux 双向同步。基于 Tauri 2 构建，后端为 Rust，前端为 React + TypeScript。
 
-## 从这里开始
+## 功能特性
 
-- [执行规则](AGENTS.md)：分支流向、提交信息、文档约定与门禁。
-- [文档索引](docs/README.md)：`.agents/notes/`（决定与取舍）与 `docs/`（协议矩阵、性能基线、发布流程）的分工。
-- [未做事项与已知限制](docs/roadmap.md)。
-- 安装包：GitHub [Releases](https://github.com/Dchean/fluxreader/releases) 提供 Windows x64 `setup.exe` 与 `.msi`。
+- **内容浏览**：文章、社交、画廊、播客、通知五种布局，均支持 J/K 导航，配合全文搜索与个性化设置。
+- **双协议同步**：对接 FreshRSS / Miniflux，同时支持 Google Reader 与 Fever 两种协议；读状态与收藏在客户端与服务端之间保持同步，各方向的冲突政策见[同步兼容矩阵](docs/sync-compat-matrix.md)。
+- **AI 摘要与翻译**：接入自有 AI 服务，对文章生成摘要、进行翻译。
+- **全文提取与 OPML**：对订阅源条目抓取全文，支持 OPML 订阅列表导入导出。
+- **播客播放**：内置音视频播放器，直接收听订阅的播客节目。
+- **桌面集成**：系统托盘、SMTC 媒体键控制、系统通知、开机自启与窗口状态记忆。
+- **本地资料库同步**：纯本地模式通过 WebDAV 持续同步订阅源、分类、客户端设置、读藏状态及未读/收藏正文；与 RSS 同步服务互斥。AI 配置（含模型名）、AI 产物以及 API Key、密码等凭据保留在本机，不参与同步。
 
-## 功能范围
+尚未关闭的问题、已接受的兼容边界与桌面集成的验证范围，见[当前缺口与已知限制](docs/roadmap.md)；开发分支的修复与验收状态由该页链接的验收入口维护。
 
-核心必须保留：文章、社交、画廊、播客、通知五布局；面向 FreshRSS / Miniflux 的 Google Reader / Fever 同步；AI 摘要和翻译。
+提取全文后，只有当前正文缓存确实保留了不同的 RSS 原文时，才显示“RSS 原文”回切入口；缓存淘汰或重启后不保证仍能回切，应用不持久保存两份正文。
 
-用户已确认保留：直连抓取、全文提取、OPML、音视频播放、桌面集成、搜索与快捷操作、图片与富媒体、个性化和缓存/去重能力。Gist/WebDAV 配置同步的范围收敛为订阅源与客户端设置数据；白名单内允许同步服务地址等非敏感连接配置，AI 配置（含模型名）不在白名单、不同步，API Key、密码等敏感凭据一律不同步。
+## 安装
 
-协议客户端存在不等于所有服务端、版本和操作均已通过验证——哪些能力被实测覆盖、哪些只是协议支持，见[兼容矩阵](docs/sync-compat-matrix.md)。
+前往 GitHub [Releases](https://github.com/Dchean/fluxreader/releases) 下载 Windows x64 安装包：`setup.exe` 或 `.msi`。
 
-## 代码与文档
+注意：安装包尚未进行 Windows 代码签名，首次运行时系统可能弹出未知发布者的提示。
+
+## 快速开始
+
+1. 安装并启动 FluxReader。
+2. 在设置中添加同步账号：填入 FreshRSS 或 Miniflux 的服务地址与凭据（也可以先离线使用，手动添加本地订阅源）。
+3. 执行一次同步，将远端订阅与文章拉取到本地。
+4. 切换五种布局浏览内容；有远端条目身份的标读、收藏操作会随同步写回，读回确认后才清除待推送意图。Google Reader 支持订阅与分类写回；Fever 下新增、编辑和删除订阅及分类只作用于本地。
+
+新增订阅的「同步到账户」开关仅在已连接 Google Reader 时显示，默认关闭，只控制本次新增。侧栏显示同步账户与状态灯，具体等待、失败和过期未确认项可在同步设置查看。跟随服务端（hybrid）模式的刷新只抓本地订阅源；本机抓取（direct）模式刷新全部来源。
+
+FreshRSS 根地址无法登录时，可按服务器实际部署填写 Google Reader 的 `/api/greader.php` 或 Fever 的 `/api/fever.php` 地址；位于子目录的安装需保留其路径。已验证版本与路径边界见[实测矩阵](docs/sync-compat-matrix.md#live-deployments)。
+
+## 开发
+
+开发统一使用 Node 22（主版本记录在仓库根目录 [.node-version](.node-version)）：
+
+```bash
+npm ci
+npm run tauri dev
+```
+
+前端门禁（本地与 CI 均执行）：
+
+```bash
+npm run lint             # oxlint 静态检查
+npm run build            # tsc -b + vite build，类型检查与构建
+npm run test:frontend    # Node 中的前端状态回归
+npm run test:components  # 组件真实挂载回归
+npm run test:ui-layout   # Windows Edge headless 的布局、键盘与异步图片回归
+```
+
+Rust 侧命令在 `src-tauri/` 下执行，本地须运行 `cargo fmt --all -- --check`。2026-11-03 起，当前工作区的 `tmp/rust-env/` 隔离 Rust/MSVC 环境已可运行 `cargo test`、`cargo check --all-targets` 与 `cargo clippy --all-targets -- -D warnings`；这是本工作区的能力，不代表所有开发机器。CI 的 windows-latest rust job 仍承担最终跨环境门禁，完整分工见 [AGENTS.md](AGENTS.md)。
+
+发布流程与版本约定见 [docs/release.md](docs/release.md)。
+
+源码结构：
 
 | 路径 | 职责 |
 | --- | --- |
 | `src/` | React 组件、Zustand 状态、IPC 封装与样式 |
 | `src-tauri/src/` | Tauri 入口、Rust 业务、协议客户端与 SQLite 数据访问 |
-| `src-tauri/tests/` | Rust 集成、迁移、回归及服务测试 |
-| `tools/` | 前端状态回归（`npm run test:frontend`）与 mock 服务工具 |
-| `.agents/notes/` | 决定记录：为什么这样改、放弃了哪些方案 |
-| `docs/` | 需要跟代码同步维护的事实：兼容矩阵、性能基线、发布流程、待办 |
-| `.github/workflows/` | CI 与发布配置 |
+| `src-tauri/tests/` | Rust 集成、迁移、回归及服务端协议测试 |
+| `tools/` | 前端状态回归与组件挂载回归的运行器 |
 
-## 开发与检查入口
+## 项目文档
 
-```text
-npm ci
-npm run tauri dev
-npm run build            # tsc -b + vite build
-npm run lint             # oxlint
-npm run test:frontend    # Node 中的前端状态回归，不是桌面 UI E2E
-npm run tauri build
-```
-
-Rust 侧（以下命令均在 `src-tauri/` 下执行）：本机（2026-10-31 实测）**不可链接**，本地只跑 `cargo fmt --all -- --check`；`cargo clippy` / `cargo test` / `cargo check` 由 CI 的 windows-latest rust job 承担。`#[ignore]` 的 live 测试需要真实同步后端，不作为统一门禁。
-
-开发与验收统一使用 Node 22（主版本记录在仓库根目录 `.node-version`，CI 的 setup-node 经 `node-version-file` 读取；该文件只被工具读取，不会替换本机系统 Node）。发布需要单独确认，流程见 [docs/release.md](docs/release.md)。
-
-## 已知限制
-
-摘要见 [docs/roadmap.md](docs/roadmap.md)：用户可见缺口（滚动标读前置条件未声明、镜像删除的远端订阅残留、封面候选无质量启发式、深色对比度其余调色盘待收敛）、以及一条**已评估并明确不修**的边界（流式 delta 不经 sanitizer）。
+| 文档 | 内容 |
+| --- | --- |
+| [docs/sync-compat-matrix.md](docs/sync-compat-matrix.md) | Google Reader / Fever 协议与 FreshRSS、Miniflux 的兼容矩阵，及冲突政策与已知实现差异 |
+| [docs/backup.md](docs/backup.md) | 便携备份与换机、WebDAV边界及本机数据库故障恢复 |
+| [docs/roadmap.md](docs/roadmap.md) | 当前缺口与已知限制 |
+| [docs/release.md](docs/release.md) | 发布序列、tag 附注结构与提交信息约定 |
+| [.agents/notes/](.agents/notes/) | 各项设计决定的记录：为什么这样做、当时放弃了哪些方案 |
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。基于 [Papr](https://github.com/l0ng-ai/papr)（MIT）二次开发，保留其版权声明。
+本项目以 [MIT](LICENSE) 协议发布。基于 [Papr](https://github.com/l0ng-ai/papr)（MIT 协议）二次开发，保留其版权声明。

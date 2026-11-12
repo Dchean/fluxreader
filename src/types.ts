@@ -10,6 +10,8 @@ export type ContentLayoutType = 'article' | 'social' | 'image' | 'podcast' | 'no
 export type ViewFilterType = 'all' | 'today' | 'unread' | 'starred';
 export type PaletteTheme = 'blue' | 'zinc' | 'purple' | 'emerald' | 'terracotta';
 export type ThemeMode = 'dark' | 'light' | 'auto';
+/** published_at 的来源：源日期 | 未来源日期被钳制 | 首次见到时间兜底 | 旧库无法判定。 */
+export type PublishedAtSource = 'feed' | 'feed_clamped' | 'inferred_fetch' | 'legacy_unknown';
 
 /* ---- 设置项的运行时取值清单（D4/D5） ----
    同一份声明既供设置页下拉渲染，又供 store 的写/读校验使用：两份清单
@@ -33,22 +35,17 @@ export const DEFAULT_OPEN_MODES: ('rss' | 'fulltext')[] = ['rss', 'fulltext'];
 /** 同步模式白名单（与 SyncTab 的选项一致） */
 export const SYNC_MODES: ('direct' | 'hybrid')[] = ['direct', 'hybrid'];
 
-/* ---- OPT-011（F13）：源级 AI 开关三态 ----
-   - 'inherit'：跟随所属分类的布尔默认（分类默认 false）；
-   - 'on' / 'off'：源的显式选择；显式关闭必须能压过分类开启（不以 OR 合并）。
-   旧 bool 字段（autoSummary/autoTranslate）保留为旧格式兼容输入（缺 mode 的
-   旧 mock / schema1 配置按 bool 映射），不再是有效配置真值——运行时有效值由
-   store/selectors.ts 的 selectFeedConfig（唯一 resolver）按 mode + 分类 bool
-   解析，任何组件不得再直读源上的旧 bool。 */
+/* ---- AI继承：布局默认 → 组三态 → 源三态，最后按实际布局限制能力。
+   不兼容旧bool输入；缺失/非法mode回inherit，布局默认关闭。有效值唯一由
+   store/aiPolicy.ts与selectFeedConfig解析，组件不能自行OR合并。 */
 export type FeedAiMode = 'inherit' | 'on' | 'off';
 export const FEED_AI_MODES: FeedAiMode[] = ['inherit', 'on', 'off'];
 
-/** 旧输入归一（单点）：合法 mode 原样；缺失/非法时按旧 bool 映射显式 on/off
-    （旧 mock、schema1 配置、旧后端行都走这里；绝不悄悄回 'inherit'）。 */
-export function normalizeFeedAiMode(raw: unknown, legacyBool: boolean): FeedAiMode {
+/** 仅三态为真值；缺省继承布局/组，不读取旧bool列。 */
+export function normalizeFeedAiMode(raw: unknown): FeedAiMode {
   return raw === 'inherit' || raw === 'on' || raw === 'off'
     ? raw
-    : (legacyBool ? 'on' : 'off');
+    : 'inherit';
 }
 
 /** 唯一 resolver 的纯函数核心：mode + 分类布尔默认 → 运行有效开关。 */
@@ -58,11 +55,14 @@ export function resolveFeedAiMode(mode: FeedAiMode, categoryDefault: boolean): b
 
 export interface FeedItem {
   id: string;
+  syncId?: string;
+  subscriptionState?: 'active' | 'retained';
+  effectiveLayout?: ContentLayoutType;
   name: string;
   url: string;
   favicon?: string;
   layout: 'inherit' | ContentLayoutType;
-  /** 旧兼容位（不再是有效真值）：仅作为缺 mode 时的映射输入；消费者走 resolver */
+  /** 后端旧列的临时DTO镜像，不参与AI策略；待后端schema退役时一并删除 */
   autoSummary: boolean;
   autoTranslate: boolean;
   /** OPT-011：三态真值（'inherit' | 'on' | 'off'） */
@@ -80,6 +80,8 @@ export interface CategoryGroup {
   layout: ContentLayoutType;
   autoSummary: boolean;
   autoTranslate: boolean;
+  summaryMode?: FeedAiMode;
+  translateMode?: FeedAiMode;
   feeds: FeedItem[];
 }
 
@@ -90,8 +92,18 @@ export interface ArticleEntry {
   title: string;
   /** 条目发布时间（unix 毫秒）。排序/今天/相对时间全部由此派生。 */
   publishedAt: number;
+  /** 永久首次见到时间（unix 毫秒）。旧库行由迁移从 fetched_at 回填。 */
+  firstSeenAt?: number;
+  /** 发布时间来源；feed_clamped 表示实际值是钳制抓取时刻，inferred_fetch 表示首次见到兜底。 */
+  publishedAtSource?: PublishedAtSource;
   isRead: boolean;
   isStarred: boolean;
+  retained?: boolean;
+  bodyMissing?: boolean;
+  /** 会话成员已被明确删除时保留列表位置，直到用户重新筛选。 */
+  unavailable?: boolean;
+  imageCount?: number;
+  mediaRevision?: number;
   /** RSS item 的 categories 标签（本就是数组） */
   tags: string[];
   /** 条目获取来源：direct=客户端直连源站抓取 | miniflux=经同步后端拉取（历史命名；协议已中立化，与源的 origin 无关） */
@@ -109,6 +121,8 @@ export interface ArticleEntry {
   content?: string;           // 渲染态正文 HTML（仅 mock；真值源 bodyById）
   rawContent?: string;        // RSS 原始正文（仅 mock；真值源 bodyById）
   translatedContent: string;  // 译文（过渡兼容位：行携带的 DB 真值 + 无记录时的 AI 流式回退；真值源 bodyById）
+  /** 仅内存：未水合条目的未消毒草稿所有者。后端行不携带；安全产物替换即解除。 */
+  translationDraftOwner?: symbol;
   aiSummary: string;          // 摘要（过渡兼容位：同上）
   /** 正文已被 Readability 全文覆盖（手动按钮/设置自动模式共用状态源，DB 持久化；mock 数据可缺省） */
   fulltextExtracted?: boolean;
@@ -132,6 +146,8 @@ export interface ArticleEntry {
   enclosureUrl?: string;  // 附件/大图 enclosure
   /** 条目原文网页地址（「源网页」「查看原文」外链打开用） */
   url?: string;
+  /** 本次轻属性是否提供url；区分缺省未知与明确null，供短期全文目标撤销。 */
+  urlKnown?: boolean;
 }
 
 export type TabName =

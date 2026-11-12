@@ -1,151 +1,293 @@
-// Note: 白名单式防盗链必须走后端代理；域名白名单只在本文件维护 — 见 .agents/notes/implemented/feature/2026-10-07-封面代理与失败占位.md
-// 正文图片代理（防盗链兼容）——参考 Papr 方案。
-// webview 的 Referer 无法按域名变化：黑名单式防盗链（sinaimg.cn 拒外来 Referer）
-// 与白名单式（少数派 cdnfile.sspai.com 要求 sspai.com Referer）无法用单一
-// referrerpolicy 同时满足。故对已知白名单式防盗链域名，走后端 fetch_image
-// （Referer 候选链）拿 bytes 转 data: URL 替换 src。
-import { api } from './api';
+// Note: 图片编码bytes预算与使用中URL租约 — 见 .agents/notes/implemented/feature/2026-10-07-封面代理与失败占位.md
+import { api, extractErrorCode } from './api';
 
-/** 需要走后端代理的图床域名（白名单式防盗链：要求特定 Referer）。
-    少数派 cdnfile/rssfile 是典型；后续遇到同类站点在此追加。 */
 const PROXY_HOSTS = new Set(['cdnfile.sspai.com', 'rssfile.sspai.com']);
 const PROXY_HOST_SUFFIXES = ['.doubanio.com'];
-
-/** 判断某图片 URL 是否需要后端代理。 */
 export function needsImageProxy(src: string): boolean {
+  try { const host = new URL(src).hostname.toLowerCase(); return PROXY_HOSTS.has(host) || PROXY_HOST_SUFFIXES.some(s => host === s.slice(1) || host.endsWith(s)); }
+  catch { return false; }
+}
+export function canProxyImages(): boolean { return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window; }
+const MiB = 1024 * 1024;
+export const IMAGE_LIMITS = Object.freeze({ active: 4, pending: 32, payload: 128 * MiB, image: 25 * MiB,
+  idleBytes: 64 * MiB, idleEntries: 256, leases: 256, failures: 1024, transientTtl: 30_000, permanentTtl: 600_000 });
+export type ImageFailure = 'network' | 'permanent' | 'not-image' | 'empty' | 'decode' | 'too-large' | 'unavailable';
+export type ImageSnapshot =
+  | { status: 'queued' | 'loading' | 'deferred' }
+  | { status: 'ready'; src: string; direct: boolean }
+  | { status: 'failed'; reason: ImageFailure };
+const DEFERRED: ImageSnapshot = { status: 'deferred' };
+const QUEUED: ImageSnapshot = { status: 'queued' };
+const LOADING: ImageSnapshot = { status: 'loading' };
+export interface ImageLease {
+  readonly admitted: boolean;
+  readonly key: string;
+  readonly epoch: number;
+  readonly url: string;
+  readonly pageUrl?: string;
+  snapshot(): ImageSnapshot;
+  subscribe(listener: () => void): () => void;
+  release(): void;
+  failDecode(): void;
+}
+interface Entry {
+  key: string; epoch: number; url: string; pageUrl?: string; priority: number;
+  refs: number; listeners: Set<() => void>; value: ImageSnapshot; touched: number;
+  bytes: number; blob?: string; requestId?: string; reserved: boolean; cancelled: boolean;
+  started: boolean; cancelSent: boolean; failureUntil: number; retryAt: number;
+}
+const entries = new Map<string, Entry>();
+// Retired entries are still owned by leases/IPC until DOM cleanup and completion.
+const owned = new Set<Entry>();
+let epoch = 0;
+let suspended = false;
+let leaseCount = 0;
+let serial = 0;
+let pumping = false;
+let capacityListener: (() => void) | undefined;
+let capacityNoticeQueued = false;
+export function bindImageCapacityListener(listener: () => void): void { capacityListener = listener; }
+function capacityAvailable(): void {
+  if (capacityNoticeQueued) return;
+  capacityNoticeQueued = true;
+  queueMicrotask(() => { capacityNoticeQueued = false; if (!suspended && leaseCount < IMAGE_LIMITS.leases) capacityListener?.(); });
+}
+let timer: ReturnType<typeof setTimeout> | undefined;
+const requestPrefix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+export function imageEpoch(): number { return epoch; }
+export function imagesSuspended(): boolean { return suspended; }
+
+export function imagePageReferer(url: string, pageUrl?: string): string | undefined {
+  if (!pageUrl || !/^https?:\/\//.test(pageUrl)) return undefined;
+  try { new URL(pageUrl); if (pageUrl === `${new URL(url).origin}/`) return undefined; return pageUrl; }
+  catch { return undefined; }
+}
+export function imageResourceKey(url: string, pageUrl?: string): string {
+  return JSON.stringify([epoch, url, needsImageProxy(url) && canProxyImages() ? imagePageReferer(url, pageUrl) ?? null : null]);
+}
+function publish(entry: Entry, value: ImageSnapshot): void {
+  entry.value = value;
+  for (const listener of [...entry.listeners]) listener();
+}
+function forget(entry: Entry): void {
+  if (entry.refs || entry.reserved) return;
+  if (entry.blob) { URL.revokeObjectURL(entry.blob); entry.blob = undefined; entry.bytes = 0; }
+  if (entries.get(entry.key) === entry) entries.delete(entry.key);
+  owned.delete(entry);
+}
+function trim(): void {
+  const now = Date.now();
+  const idle = [...owned].filter(e => !e.refs && !e.reserved).sort((a, b) => a.touched - b.touched);
+  let idleBytes = idle.reduce((n, e) => n + e.bytes, 0);
+  let idleReady = idle.filter(e => !!e.blob).length;
+  let failures = [...owned].filter(e => e.value.status === 'failed').length;
+  for (const entry of idle) {
+    if (entry.epoch !== epoch || entries.get(entry.key) !== entry || entry.cancelled
+      || (entry.value.status === 'failed' && (entry.failureUntil <= now || failures > IMAGE_LIMITS.failures))
+      || (entry.blob && (idleBytes > IMAGE_LIMITS.idleBytes || idleReady > IMAGE_LIMITS.idleEntries))
+      || (!entry.blob && entry.value.status !== 'failed')) {
+      if (entry.blob) { idleBytes -= entry.bytes; --idleReady; }
+      if (entry.value.status === 'failed') --failures;
+      forget(entry);
+    }
+  }
+}
+function usedBytes(): number { let n = 0; for (const e of owned) n += e.bytes + (e.reserved ? IMAGE_LIMITS.image : 0); return n; }
+function reserve(): boolean {
+  if (usedBytes() + IMAGE_LIMITS.image <= IMAGE_LIMITS.payload) return true;
+  for (const entry of [...owned].filter(e => e.refs === 0 && !e.reserved && e.blob).sort((a, b) => a.touched - b.touched)) {
+    forget(entry);
+    if (usedBytes() + IMAGE_LIMITS.image <= IMAGE_LIMITS.payload) return true;
+  }
+  return false;
+}
+function cancel(entry: Entry): void {
+  entry.cancelled = true;
+  if (entry.started && entry.requestId && !entry.cancelSent) {
+    entry.cancelSent = true;
+    void api.cancelImage(entry.requestId).catch(error => console.warn('[image] cancel failed', error));
+  }
+}
+function wakeLater(at: number): void {
+  if (timer !== undefined) return;
+  timer = setTimeout(() => { timer = undefined; pump(); }, Math.max(1, Math.min(1000, at - Date.now())));
+}
+function fail(entry: Entry, reason: ImageFailure): void {
+  entry.failureUntil = Date.now() + (reason === 'permanent' ? IMAGE_LIMITS.permanentTtl : IMAGE_LIMITS.transientTtl);
+  entry.value = { status: 'failed', reason };
+  trim();
+  publish(entry, entry.value);
+}
+function pump(): void {
+  if (pumping || suspended) return;
+  pumping = true;
   try {
-    const host = new URL(src).hostname.toLowerCase();
-    if (PROXY_HOSTS.has(host)) return true;
-    return PROXY_HOST_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix));
-  } catch {
-    return false;
-  }
-}
-
-/** 当前环境能否走后端代理（浏览器 mock 无 IPC 时不能）。与 proxyImageUrl/proxyImagesInHtml
-    的入口判断同口径：无 IPC 时调用方应直连原图。 */
-export function canProxyImages(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
-
-/** 图片字节 → data: URL。Tauri IPC 的 Vec<u8> 在 JS 端是 number[]，需先转 Uint8Array；
-    MIME 用字节嗅探（少数派等 CDN URL 带 imageView2 等查询参数，扩展名判断失效）。 */
-function imageDataUrl(src: string, bytes: Uint8Array | number[]): string {
-  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  let mime = sniffImageMime(arr) ?? 'image/jpeg';
-  const path = src.split(/[?#]/)[0]?.toLowerCase() ?? '';
-  if (!sniffImageMime(arr) && path.endsWith('.png')) mime = 'image/png';
-  // 二进制 → base64（分块避免大图撑爆调用栈）
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < arr.length; i += chunk) {
-    binary += String.fromCharCode(...arr.subarray(i, i + chunk));
-  }
-  return `data:${mime};base64,${btoa(binary)}`;
-}
-
-/** 字节签名嗅探 MIME（PNG/JPEG/GIF/WebP），未知返回 null。 */
-function sniffImageMime(b: Uint8Array): string | null {
-  if (b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
-  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
-  if (b.length >= 3 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
-  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
-  return null;
-}
-
-/** 把 HTML 里需要代理的 <img> 替换为 data: URL（后端抓取的字节）。
-    失败（后端也拿不到）则隐藏该图。返回替换后的 HTML；无需要代理的图则原样返回。
-    浏览器 mock 环境（无 IPC）返回 null，调用方跳过代理。 */
-export async function proxyImagesInHtml(
-  html: string,
-  pageUrl?: string,
-): Promise<string | null> {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
-  if (!html || !html.toLowerCase().includes('<img')) return html;
-
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  const imgs = Array.from(doc.body.querySelectorAll('img')).filter((img) => {
-    const src = img.getAttribute('src') || '';
-    return /^https?:\/\//.test(src) && needsImageProxy(src);
-  });
-  if (imgs.length === 0) return html;
-
-  await Promise.all(
-    imgs.map(async (img) => {
-      const src = img.getAttribute('src') || '';
-      try {
-        const bytes = await api.fetchImage(src, pageUrl);
-        if (!bytes || bytes.length === 0) {
-          img.style.display = 'none';
-          return;
-        }
-        img.setAttribute('src', imageDataUrl(src, bytes));
-        img.removeAttribute('srcset');
-        img.removeAttribute('referrerpolicy');
-      } catch {
-        img.style.display = 'none';
+    trim();
+    let active = [...owned].filter(e => e.reserved).length;
+    let queued = [...owned].filter(e => !e.cancelled && e.value.status === 'queued').length;
+    const candidates = [...owned].filter(e => e.refs && !e.cancelled && e.epoch === epoch && !e.reserved
+      && (e.value.status === 'deferred' || e.value.status === 'queued'))
+      .sort((a, b) => a.priority - b.priority || a.touched - b.touched);
+    for (const entry of candidates) {
+      if (entry.retryAt > Date.now()) { wakeLater(entry.retryAt); continue; }
+      if (active < IMAGE_LIMITS.active && reserve()) {
+        if (entry.value.status === 'queued') --queued;
+        ++active;
+        start(entry);
+      } else if (entry.value.status === 'deferred' && queued < IMAGE_LIMITS.pending) {
+        ++queued; publish(entry, QUEUED);
       }
-    }),
-  );
-  return doc.body.innerHTML;
+    }
+  } finally { pumping = false; }
 }
-
-
-/** 代理单张图片 URL（画廊封面/播客封面等非 HTML 场景）。
-    需要代理的域名走后端 fetch_image 拿字节转 data: URL；不需要则原样返回。
-    失败返回 null（调用方回退到原始 src 或隐藏）。 */
-export async function proxyImageUrl(
-  src: string,
-  pageUrl?: string,
-): Promise<string | null> {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
-  if (!src || !/^https?:\/\//.test(src)) return null;
-  if (!needsImageProxy(src)) return null;
-  try {
-    const bytes = await api.fetchImage(src, pageUrl);
-    if (!bytes || bytes.length === 0) return null;
-    return imageDataUrl(src, bytes);
-  } catch {
-    return null;
+function start(entry: Entry): void {
+  entry.started = false; entry.cancelSent = false;
+  entry.reserved = true;
+  entry.requestId = `${requestPrefix}:${++serial}`;
+  publish(entry, LOADING);
+  void api.fetchImage(entry.url, entry.pageUrl, entry.requestId, () => {
+    entry.started = true;
+    if (entry.cancelled) cancel(entry);
+  }, () => !entry.cancelled && !suspended && entry.epoch === epoch).then(bytes => {
+    if (entry.cancelled || suspended || entry.epoch !== epoch || !entry.refs) return;
+    if (!bytes) { fail(entry, 'unavailable'); return; }
+    if (!bytes.length) { fail(entry, 'empty'); return; }
+    const mime = sniffImageMime(bytes);
+    if (!mime) { fail(entry, 'not-image'); return; }
+    // reservation covers the encoded body until Blob creation completes; no base64/HTML copies.
+    const blob = new Blob([bytes], { type: mime });
+    entry.blob = URL.createObjectURL(blob);
+    entry.bytes = bytes.byteLength;
+    entry.reserved = false;
+    publish(entry, { status: 'ready', src: entry.blob, direct: false });
+  }).catch(error => {
+    if (entry.cancelled || suspended || entry.epoch !== epoch || !entry.refs) return;
+    const code = extractErrorCode(error);
+    if (code === 'imageBusy') { entry.retryAt = Date.now() + 100; publish(entry, DEFERRED); }
+    else if (code === 'imageCancelled') { entry.retryAt = Date.now() + 100; publish(entry, DEFERRED); }
+    else fail(entry, code === 'imageGone' ? 'permanent' : code === 'responseTooLarge' ? 'too-large' : 'network');
+  }).finally(() => {
+    entry.reserved = false;
+    entry.requestId = undefined;
+    if (entry.cancelled || entry.epoch !== epoch) forget(entry);
+    trim(); pump();
+  });
+}
+export function acquireImage(url: string, pageUrl?: string, priority = 1): ImageLease {
+  const key = imageResourceKey(url, pageUrl);
+  const declined = (): ImageLease => ({
+    admitted: false, key, epoch, url, pageUrl, snapshot: () => DEFERRED, subscribe: () => () => {}, release() {}, failDecode() {},
+  });
+  if (suspended) return declined();
+  // Direct images own only local consumer state: no shared entry, quota or failure cache.
+  if (!canProxyImages() || !needsImageProxy(url) || !/^https?:\/\//.test(url)) {
+    const directEpoch = epoch;
+    let value: ImageSnapshot = { status: 'ready', src: url, direct: true };
+    let released = false;
+    const listeners = new Set<() => void>();
+    return {
+      admitted: true, key, epoch: directEpoch, url, pageUrl,
+      snapshot: () => value,
+      subscribe(listener) { if (released) return () => {}; listeners.add(listener); return () => { listeners.delete(listener); }; },
+      release() { released = true; listeners.clear(); },
+      failDecode() { if (!released && directEpoch === epoch && !suspended) {
+        value = { status: 'failed', reason: 'decode' };
+        for (const listener of listeners) listener();
+      } },
+    };
+  }
+  trim();
+  if (leaseCount >= IMAGE_LIMITS.leases) return declined();
+  let entry = entries.get(key);
+  if (entry && (entry.cancelled || (entry.value.status === 'failed' && entry.failureUntil <= Date.now()))) {
+    entries.delete(key); forget(entry); entry = undefined;
+  }
+  if (!entry) {
+    entry = { key, epoch, url, pageUrl: imagePageReferer(url, pageUrl), priority, refs: 0, listeners: new Set(),
+      value: DEFERRED, touched: Date.now(), bytes: 0,
+      reserved: false, cancelled: false, started: false, cancelSent: false, failureUntil: 0, retryAt: 0 };
+    entries.set(key, entry); owned.add(entry);
+  }
+  const ownedEntry = entry;
+  ownedEntry.refs++; leaseCount++; ownedEntry.priority = Math.min(priority, ownedEntry.priority); ownedEntry.touched = Date.now();
+  let released = false;
+  let localFailure: ImageSnapshot | null = null;
+  const subscriptions = new Set<() => void>();
+  const lease: ImageLease = {
+    admitted: true, key, epoch, url, pageUrl: ownedEntry.pageUrl,
+    snapshot: () => localFailure ?? ownedEntry.value,
+    subscribe(listener) { if (released) return () => {}; subscriptions.add(listener); ownedEntry.listeners.add(listener);
+      return () => { subscriptions.delete(listener); ownedEntry.listeners.delete(listener); }; },
+    release() {
+      if (released) return;
+      released = true;
+      for (const listener of subscriptions) ownedEntry.listeners.delete(listener);
+      const wasFull = leaseCount === IMAGE_LIMITS.leases;
+      subscriptions.clear(); ownedEntry.refs--; leaseCount--; ownedEntry.touched = Date.now();
+      if (wasFull) capacityAvailable();
+      if (!ownedEntry.refs && ['loading', 'queued', 'deferred'].includes(ownedEntry.value.status)) cancel(ownedEntry);
+      trim(); pump();
+    },
+    // Mark locally; the DOM owner releases only after removing this Blob's src.
+    failDecode() { if (!released && ownedEntry.epoch === epoch && !suspended) {
+      localFailure = { status: 'failed', reason: 'decode' };
+      for (const listener of subscriptions) listener();
+    } },
+  };
+  pump();
+  return lease;
+}
+/** Explicit retry invalidates a failed key, never revokes another displayed lease. */
+export function retryImage(url: string, pageUrl?: string): void {
+  const entry = entries.get(imageResourceKey(url, pageUrl));
+  if (entry && (entry.value.status === 'failed' || entry.value.status === 'ready')) { entries.delete(entry.key); forget(entry); }
+  pump();
+}
+export function suspendImages(): void {
+  suspended = true;
+  if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+  for (const entry of owned) if (entry.reserved || entry.value.status === 'queued' || entry.value.status === 'deferred') {
+    cancel(entry); publish(entry, DEFERRED);
   }
 }
-
-/** 严格版单图代理结果（封面图片位用，TASK-092）。
-    与 proxyImageUrl 的区别：字节不是可识别的图片（例如图床把登录页 HTML 以 200 返回）
-    时判为失败，**不**注入 DOM；proxyImageUrl（画廊）保持原样不变。 */
-export type ProxiedImageResult =
-  | { ok: true; dataUrl: string }
-  | { ok: false; reason: 'unavailable' | 'empty' | 'not-image' | 'error' };
-
-/** 额外的图片签名（AVIF/HEIC 的 ftyp 盒、BMP、ICO、SVG 文本），仅用于严格判定；
-    PNG/JPEG/GIF/WebP 仍由 sniffImageMime 识别。 */
-function sniffExtraImageMime(b: Uint8Array): string | null {
-  if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
-    const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
-    if (brand === 'avif' || brand === 'avis') return 'image/avif';
-    if (brand === 'heic' || brand === 'heix' || brand === 'mif1') return 'image/heic';
+export function resumeImages(): void {
+  suspended = false;
+  // Consumers re-acquire at the restore busy boundary; cancelled leases never revive.
+  pump();
+}
+export function resetImagesForLibraryRestore(): void {
+  suspendImages(); ++epoch; entries.clear(); trim();
+}
+/** Counters describe encoded resources owned here, not JS/native/GPU heap. */
+export function imageResourceStats() {
+  const all = [...owned];
+  return { epoch, leases: leaseCount, active: all.filter(e => e.reserved).length,
+    pending: all.filter(e => !e.cancelled && e.value.status === 'queued').length,
+    payloadBytes: usedBytes(), blobBytes: all.reduce((n, e) => n + e.bytes, 0),
+    idleBytes: all.filter(e => !e.refs).reduce((n, e) => n + e.bytes, 0),
+    ready: all.filter(e => e.blob).length, failures: all.filter(e => e.value.status === 'failed').length };
+}
+export function resetImagesForTest(): void {
+  if (leaseCount) throw new Error('image leases still mounted');
+  resetImagesForLibraryRestore(); resumeImages();
+}
+function sniffImageMime(b: Uint8Array): string | null {
+  if (b.length >= 4 && b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71) return 'image/png';
+  if (b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255) return 'image/jpeg';
+  if (b.length >= 3 && b[0] === 71 && b[1] === 73 && b[2] === 70) return 'image/gif';
+  if (b.length >= 12 && String.fromCharCode(...b.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...b.subarray(8, 12)) === 'WEBP') return 'image/webp';
+  if (b.length >= 12 && String.fromCharCode(...b.subarray(4, 8)) === 'ftyp') {
+    const brand = String.fromCharCode(...b.subarray(8, 12));
+    if (['avif', 'avis'].includes(brand)) return 'image/avif';
+    if (['heic', 'heix', 'mif1'].includes(brand)) return 'image/heic';
   }
-  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp';
-  if (b.length >= 4 && b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01 && b[3] === 0x00) return 'image/x-icon';
+  if (b[0] === 66 && b[1] === 77) return 'image/bmp';
+  if (b.length >= 4 && b[0] === 0 && b[1] === 0 && b[2] === 1 && b[3] === 0) return 'image/x-icon';
   const head = new TextDecoder().decode(b.subarray(0, 512)).trimStart().toLowerCase();
-  if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'image/svg+xml';
-  return null;
+  return head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg')) ? 'image/svg+xml' : null;
 }
 
-/** 封面图片位的代理取图：需要代理的 URL 走后端 fetch_image，校验字节确为图片后转 data: URL。
-    调用方先用 needsImageProxy 判定是否需要代理（判定规则只在本文件一处）。 */
-export async function fetchProxiedImage(src: string, pageUrl?: string): Promise<ProxiedImageResult> {
-  if (!canProxyImages() || !/^https?:\/\//.test(src)) return { ok: false, reason: 'unavailable' };
-  try {
-    const bytes = await api.fetchImage(src, pageUrl);
-    if (!bytes || bytes.length === 0) return { ok: false, reason: 'empty' };
-    const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    if (sniffImageMime(arr)) return { ok: true, dataUrl: imageDataUrl(src, arr) };
-    const extra = sniffExtraImageMime(arr);
-    if (!extra) return { ok: false, reason: 'not-image' };
-    const jpegLike = imageDataUrl(src, arr);
-    return { ok: true, dataUrl: `data:${extra};base64,${jpegLike.slice(jpegLike.indexOf(',') + 1)}` };
-  } catch {
-    return { ok: false, reason: 'error' };
-  }
-}
+
+
+
+

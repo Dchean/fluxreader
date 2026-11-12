@@ -29,16 +29,9 @@ fn page_id_bounds(page: &[ItemContent]) -> Option<(i64, i64)> {
     Some((min, max))
 }
 
-fn item_feed_remote_id(e: &ItemContent) -> Option<i64> {
-    e.origin
-        .as_ref()
-        .and_then(|o| crate::greader::parse_feed_numeric_id(&o.stream_id))
-}
-
 fn unbound_page_feeds(page: &[ItemContent], maps: &db::SyncMatchMaps) -> BTreeSet<i64> {
     page.iter()
-        .filter_map(item_feed_remote_id)
-        .filter(|feed_id| !maps.feed_mf_to_id.contains_key(feed_id))
+        .filter_map(|entry| entry_unbound_feed(entry, maps))
         .collect()
 }
 
@@ -127,7 +120,7 @@ fn restore_fever_pull_state(
     previous_entry_id: i64,
     previous_history: db::FeverHistoryState,
 ) -> AppResult<()> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     db::set_last_sync_entry_id(&tx, previous_entry_id)?;
     let restored = match previous_history {
         db::FeverHistoryState::Unknown => db::reset_fever_history_state(&tx),
@@ -146,12 +139,21 @@ async fn restore_after_binding_failure(
     previous_history: db::FeverHistoryState,
     report: &mut SyncReport,
 ) -> AppResult<()> {
-    let mut conn = db.lock().await;
-    session.ensure_current(&conn)?;
-    if let Err(e) = restore_fever_pull_state(&mut conn, previous_entry_id, previous_history) {
-        report
-            .errors
-            .push(format!("条目绑定失败后原子恢复游标/历史失败: {e}"));
+    let generation = session.generation;
+    let restored = crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(restore_fever_pull_state(
+            conn,
+            previous_entry_id,
+            previous_history,
+        ))
+    })
+    .await?;
+    if let Err(e) = restored {
+        record_pull_apply_failure(e, report, |e| {
+            format!("条目绑定失败后原子恢复游标/历史失败: {e}")
+        })?;
     }
     Ok(())
 }
@@ -164,6 +166,31 @@ enum PageCursorWrite {
     Pending(i64),
     /// 顶部连续页：since 与 checkpoint 同一事务写入。
     Top { since: i64, pending: i64 },
+}
+
+/// Both page identities and their merge map belong exclusively to this pull.
+/// Only a completed worker may return them; a worker failure terminates the pull.
+#[allow(clippy::too_many_arguments)]
+async fn apply_fever_page(
+    db: &Arc<Mutex<Connection>>,
+    generation: i64,
+    page: Vec<ItemContent>,
+    seen: &mut HashSet<i64>,
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+    cursor_write: Option<PageCursorWrite>,
+) -> AppResult<AppResult<()>> {
+    let mut owned_seen = std::mem::take(seen);
+    let (returned_seen, result) =
+        pull_database_work(db, generation, maps, report, move |conn, maps, report| {
+            let _writer = db::writer_guard(conn)?;
+            SyncSession::ensure_generation(conn, generation)?;
+            let result = merge_page_tx(conn, page, &mut owned_seen, maps, report, cursor_write);
+            Ok((owned_seen, result))
+        })
+        .await??;
+    *seen = returned_seen;
+    Ok(result)
 }
 
 /// 逐页落库（**页事务**）：页内所有 DB 写 + 该页的游标（since/checkpoint）在
@@ -187,7 +214,7 @@ fn merge_page_tx(
         report.entries_data_changed,
     );
     let mut added: Vec<i64> = Vec::new();
-    let tx = conn.transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let mut failure: Option<AppError> = None;
     for it in page {
         let eid = item_numeric_id(&it);
@@ -198,6 +225,13 @@ fn merge_page_tx(
         }
         match merge_pulled_entry(&tx, &it, maps, report) {
             Ok(()) => {
+                if report.binding_incomplete {
+                    failure = Some(AppError::new(
+                        "bindingIncomplete",
+                        "条目来源基线失配，本页与游标保留供下一轮重试",
+                    ));
+                    break;
+                }
                 if let Some(id) = eid {
                     seen.insert(id);
                     added.push(id);
@@ -242,7 +276,7 @@ fn merge_page_tx(
             report.pulled_entries = stats.0;
             report.merged_states = stats.1;
             report.entries_data_changed = stats.2;
-            Err(AppError::from(e))
+            Err(e)
         }
     }
 }
@@ -296,23 +330,10 @@ pub(super) async fn pull_entries_fever(
     client: &fever::FeverClient,
     report: &mut SyncReport,
     full: bool,
+    versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
-    let binding_incomplete = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        let account = super::current_account(&conn)?.ok_or_else(|| {
-            AppError::new(
-                "notConnected",
-                "Fever pull 缺少当前同步账号身份，本轮不请求条目",
-            )
-        })?;
-        db::binding_incomplete(&conn, &account.key)?
-    };
-    if binding_incomplete {
-        report.errors.push(
-            "持久绑定不完整标记存在：先完成 feeds 阶段绑定，本轮不请求条目/不推进游标或 checkpoint"
-                .into(),
-        );
+    let generation = session.generation;
+    if !pull_admitted(db, session, report).await? {
         return Ok(());
     }
 
@@ -323,45 +344,27 @@ pub(super) async fn pull_entries_fever(
     // OPT-007 字段版本快照也必须在任何 HTTP 请求之前抓取。这里把它提前到
     // history Pending 初始化之前：零远端 feed 绑定时既不写历史状态，也不请求
     // 条目/权威集合。
+    let snapshot = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(db::sync_match_maps(conn))
+    })
+    .await?;
     let mut maps = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::sync_match_maps(&conn) {
+        match snapshot {
             Ok(m) => m,
             Err(e) => {
-                report.errors.push(format!(
-                    "同步匹配映射构建失败，本轮不拉取/不合并（Pending 与游标保留）: {e}"
-                ));
+                record_pull_apply_failure(e, report, |e| {
+                    format!("同步匹配映射构建失败，本轮不拉取/不合并（Pending 与游标保留）: {e}")
+                })?;
                 return Ok(());
             }
         }
     };
 
-    let unbound_remote = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::unbound_remote_feeds(&conn) {
-            Ok(v) => v,
-            Err(e) => {
-                report.errors.push(format!(
-                    "读取未绑定远端源失败，本轮不拉取条目（游标与历史状态保留）: {e}"
-                ));
-                return Ok(());
-            }
-        }
-    };
-    if !unbound_remote.is_empty() {
-        report.binding_incomplete = true;
-        report.errors.push(format!(
-            "存在 {} 个 origin='remote' 源仍缺 remote_id，本轮不拉取条目（游标与历史状态保留）: {}",
-            unbound_remote.len(),
-            unbound_remote
-                .iter()
-                .map(|(_, url)| url.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        return Ok(());
+    if let Some(versions) = versions {
+        maps.keep_field_versions_from(versions);
+        maps.pending_read_ids.extend(&versions.pending_read_ids);
+        maps.pending_star_ids.extend(&versions.pending_star_ids);
     }
 
     // Note: 零远端 feed 绑定不得初始化历史、请求集合或推进游标 — 见
@@ -373,18 +376,21 @@ pub(super) async fn pull_entries_fever(
 
     // 读取 since 与历史三态。状态损坏/读失败：显式报错并整轮不拉取、不动游标
     // （绝不能把损坏/未知当完成继续推进）。
-    let (previous_entry_id, since_id, history_state) = {
-        let conn = db.lock().await;
+    let history = crate::state::database_work(db.clone(), move |conn| {
         // OPT-006：读游标/历史状态即边界——旧会话不得基于已切换账号的进度拉取。
-        session.ensure_current(&conn)?;
-        let previous = db::last_sync_entry_id(&conn).unwrap_or(0);
+        SyncSession::ensure_generation(conn, generation)?;
+        let previous = db::last_sync_entry_id(conn)?;
         let since = if full { 0 } else { previous };
-        match db::fever_history_state(&conn) {
-            Ok(s) => (previous, since, s),
+        Ok(db::fever_history_state(conn).map(|state| (previous, since, state)))
+    })
+    .await?;
+    let (previous_entry_id, since_id, history_state) = {
+        match history {
+            Ok(snapshot) => snapshot,
             Err(e) => {
-                report.errors.push(format!(
-                    "Fever 历史状态不可读，本轮不拉取条目（游标保留）: {e}"
-                ));
+                record_pull_apply_failure(e, report, |e| {
+                    format!("Fever 历史状态不可读，本轮不拉取条目（游标保留）: {e}")
+                })?;
                 return Ok(());
             }
         }
@@ -407,13 +413,18 @@ pub(super) async fn pull_entries_fever(
 
     // R2-P1：先初始化 Pending 成功，之后才允许任何更大的 since 落库。
     if let Some((start, _)) = history_plan {
-        let conn = db.lock().await;
+        let generation = session.generation;
         // OPT-006：Pending 初始化是游标写边界——代际失配不得写。
-        session.ensure_current(&conn)?;
-        if let Err(e) = db::set_fever_history_pending(&conn, start) {
-            report.errors.push(format!(
-                "初始化 Fever 历史状态失败（未开始拉取，旧游标保留）: {e}"
-            ));
+        let pending = crate::state::database_work(db.clone(), move |conn| {
+            let _writer = db::writer_guard(conn)?;
+            SyncSession::ensure_generation(conn, generation)?;
+            Ok(db::set_fever_history_pending(conn, start))
+        })
+        .await?;
+        if let Err(e) = pending {
+            record_pull_apply_failure(e, report, |e| {
+                format!("初始化 Fever 历史状态失败（未开始拉取，旧游标保留）: {e}")
+            })?;
             return Ok(());
         }
     }
@@ -426,24 +437,22 @@ pub(super) async fn pull_entries_fever(
     // maps 已在任何游标初始化/HTTP 请求前构建，见函数入口。
 
     // ① 权威状态集合（全量 id）：未读 + 收藏。
-    // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮对账（下方 ⑤ 用 reconcile_ok 守卫），
+    // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮集合正文回补，
     // 避免静默把本地全部标为已读 / 清空收藏——Fever 对账为远端权威双向语义，误判代价更高。
     // TASK-069 审查 F1：该失败同时意味着「权威集合没拿全」，与②的分块失败同源，
     // 故一并计入守卫——否则时间戳游标照常推进，切回 greader 时会跳过这个窗口。
     let mut collection_failures = 0usize;
-    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
-    let (unread, starred, reconcile_ok) = match (unread, starred) {
-        (Ok(u), Ok(s)) => (u, s, true),
-        (Err(e), _) | (_, Err(e)) => {
+    let authority = match report.authority_snapshot.clone() {
+        Some(authority) => authority,
+        None => load_fever_authority(client, None, report).await,
+    };
+    let (unread, starred) = match (&authority.unread, &authority.starred) {
+        (Some(unread), Some(starred)) => (unread.clone(), starred.clone()),
+        _ => {
             collection_failures += 1;
-            report.note_client_error(&e);
-            report.errors.push(format!(
-                "状态对账跳过：Fever 状态集合拉取失败（{e}），本轮不合并远端状态"
-            ));
-            (Vec::new(), Vec::new(), false)
+            (Vec::new(), Vec::new())
         }
     };
-
     // 匹配映射已在权威集合请求前构建（字段版本快照必须早于任何 HTTP，见上方）。
 
     let mut seen: HashSet<i64> = HashSet::new();
@@ -469,8 +478,7 @@ pub(super) async fn pull_entries_fever(
                 Ok(p) => p,
                 Err(e) => {
                     fetch_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取增量条目失败: {e}"));
+                    report.push_client_error(&e, format!("拉取增量条目失败: {e}"));
                     break;
                 }
             };
@@ -503,28 +511,38 @@ pub(super) async fn pull_entries_fever(
                     break;
                 }
             };
-            let mut guard = db.lock().await;
             // OPT-006：页事务（页数据 + since 同 commit）是游标写边界——代际
             // 失配整页丢弃：不合并、不推进 since，Pending 由账号提交事务重置。
-            session.ensure_current(&guard)?;
-            match merge_page_tx(
-                &mut guard,
+            match apply_fever_page(
+                db,
+                session.generation,
                 page,
                 &mut seen,
                 &mut maps,
                 report,
                 Some(PageCursorWrite::Since(next)),
-            ) {
+            )
+            .await?
+            {
                 Ok(()) => {
                     cursor = next;
                     since_cursor = since_cursor.max(next);
                 }
                 Err(e) => {
                     merge_failures += 1;
-                    report.errors.push(format!(
-                        "增量页合并失败（已回滚，保留 since={cursor} 下轮重拉）: {e}"
-                    ));
-                    if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                    record_pull_apply_failure(e, report, |e| {
+                        format!("增量页合并失败（已回滚，保留 since={cursor} 下轮重拉）: {e}")
+                    })?;
+                    if pull_database_work(
+                        db,
+                        generation,
+                        &mut maps,
+                        report,
+                        |conn, maps, report| rebuild_maps_after_failure(conn, maps, report),
+                    )
+                    .await?
+                    .is_err()
+                    {
                         return Ok(()); // R3-P1：重建失败 = 不再有可信映射，立即终止本轮
                     }
                     break;
@@ -573,10 +591,18 @@ pub(super) async fn pull_entries_fever(
                             since: since_cursor.max(max),
                             pending: start,
                         });
-                        let mut guard = db.lock().await;
                         // OPT-006：页事务是游标写边界——代际失配整页丢弃。
-                        session.ensure_current(&guard)?;
-                        match merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, write) {
+                        match apply_fever_page(
+                            db,
+                            session.generation,
+                            page,
+                            &mut seen,
+                            &mut maps,
+                            report,
+                            write,
+                        )
+                        .await?
+                        {
                             Ok(()) => {
                                 if let Some((_, max)) = bounds {
                                     since_cursor = since_cursor.max(max);
@@ -586,10 +612,21 @@ pub(super) async fn pull_entries_fever(
                                 // 顶覆盖页失败：Pending=start（初始化已落库）保留，
                                 // 下次同步（含 light）重新顶走——不提前完成。
                                 merge_failures += 1;
-                                report.errors.push(format!(
-                                    "历史顶部覆盖页失败（已回滚，Pending=MAX 保留）: {e}"
-                                ));
-                                if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                                record_pull_apply_failure(e, report, |e| {
+                                    format!("历史顶部覆盖页失败（已回滚，Pending=MAX 保留）: {e}")
+                                })?;
+                                if pull_database_work(
+                                    db,
+                                    generation,
+                                    &mut maps,
+                                    report,
+                                    |conn, maps, report| {
+                                        rebuild_maps_after_failure(conn, maps, report)
+                                    },
+                                )
+                                .await?
+                                .is_err()
+                                {
                                     return Ok(()); // R3-P1：重建失败立即终止本轮
                                 }
                                 boundary_ok = false;
@@ -600,8 +637,7 @@ pub(super) async fn pull_entries_fever(
                 Err(e) => {
                     // 顶覆盖网络失败 = 历史阶段没有开始：Pending=MAX 保留。
                     fetch_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取历史条目前失败: {e}"));
+                    report.push_client_error(&e, format!("拉取历史条目前失败: {e}"));
                     boundary_ok = false;
                 }
             }
@@ -627,10 +663,10 @@ pub(super) async fn pull_entries_fever(
                     Ok(p) => p,
                     Err(e) => {
                         fetch_failures += 1;
-                        report.note_client_error(&e);
-                        report
-                            .errors
-                            .push(format!("拉取历史条目失败（Pending={cursor} 保留）: {e}"));
+                        report.push_client_error(
+                            &e,
+                            format!("拉取历史条目失败（Pending={cursor} 保留）: {e}"),
+                        );
                         break;
                     }
                 };
@@ -676,10 +712,18 @@ pub(super) async fn pull_entries_fever(
                 } else {
                     PageCursorWrite::Pending(min)
                 };
-                let mut guard = db.lock().await;
                 // OPT-006：页事务是游标写边界——代际失配整页丢弃。
-                session.ensure_current(&guard)?;
-                match merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, Some(write)) {
+                match apply_fever_page(
+                    db,
+                    session.generation,
+                    page,
+                    &mut seen,
+                    &mut maps,
+                    report,
+                    Some(write),
+                )
+                .await?
+                {
                     Ok(()) => {
                         if top_walk {
                             since_cursor = since_cursor.max(max);
@@ -689,10 +733,19 @@ pub(super) async fn pull_entries_fever(
                     }
                     Err(e) => {
                         merge_failures += 1;
-                        report.errors.push(format!(
-                            "历史页合并失败（已回滚，Pending={cursor} 保留）: {e}"
-                        ));
-                        if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                        record_pull_apply_failure(e, report, |e| {
+                            format!("历史页合并失败（已回滚，Pending={cursor} 保留）: {e}")
+                        })?;
+                        if pull_database_work(
+                            db,
+                            generation,
+                            &mut maps,
+                            report,
+                            |conn, maps, report| rebuild_maps_after_failure(conn, maps, report),
+                        )
+                        .await?
+                        .is_err()
+                        {
                             return Ok(()); // R3-P1：重建失败立即终止本轮
                         }
                         break;
@@ -702,14 +755,19 @@ pub(super) async fn pull_entries_fever(
         }
         if history_completed {
             // 只有真正取尽才允许 Complete；写失败保持 Pending（下轮会再走到这里）。
-            let conn = db.lock().await;
+            let generation = session.generation;
             // OPT-006：Complete 是历史状态写边界——代际失配不得落库。
-            session.ensure_current(&conn)?;
-            if let Err(e) = db::set_fever_history_complete(&conn) {
+            let complete = crate::state::database_work(db.clone(), move |conn| {
+                let _writer = db::writer_guard(conn)?;
+                SyncSession::ensure_generation(conn, generation)?;
+                Ok(db::set_fever_history_complete(conn))
+            })
+            .await?;
+            if let Err(e) = complete {
                 merge_failures += 1;
-                report.errors.push(format!(
-                    "写 Complete 状态失败（保持 Pending，下轮重试）: {e}"
-                ));
+                record_pull_apply_failure(e, report, |e| {
+                    format!("写 Complete 状态失败（保持 Pending，下轮重试）: {e}")
+                })?;
             }
         }
     }
@@ -733,24 +791,55 @@ pub(super) async fn pull_entries_fever(
     let has_body: HashSet<i64> = if candidates.is_empty() {
         HashSet::new()
     } else {
+        let covered = crate::state::database_work(db.clone(), move |conn| {
+            SyncSession::ensure_generation(conn, generation)?;
+            Ok(db::remote_ids_with_body(conn, &candidates))
+        })
+        .await?;
         {
-            let conn = db.lock().await;
-            // OPT-006：DB 读取前复核代际。
-            session.ensure_current(&conn)?;
-            match db::remote_ids_with_body(&conn, &candidates) {
+            match covered {
                 Ok(with_body) => with_body.into_iter().collect(),
                 Err(e) => {
-                    report
-                        .errors
-                        .push(format!("读取本地正文覆盖失败，with_ids 退回全量补齐: {e}"));
+                    record_pull_apply_failure(e, report, |e| {
+                        format!("读取本地正文覆盖失败，with_ids 退回全量补齐: {e}")
+                    })?;
                     HashSet::new()
                 }
             }
         }
     };
     let mut need = with_ids_need(&unread, &starred, &seen, &has_body);
+    // Cold proof is separate from body presence. Reuse this Content lane's
+    // with_ids transport, at most 2000 cold identities per round, with rotation.
+    let mut cold: Vec<i64> = report
+        .unverified_state_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            !maps.verified_remote_ids.contains(id)
+                && !seen.contains(id)
+                && !report.content_requested_ids.contains(id)
+        })
+        .collect();
+    let previous = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        Ok(db::get_setting(conn, "fever_origin_proof_cursor")?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|value| value["generation"].as_i64() == Some(generation))
+            .and_then(|value| value["last_id"].as_i64()))
+    })
+    .await?;
+    {
+        if let Some(previous) = previous {
+            let start = cold.partition_point(|id| *id <= previous);
+            cold.rotate_left(start);
+        }
+    }
+    cold.truncate(2000usize.saturating_sub(report.origin_proof_requested_ids.len()));
+    need.extend(cold.iter().copied());
     need.sort_unstable();
     need.dedup();
+    let failures_before_proof = (fetch_failures, merge_failures);
     // W3-2：with_ids 回补**有界并发**（批内 ≤ PULL_FETCH_CONCURRENCY 个在途，
     // 按原页顺序逐页短事务合并）；首块失败即停（fetch_failures 计数、游标不动
     // 语义逐字不变），同批在途请求不可撤回属既有「已发出的请求不能撤回」边界，
@@ -758,6 +847,12 @@ pub(super) async fn pull_entries_fever(
     let page_slices: Vec<&[i64]> = need.chunks(50).collect();
     'with_ids: for start in (0..page_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
         let end = (start + PULL_FETCH_CONCURRENCY).min(page_slices.len());
+        for chunk in &page_slices[start..end] {
+            report.content_requested_ids.extend(chunk.iter().copied());
+            report
+                .origin_proof_requested_ids
+                .extend(chunk.iter().copied().filter(|id| cold.contains(id)));
+        }
         let results = fetch_with_ids_batch(db, session, client, &page_slices[start..end]).await;
         for result in results {
             match result {
@@ -765,8 +860,7 @@ pub(super) async fn pull_entries_fever(
                 FeverPageFetch::Stale => return Err(SyncSession::stale_error()),
                 FeverPageFetch::Failed(e) => {
                     fetch_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
+                    report.push_client_error(&e, format!("拉取未读/收藏条目失败: {e}"));
                     break 'with_ids;
                 }
                 FeverPageFetch::Page(page) => {
@@ -787,17 +881,32 @@ pub(super) async fn pull_entries_fever(
                         .await;
                     }
                     // 页事务（无游标写入）：失败整页回滚，**不**推动任何游标。
-                    let mut guard = db.lock().await;
                     // OPT-006：合并是回写边界——代际失配整页丢弃。
-                    session.ensure_current(&guard)?;
-                    if let Err(e) =
-                        merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, None)
+                    if let Err(e) = apply_fever_page(
+                        db,
+                        session.generation,
+                        page,
+                        &mut seen,
+                        &mut maps,
+                        report,
+                        None,
+                    )
+                    .await?
                     {
                         merge_failures += 1;
-                        report
-                            .errors
-                            .push(format!("with_ids 补齐页合并失败（已回滚，游标不动）: {e}"));
-                        if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                        record_pull_apply_failure(e, report, |e| {
+                            format!("with_ids 补齐页合并失败（已回滚，游标不动）: {e}")
+                        })?;
+                        if pull_database_work(
+                            db,
+                            generation,
+                            &mut maps,
+                            report,
+                            |conn, maps, report| rebuild_maps_after_failure(conn, maps, report),
+                        )
+                        .await?
+                        .is_err()
+                        {
                             return Ok(()); // R3-P1：重建失败立即终止本轮
                         }
                         break 'with_ids;
@@ -807,39 +916,138 @@ pub(super) async fn pull_entries_fever(
         }
     }
 
-    // ⑤ 权威状态对账：Fever 无法直接拉已读条目，靠「未读/收藏集合」反推。
-    // 集合拉取失败时整段跳过（C-1），绝不做"空集合 = 远端全变"的对账。
-    if reconcile_ok {
-        let conn = db.lock().await;
-        // OPT-006：对账是回写边界——代际失配丢弃整份权威集合。
-        session.ensure_current(&conn)?;
-        // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
-        // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
-        // 剩余行下一轮同集合对账幂等重放。
-        if let Err(e) = reconcile_fever_state(&conn, &unread, &starred, &maps, report) {
-            report.errors.push(format!(
-                "状态对账中断：本地状态写入失败（{e}），本轮剩余条目未对账"
-            ));
+    if (fetch_failures, merge_failures) == failures_before_proof {
+        if let Some(last_id) = cold.last() {
+            let last_id = *last_id;
+            let generation = session.generation;
+            crate::state::database_work(db.clone(), move |conn| {
+                let _writer = db::writer_guard(conn)?;
+                SyncSession::ensure_generation(conn, generation)?;
+                db::set_setting(
+                    conn,
+                    "fever_origin_proof_cursor",
+                    &serde_json::json!({
+                        "generation": generation, "last_id": last_id,
+                    })
+                    .to_string(),
+                )
+            })
+            .await?;
         }
     }
+
+    // Content collection snapshots above are only for missing-body discovery.
+    // Existing bound flags belong exclusively to pull_states_fever.
 
     // ⑥ 完成时间。`last_sync_entry_id` 与历史 checkpoint 已在各页事务内提交
     // （页数据与游标同 commit），这里不再有「事务外的游标补写」。
     // 时间戳游标仅在「本轮窗口拿全」时推进——抓取失败、页事务失败、预算未完成
     // 与权威集合失败都算没拿全，否则切回 greader 时会跳过该窗口。
-    let conn = db.lock().await;
     // OPT-006：完成时间推进前复核代际——旧会话不得写新账号的时间戳游标。
-    session.ensure_current(&conn)?;
+    crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)
+    })
+    .await?;
     let failures = fetch_failures + collection_failures + merge_failures;
-    if failures == 0 {
-        let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
+    if failures == 0 && !report.states_incomplete && !report.binding_incomplete {
+        report.content_cursor_candidate = Some(Utc::now().timestamp());
     } else {
         log::warn!(
             "fever pull: {fetch_failures} fetch(es) + {collection_failures} collection + {merge_failures} merge failure(s); keeping last_sync_ts"
         );
     }
-    drop(conn);
     Ok(())
+}
+
+async fn load_fever_authority(
+    client: &fever::FeverClient,
+    previous: Option<&AuthoritySnapshot>,
+    report: &mut SyncReport,
+) -> Arc<AuthoritySnapshot> {
+    if let Some(previous) =
+        previous.filter(|snapshot| snapshot.unread.is_none() || snapshot.starred.is_none())
+    {
+        return Arc::new(previous.clone());
+    }
+    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
+    let snapshot = match (unread, starred) {
+        (Ok(unread), Ok(starred)) => AuthoritySnapshot {
+            unread: Some(unread),
+            starred: Some(starred),
+        },
+        (Err(error), _) | (_, Err(error)) => {
+            report.push_client_error(
+                &error,
+                format!("状态对账跳过：Fever 状态集合拉取失败，本轮不合并远端状态: {error}"),
+            );
+            AuthoritySnapshot {
+                unread: None,
+                starred: None,
+            }
+        }
+    };
+    let snapshot = Arc::new(snapshot);
+    report.authority_snapshot = Some(snapshot.clone());
+    snapshot
+}
+
+/// A complete unread/saved pair is required. Failure is never an empty set.
+/// This method performs no since/history/with_ids content pagination.
+pub(super) async fn pull_states_fever(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &fever::FeverClient,
+    report: &mut SyncReport,
+    versions: Option<&db::SyncMatchMaps>,
+) -> AppResult<()> {
+    let generation = session.generation;
+    if !pull_admitted(db, session, report).await? {
+        return Ok(());
+    }
+    let mut maps = crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)?;
+        db::sync_match_maps(conn)
+    })
+    .await?;
+    if let Some(versions) = versions {
+        maps.keep_field_versions_from(versions);
+        maps.pending_read_ids.extend(&versions.pending_read_ids);
+        maps.pending_star_ids.extend(&versions.pending_star_ids);
+    }
+    if maps.mf_id_to_article.is_empty() {
+        return Ok(());
+    }
+    let previous = report.authority_snapshot.clone();
+    let authority = load_fever_authority(client, previous.as_deref(), report).await;
+    if authority.unread.is_none() || authority.starred.is_none() {
+        return Ok(());
+    }
+    let generation = session.generation;
+    let authority = authority.clone();
+    pull_database_work(
+        db,
+        generation,
+        &mut maps,
+        report,
+        move |conn, maps, report| {
+            if !pull_admitted_generation(conn, generation, report)? {
+                return Ok(());
+            }
+            collect_unverified_state_ids(conn, maps, &authority, report)?;
+            let (Some(unread), Some(starred)) = (&authority.unread, &authority.starred) else {
+                return Ok(());
+            };
+            if let Err(error) =
+                reconcile_fever_state_at(conn, generation, unread, starred, maps, report)
+            {
+                record_pull_apply_failure(error, report, |error| {
+                    format!("Fever 状态对账写入失败，本轮剩余条目未对账: {error}")
+                })?;
+            }
+            Ok(())
+        },
+    )
+    .await?
 }
 
 /// Fever 全量状态对账。Miniflux 按 URL 去重 entry，故 Fever 视角无跨源副本，
@@ -862,8 +1070,27 @@ pub(super) async fn pull_entries_fever(
 ///
 /// OPT-007 字段版本守卫：与 GR 对账同构——pull 起点版本快照 + 当前 DB 版本 +
 /// 该字段 pending，**按字段**独立判定（本地只改读时收藏照常收敛；反之亦然）。
+#[cfg(test)]
 fn reconcile_fever_state(
     conn: &Connection,
+    unread: &[i64],
+    starred: &[i64],
+    maps: &db::SyncMatchMaps,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    reconcile_fever_state_at(
+        conn,
+        db::sync_generation(conn)?,
+        unread,
+        starred,
+        maps,
+        report,
+    )
+}
+
+fn reconcile_fever_state_at(
+    conn: &Connection,
+    generation: i64,
     unread: &[i64],
     starred: &[i64],
     maps: &db::SyncMatchMaps,
@@ -874,30 +1101,30 @@ fn reconcile_fever_state(
     let starred_set: HashSet<i64> = starred.iter().copied().collect();
 
     for (remote_id, aid) in &maps.mf_id_to_article {
+        let _writer = db::writer_guard(conn)?;
+        SyncSession::ensure_generation(conn, generation)?;
         let aid = *aid;
+        if !maps.state_binding_is_current(conn, aid, *remote_id)? {
+            continue;
+        }
         // OPT-007：字段版本快照（pull 起点；缺失按 (0,0) 保守处理）——
         // 任务卡负例①② 的 Fever 侧对称锁定。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
         // TASK-112 政策（FEVER_READ_DIRECTION = UnreadSetBidirectional 双向权威）：
         // unread 集合权威——命中 → 本地未读（可复活未读）；未命中 → 本地已读。
-        // N4（R2 裁定）：**本轮已有已读信号（own 或跨副本广播）落定的行，轮终
-        // 权威对账不得立刻撤销同一广播**——仅在"把本地已读翻回未读"这一方向让位；
-        // 无本轮读信号时双向权威照旧（历史本地已读不永久阻挡之后的远端显式 unread；
-        // 下一轮 explicit_read_ids 已清空，unread 正常生效，pending/版本守卫优先）。
-        let same_round_read_signal = maps.explicit_read_ids.contains(&aid);
         let remote_read = !unread_set.contains(remote_id);
-        let read_rows = if same_round_read_signal && !remote_read {
-            0
-        } else {
-            conflict_policy::apply_read_by_policy(
-                conn,
-                conflict_policy::FEVER_READ_DIRECTION,
-                remote_read,
-                aid,
-                snap_read,
-                maps.pending_read_ids.contains(&aid),
-            )?
-        };
+        let read_rows = conflict_policy::apply_read_by_policy(
+            conn,
+            conflict_policy::FEVER_READ_DIRECTION,
+            remote_read,
+            aid,
+            snap_read,
+            maps.pending_read_ids.contains(&aid),
+        )?;
+        // Each successful field may already be committed. A later field failure
+        // must not erase its refresh signal or actual changed-row count (A1).
+        report.entries_data_changed |= read_rows > 0;
+        report.merged_states += read_rows;
         // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
         let star_rows = conflict_policy::apply_star_by_policy(
@@ -908,10 +1135,8 @@ fn reconcile_fever_state(
             snap_star,
             maps.pending_star_ids.contains(&aid),
         )?;
-        if read_rows > 0 || star_rows > 0 {
-            report.entries_data_changed = true;
-        }
-        report.merged_states += read_rows + star_rows;
+        report.entries_data_changed |= star_rows > 0;
+        report.merged_states += star_rows;
     }
     Ok(())
 }
@@ -977,6 +1202,8 @@ mod tests {
             .unwrap()
             .0;
         db::set_article_remote_id(conn, aid, remote_id).unwrap();
+        // Policy fixture: a prior content response explicitly supplied feed/10.
+        assert!(db::confirm_article_remote_origin(conn, aid, remote_id, 10).unwrap());
         aid
     }
 
@@ -984,11 +1211,9 @@ mod tests {
     /// 字段版本快照）。`pending=true` 表示**读/藏两字段都有**未推送意图（逐字段
     /// 判定的旧口径对照）；版本快照取 (0,0) = 与夹具行（raw SQL 写入、版本 0）
     /// 相等，即「拉取期间无本地写入」的默认起点。
-    fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
+    fn maps_for(conn: &Connection, remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
-            url_to_id: Default::default(),
-            feed_url_to_id: Default::default(),
-            url_norm_to_ids: Default::default(),
+            source_versions: db::sync_match_maps(conn).unwrap().source_versions,
             id_to_mf_id: Default::default(),
             id_to_feed_mf: Default::default(),
             pending_ids: if pending {
@@ -1006,10 +1231,11 @@ mod tests {
             } else {
                 Default::default()
             },
-            explicit_read_ids: Default::default(),
             id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
+            excluded_feed_ids: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
+            verified_remote_ids: db::sync_match_maps(conn).unwrap().verified_remote_ids,
         }
     }
 
@@ -1042,7 +1268,14 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        reconcile_fever_state(&conn, &[201], &[], &maps_for(201, aid, false), &mut report).unwrap();
+        reconcile_fever_state(
+            &conn,
+            &[201],
+            &[],
+            &maps_for(&conn, 201, aid, false),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(
             !is_read(&conn, aid),
@@ -1059,7 +1292,14 @@ mod tests {
         let aid = seed_bound(&conn, 202);
 
         let mut report = SyncReport::default();
-        reconcile_fever_state(&conn, &[], &[], &maps_for(202, aid, false), &mut report).unwrap();
+        reconcile_fever_state(
+            &conn,
+            &[],
+            &[],
+            &maps_for(&conn, 202, aid, false),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(is_read(&conn, aid), "unread 未命中必须落地本地已读");
         assert_eq!(report.merged_states, 1, "未命中侧恰好一次状态写入");
@@ -1081,7 +1321,7 @@ mod tests {
         // saved 集合只含 204：203 未命中（远端已取消收藏），204 命中。
         let maps = db::SyncMatchMaps {
             mf_id_to_article: [(203, starred), (204, unstarred)].into_iter().collect(),
-            ..maps_for(203, starred, false)
+            ..maps_for(&conn, 203, starred, false)
         };
         reconcile_fever_state(&conn, &[203, 204], &[204], &maps, &mut report).unwrap();
 
@@ -1115,7 +1355,14 @@ mod tests {
 
         let mut report = SyncReport::default();
         // 远端快照：unread 命中 + saved 未命中——若无 pending 保护会同时翻转两列。
-        reconcile_fever_state(&conn, &[205], &[], &maps_for(205, aid, true), &mut report).unwrap();
+        reconcile_fever_state(
+            &conn,
+            &[205],
+            &[],
+            &maps_for(&conn, 205, aid, true),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(
             is_read(&conn, aid),
@@ -1138,7 +1385,7 @@ mod tests {
         let conn = conn();
         let aid = seed_bound(&conn, 206);
         db::set_read(&conn, aid, true).unwrap(); // 本地标读：read_version 0→1
-        let mut maps = maps_for(206, aid, false);
+        let mut maps = maps_for(&conn, 206, aid, false);
         maps.id_to_versions.insert(aid, (0, 0)); // pull 起点快照早于该本地写入
 
         let mut report = SyncReport::default();
@@ -1287,5 +1534,44 @@ mod tests {
             vec![102, 103],
             "取补集后：无正文 102 与未绑定 103 仍回补，已有正文 101 被排除"
         );
+    }
+    #[test]
+    fn authority_rejects_retired_and_reactivated_source_snapshots() {
+        for reactivate in [false, true] {
+            let conn = conn();
+            let aid = seed_bound(&conn, 907);
+            db::set_starred(&conn, aid, true).unwrap();
+            let maps = db::sync_match_maps(&conn).unwrap();
+            let (feed, folder): (i64, i64) = conn.query_row(
+                "SELECT f.id,f.folder_id FROM feeds f JOIN articles a ON a.feed_id=f.id WHERE a.id=?1",
+                [aid], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+            db::delete_feed(&conn, feed).unwrap();
+            if reactivate {
+                assert_eq!(
+                    db::insert_feed(
+                        &conn,
+                        "https://f.example/907.rss",
+                        None,
+                        "F",
+                        None,
+                        folder,
+                        "inherit",
+                        false,
+                        false
+                    )
+                    .unwrap(),
+                    feed
+                );
+            }
+            let mut rebuilt = db::sync_match_maps(&conn).unwrap();
+            // Preserve the old entry map too, exercising both commit rejection and snapshot rebuild.
+            rebuilt.mf_id_to_article = maps.mf_id_to_article.clone();
+            rebuilt.keep_field_versions_from(&maps);
+            let mut report = SyncReport::default();
+            reconcile_fever_state(&conn, &[], &[], &rebuilt, &mut report).unwrap();
+            assert!(is_starred(&conn, aid));
+            assert!(!is_read(&conn, aid));
+            assert_eq!(report.merged_states, 0);
+        }
     }
 }

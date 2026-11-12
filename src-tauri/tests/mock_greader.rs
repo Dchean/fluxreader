@@ -152,6 +152,10 @@ pub struct MockGReader {
     pub fail_edit_tag: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-068）：置位后 stream/items/contents 返回 500——pull 分块失败，验证游标不推进守卫
     pub fail_item_contents: std::sync::atomic::AtomicBool,
+    /// 状态读回用例：临时覆盖 stream/items/contents 的 HTTP 状态与响应体。
+    /// 用于构造 200 空数组/短数组/缺 items/非法 JSON 等协议边界；None = 走正常路由。
+    #[allow(dead_code)]
+    pub contents_response_override: Mutex<Option<(u16, String)>>,
     /// 故障注入（TASK-069 审查 F1）：置位后仅 reading-list 的 stream/items/ids 返回 500
     /// （read/starred 对账仍成功）——验证「id 列举失败同样不推进游标」
     pub fail_reading_list_ids: std::sync::atomic::AtomicBool,
@@ -261,6 +265,13 @@ pub struct MockGReader {
     pub contents_barrier: Mutex<ContentsBarrierSlot>,
     /// contents 请求计数（contents_barrier 的匹配依据）。
     pub contents_calls: std::sync::atomic::AtomicUsize,
+    /// Fever items response snapshot barrier (state-lane isolation regression).
+    pub fever_items_barrier: Mutex<ContentsBarrierSlot>,
+    pub fever_items_calls: std::sync::atomic::AtomicUsize,
+    /// Hold a mark response after the server applied it, before the next ID can
+    /// be sent. This tests source invalidation between per-ID Fever writes.
+    pub fever_mark_barrier: Mutex<ContentsBarrierSlot>,
+    pub fever_mark_calls: std::sync::atomic::AtomicUsize,
 }
 
 /// OPT-007 网络屏障的测试端句柄：`arrived` 在响应即将写回前收到信号，
@@ -282,6 +293,7 @@ impl MockGReader {
             fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
             fail_item_contents: std::sync::atomic::AtomicBool::new(false),
+            contents_response_override: Mutex::new(None),
             fail_reading_list_ids: std::sync::atomic::AtomicBool::new(false),
             fail_unread_stream_ids: std::sync::atomic::AtomicBool::new(false),
             forced_item_ids_page_size: std::sync::atomic::AtomicUsize::new(0),
@@ -339,6 +351,10 @@ impl MockGReader {
             stream_ids_barrier: Mutex::new(None),
             contents_barrier: Mutex::new(None),
             contents_calls: std::sync::atomic::AtomicUsize::new(0),
+            fever_items_barrier: Mutex::new(None),
+            fever_items_calls: std::sync::atomic::AtomicUsize::new(0),
+            fever_mark_barrier: Mutex::new(None),
+            fever_mark_calls: std::sync::atomic::AtomicUsize::new(0),
         });
 
         let srv = server.clone();
@@ -383,6 +399,17 @@ impl MockGReader {
     pub fn set_fail_item_contents(&self, fail: bool) {
         self.fail_item_contents
             .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 覆盖下一次及之后 stream/items/contents 的响应（None 恢复默认）。
+    #[allow(dead_code)]
+    pub fn set_contents_response(&self, status: u16, body: impl Into<String>) {
+        *self.contents_response_override.lock().unwrap() = Some((status, body.into()));
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_contents_response_override(&self) {
+        *self.contents_response_override.lock().unwrap() = None;
     }
 
     /// 置位后仅 reading-list 的 stream/items/ids 返回 500（TASK-069 审查 F1：
@@ -731,6 +758,28 @@ impl MockGReader {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn arm_fever_items_barrier(&self, call_index: usize) -> MockBarrier {
+        let (arrived, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        *self.fever_items_barrier.lock().unwrap() = Some((call_index, arrived, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn arm_fever_mark_barrier(&self, call_index: usize) -> MockBarrier {
+        let (arrived, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        *self.fever_mark_barrier.lock().unwrap() = Some((call_index, arrived, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release,
+        }
+    }
+
     /// OPT-007：对 s= 参数包含 `stream_contains` 的 `stream/items/ids` 请求
     /// （响应算定后、写回前）挂起，返回测试端句柄（见 [`MockBarrier`]）。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
@@ -842,6 +891,54 @@ async fn handle_conn(
     }
 
     let (status, json) = route(&srv, method, path, path_query, &body, &head);
+
+    if path.contains("fever")
+        && parse_query(path_query)
+            .get("mark")
+            .is_some_and(|mark| mark == "item")
+    {
+        let call = srv
+            .fever_mark_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let barrier = {
+            let mut slot = srv.fever_mark_barrier.lock().unwrap();
+            if slot.as_ref().is_some_and(|(index, _, _)| *index == call) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+
+    // Fever actions are bare query flags (`?api&items`), whereas parse_query
+    // intentionally only returns key=value parameters for the GR fixtures.
+    if path_query.split_once('?').is_some_and(|(_, query)| {
+        query
+            .split('&')
+            .any(|part| part == "items" || part.starts_with("items="))
+    }) {
+        let call = srv
+            .fever_items_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let barrier = {
+            let mut slot = srv.fever_items_barrier.lock().unwrap();
+            if slot.as_ref().is_some_and(|(index, _, _)| *index == call) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
 
     // OPT-007 网络屏障：命中的请求在响应体**算定之后、写回之前**挂起——
     // 测试可在此期间对本地库执行真实操作（本地写入 / 模拟推送确认清队），
@@ -1181,6 +1278,44 @@ fn route(
                 let serve_entries = srv
                     .fever_serve_entries
                     .load(std::sync::atomic::Ordering::SeqCst);
+                // Explicit v4 fixtures support absolute mark semantics. Keep the
+                // legacy empty/v3 fixture unchanged; it does not model writes.
+                let query = parse_query(path_query);
+                if serve_entries
+                    && v >= 4
+                    && auth == 1
+                    && query.get("mark").is_some_and(|mark| mark == "item")
+                {
+                    let target = query.get("id").and_then(|id| id.parse::<i64>().ok());
+                    let mut entries = srv.entries.lock().unwrap();
+                    if let Some(entry) = entries.iter_mut().find(|entry| Some(entry.id) == target) {
+                        let action = match query.get("as").map(String::as_str) {
+                            Some("read") => {
+                                entry.read = true;
+                                Some("read")
+                            }
+                            Some("unread") => {
+                                entry.read = false;
+                                Some("unread")
+                            }
+                            Some("saved") => {
+                                entry.starred = true;
+                                Some("star")
+                            }
+                            Some("unsaved") => {
+                                entry.starred = false;
+                                Some("unstar")
+                            }
+                            _ => None,
+                        };
+                        if let Some(action) = action {
+                            srv.status_updates
+                                .lock()
+                                .unwrap()
+                                .push((entry.id, action.into()));
+                        }
+                    }
+                }
                 let snapshot: Vec<MockEntry> = if serve_entries {
                     srv.entries.lock().unwrap().clone()
                 } else {
@@ -1460,6 +1595,9 @@ fn route(
             {
                 // TASK-068 注入：pull 分块失败（500）
                 return (500, "Internal Server Error".to_string());
+            }
+            if let Some(response) = srv.contents_response_override.lock().unwrap().clone() {
+                return response;
             }
             let form = parse_form(body);
             // i 参数可能来自 body 或 query

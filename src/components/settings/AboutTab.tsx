@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../../store';
 import { SettingCard } from '../primitives';
-import { openExternal } from '../../lib/external';
+import { openExternalWithFeedback } from '../../lib/external';
 import { api, extractError } from '../../lib/api';
 import { isComparableVersion, shouldOfferUpdate } from './compareVersions';
+import { DatabaseBackupSection } from './DatabaseBackupSection';
+import { PortableBackupSection } from './PortableBackupSection';
 
 /* ---------- TAB 8: 关于 ---------- */
 
@@ -71,7 +73,7 @@ export function AboutTab() {
         {updateState === 'checking' ? (
           <span className="about-update-hint">正在检查…</span>
         ) : updateState === 'available' && latestInfo ? (
-          <button className="toggle-action-btn about-update-btn" onClick={() => void openExternal(latestInfo.url)}>
+          <button className="toggle-action-btn about-update-btn" onClick={() => void openExternalWithFeedback(latestInfo.url)}>
             v{latestInfo.version} 可用 · 前往下载
           </button>
         ) : (
@@ -82,6 +84,8 @@ export function AboutTab() {
         {updateState === 'upToDate' && <span className="about-update-hint">已是最新版本</span>}
         {updateState === 'failed' && <span className="about-update-hint">检查失败</span>}
       </SettingCard>
+      <PortableBackupSection />
+      <details><summary className="settings-group-title">本机故障恢复（高级）</summary><DatabaseBackupSection /></details>
     </>
   );
 }

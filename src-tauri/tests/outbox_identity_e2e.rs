@@ -188,6 +188,9 @@ async fn unsent_sync_queue_row_survives_reopen_and_is_consumed_by_push() {
             db::set_article_remote_id(&conn, aid, remote_id).unwrap(),
             "前置：本地条目已绑定远端 id"
         );
+        // Prior Content supplied feed/10; the reopen test must preserve both
+        // durable identity proof and an unsent action, without a new pull.
+        assert!(db::confirm_article_remote_origin(&conn, aid, remote_id, 10).unwrap());
 
         // 本地标读：入队但**不发送**，随后立即关闭连接。
         db::set_read_with_enqueue(&conn, aid, true).unwrap();

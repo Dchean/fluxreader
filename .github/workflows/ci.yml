@@ -1,16 +1,13 @@
 name: CI
 
 on:
-  # dev 为开发分支（携带工作流记录），推送即跑 CI，供合并进 main 前的验证；
-  # main 为纯项目代码主分支，发布 tag 的 CI 门控依赖本工作流在 main 上的运行。
-  # v* tag push 同样触发本工作流（只做门禁，不自动发布）：release.yml 要求
-  # tagged commit 上 ci.yml 全绿，而 tag 可能指向没有 main/dev push run 的提交
-  # ——此前会让门禁空等 45 分钟超时，tag 触发补齐该 run。
+  # 分支与 PR 使用同一套门禁；发布 tag 由 release.yml 调用本提交的工作流，
+  # 避免独立 tag CI 与 Release 重复运行、轮询历史结果造成歧义。
   push:
     branches: [main, dev]
-    tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_call:
 
 # CI 的 GITHUB_TOKEN 只被 checkout 消费（只读）：显式收口最小权限，
 # 与 release.yml 的 job 级 contents: write 形成分域。
@@ -19,11 +16,71 @@ permissions:
 
 jobs:
   frontend:
-    name: Type-check, lint & build frontend
+    name: Lint, build & frontend regressions
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node
+        id: node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install dependencies
+        id: install
+        run: npm ci
+
+      - name: Release workflow regression
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' }}
+        run: node --test tools/release/release.test.mjs
+
+      # Note: 四个前端门禁各自可跑、失败信息指向自身——lint/build 的任一失败不得
+      # 挡住后面的状态与挂载回归；安装失败时后续步骤没有可执行前提，才统一跳过。
+      # 任一失败仍让 job 变红，不用 continue-on-error 掩盖。理由与断言纪律见
+      # .agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md
+      - name: Lint (oxlint)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run lint
+
+      - name: Build (tsc + vite)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run build
+
+      # Note: 前端回归接入 CI 的理由——它是纯逻辑状态机断言（node 直跑，不需浏览器），
+      # 能在几十毫秒内拦住 store/selector 的行为回归；备选是 Playwright 级 UI 测试，
+      # 但更慢更脆，故作为补充而非替代。
+      - name: Frontend regression (node state-machine checks)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run test:frontend
+
+      # Note: 真实挂载回归（OPT-016B）——jsdom + React createRoot/act 挂载生产组件，
+      # 覆盖 effect/事件/异步链与真实 DOM 契约（ReaderProse 源码态、Timeline 五布局、
+      # CloseAskDialog 键盘、正文水合），与上面的纯逻辑通道共用同一份 loader 与
+      # store/bodyCache 实例。不跑 effect 的 SSR/静态断言不能替代它，故单列一步。
+      - name: Component mount regression (jsdom + React act)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run test:components
+
+  ui-layout:
+    name: UI layout & social hydration (Edge CDP)
+    # 真实 Chromium 几何验收：jsdom 的 offsetHeight/getBoundingClientRect 是替身，
+    # 无法拦截 footer 被 flex 压缩或社交正文先以完整高度进入布局。windows-latest
+    # 自带 Edge；脚本启动本地 Vite + headless Edge，失败时在日志与 tmp 证据中给出
+    # 首屏/底部截图和逐帧 metrics（tmp/ 不入库，CI 只以退出码为门禁）。
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -34,24 +91,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint (oxlint)
-        run: npm run lint
+      - name: Real browser layout regression
+        env:
+          UI_LAYOUT_TRACE: viewport
+        run: npm run test:ui-layout
 
-      - name: Build (tsc + vite)
-        run: npm run build
-
-      # Note: 前端回归接入 CI 的理由——它是纯逻辑状态机断言（node 直跑，不需浏览器），
-      # 能在几十毫秒内拦住 store/selector 的行为回归；备选是 Playwright 级 UI 测试，
-      # 但更慢更脆，故作为补充而非替代。
-      - name: Frontend regression (node state-machine checks)
-        run: npm run test:frontend
-
-      # Note: 真实挂载回归（OPT-016B）——jsdom + React createRoot/act 挂载生产组件，
-      # 覆盖 effect/事件/异步链与真实 DOM 契约（ReaderProse 源码态、Timeline 五布局、
-      # CloseAskDialog 键盘、正文水合），与上面的纯逻辑通道共用同一份 loader 与
-      # store/bodyCache 实例。不跑 effect 的 SSR/静态断言不能替代它，故单列一步。
-      - name: Component mount regression (jsdom + React act)
-        run: npm run test:components
+      - name: Upload UI layout evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ui-layout-evidence
+          path: tmp/ui-layout-evidence/
+          if-no-files-found: warn
 
   rust:
     name: Check & test Rust (src-tauri)
@@ -66,6 +117,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         id: checkout
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Rust
         id: toolchain
@@ -98,17 +151,9 @@ jobs:
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      - name: Run tests
+      # 默认 cargo test 自动发现 tests/*.rs；六套自托管 mock 与 ingestion/
+      # scheduler 均无 #[ignore]，由这一步完整执行一次。真实账户 live 测试
+      # 继续保持 ignored，只有具体任务另行约定外部读写边界后才显式运行。
+      - name: Run tests (unit and all non-ignored integrations)
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      # 注意：这里必须用 --include-ignored（跑「非 ignored + ignored 全部」），
-      # 不能用 --ignored（只跑被标 #[ignore] 的）。这 6 个自托管 mock 套件里
-      # 一个 #[ignore] 都没有 —— 若写成 --ignored，本步骤会匹配 0 个用例却依然绿灯，
-      # 等于整条 mock 集成测试通道从未在 CI 里真正跑过。各文件头部文档写的也是
-      # --include-ignored（如 account_lifecycle_e2e.rs 的运行示例）。
-      # 注意：ingestion_e2e / scheduler_e2e 各自自托管 127.0.0.1 临时 feed 服务
-      # （OPT-016A，无 #[ignore]），由上面的默认 `cargo test` 步骤真实执行。
-      - name: Run self-hosted mock integration tests (core sync/AI protocols)
-        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --include-ignored
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-fail-fast

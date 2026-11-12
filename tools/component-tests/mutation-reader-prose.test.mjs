@@ -25,11 +25,16 @@ const TEST_HTML = [
 
 componentTest('OPT-016B 变异取证：源码态改回 dangerouslySetInnerHTML 必须被同一组 DOM 断言判红', { timeout: 30000 }, async () => {
   const src = readFileSync(PROD_PATH, 'utf8');
-  const mutated = src.replace(
+  const mutatedSource = src.replace(
     '<pre className="reader-source-view">{sourceText}</pre>',
     '<pre className="reader-source-view" dangerouslySetInnerHTML={{ __html: sourceText }} />',
   );
-  assert.notEqual(mutated, src, '变异必须真实命中 ReaderProse 的源码态文本插值（否则本用例无意义）');
+  assert.notEqual(mutatedSource, src, '变异必须真实命中 ReaderProse 的源码态文本插值（否则本用例无意义）');
+  // The temporary component lives elsewhere; bind its real production helper graph instead
+  // of silently replacing the helper or weakening the same source-mode negative oracle.
+  const helperUrl = new URL('../../src/components/useProseImages.ts', import.meta.url).href;
+  const mutated = mutatedSource.replace("from './useProseImages';", `from '${helperUrl}';`);
+  assert.ok(mutated.includes(helperUrl), '变异副本必须连接真实图片helper，不能漏掉新增依赖');
 
   mkdirSync(TMP_DIR, { recursive: true });
   const tmpFile = join(TMP_DIR, `ReaderProse.mutated-${process.pid}.tsx`);
@@ -68,3 +73,4 @@ componentTest('OPT-016B 变异取证：源码态改回 dangerouslySetInnerHTML �
   // 生产源码零改动（防「变异留在生产」）。
   assert.equal(readFileSync(PROD_PATH, 'utf8'), src, '生产 ReaderProse.tsx 必须与变异前逐字节一致');
 });
+

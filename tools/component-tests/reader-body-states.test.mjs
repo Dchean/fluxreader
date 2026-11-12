@@ -63,9 +63,15 @@ componentTest('Reader 正文三态：loading 占位 / failed 内联重试 / miss
     });
     await flush(3);
     assert.equal(getBodyEntry('201')?.state, 'failed', '失败应落 failed 记录');
-    const retry = entry.container.querySelector('.reader-active-view .hydrate-retry');
-    assert.ok(retry?.textContent.includes('正文加载失败'), '失败时应显示失败文案与重试入口');
-    assert.ok(retry.textContent.includes(getBodyEntry('201').message), '文案取自同一记录 message');
+    const failure = entry.container.querySelector('.reader-active-view .hydrate-failure');
+    const retry = failure?.querySelector('.hydrate-retry');
+    assert.ok(failure?.textContent.includes('正文暂时无法加载'), '失败时应显示失败文案');
+    assert.equal(retry?.textContent.trim(), '重试', '失败时应显示独立重试按钮');
+    assert.equal(
+      failure.querySelector('.hydrate-failure-text')?.getAttribute('title'),
+      getBodyEntry('201').message,
+      '错误详情取自同一记录 message',
+    );
 
     // ---- 重试命中：retryHydration 真实重入队（批量）→ ready → 回到正文渲染 ----
     await act(async () => { retry.click(); });

@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, selectArticleBody, selectAiProductState, selectFeedConfig } from '../store';
+import { useAppStore, selectArticleBody, selectAiProductState, selectAiCacheStatus, selectAiStatusInput, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
-import { openExternal, handleArticleLinkClick } from '../lib/external';
-import { proxyImagesInHtml } from '../lib/imageProxy';
+import { handleArticleLinkClick, isHttpUrl, openExternalWithFeedback } from '../lib/external';
+import { originalProseImage } from './useProseImages';
 import { useEnteringClass } from './useEnteringClass';
 import { ReaderProse } from './ReaderProse';
+import { HydrateFailure } from './HydrateFailure';
+import { useReaderAutomaticAi } from './useAutomaticAi';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
@@ -26,6 +28,8 @@ export function Reader() {
   const translating = useAppStore((s) => s.translating);
   const settings = useAppStore((s) => s.settings);
   const openLightbox = useAppStore((s) => s.openLightbox);
+  const libraryGeneration = useAppStore(s => s.libraryGeneration);
+  const libraryRestoreBusy = useAppStore(s => s.libraryRestoreBusy);
   const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
   const player = useAppStore((s) => s.player);
 
@@ -33,6 +37,7 @@ export function Reader() {
   const toggleCurrentStar = useAppStore((s) => s.toggleCurrentStar);
   const toggleReaderRenderMode = useAppStore((s) => s.toggleReaderRenderMode);
   const toggleReaderFulltext = useAppStore((s) => s.toggleReaderFulltext);
+  const extractCurrentArticle = useAppStore((s) => s.extractCurrentArticle);
   const toggleReaderTranslation = useAppStore((s) => s.toggleReaderTranslation);
   const triggerReaderSummary = useAppStore((s) => s.triggerReaderSummary);
   const clearAiProduct = useAppStore((s) => s.clearAiProduct);
@@ -49,8 +54,9 @@ export function Reader() {
   const translationState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'translation') : null));
   const summaryState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'summary') : null));
   const translationSegments = useAppStore((s) =>
-    (art ? s.aiStatusById[art.id]?.translationSegments ?? null : null),
+    (art ? selectAiCacheStatus(s, art.id)?.translationSegments ?? null : null),
   );
+  const aiStatusInput = useAppStore(useShallow((s) => selectAiStatusInput(s, s.activeArticleId ?? '')));
   /* TASK-122：正文/AI 产物读取单点——selectArticleBody（真值源 bodyById）。
      body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。
      【为何必须包 useShallow】selectArticleBody 每次调用都经 bodyViewFrom(rec)
@@ -61,36 +67,26 @@ export function Reader() {
      字段值不变即命中缓存引用，只有记录真变才触发渲染。同 Sidebar.tsx 的既有约定：
      返回新引用的派生 selector 必须包 useShallow。 */
   const body = useAppStore(useShallow((s) => selectArticleBody(s, s.activeArticleId)));
+  // ready + 空正文是已查询到的本机事实；missing 仍只表示条目缺行。
+  const locallyMissingBody = dataMode === 'tauri' && body.state === 'ready' && !body.content.trim();
+  const hasOriginalUrl = isHttpUrl(art?.url);
   /* 文章之间切换、以及原文↔译文视图切换时，正文淡入一次（REQ-005） */
   const readerViewRef = useRef<HTMLDivElement>(null);
   useEnteringClass(readerViewRef, `${art?.id ?? ''}|${isShowingTranslatedProse}`, 'reader-entering');
   /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
-     拿 bytes 转 data: URL 替换。代理目标 = 当前要显示的基础 HTML（全文或 RSS 原文），
-     按 baseHtml 缓存，避免每次渲染重复抓图。 */
-  const baseHtml = showFulltext ? body.content : body.rawContent;
-  const [proxiedContent, setProxiedContent] = useState<{ key: string; html: string } | null>(null);
-  useEffect(() => {
-    if (!baseHtml) { setProxiedContent(null); return; }
-    if (proxiedContent?.key === baseHtml) return; // 已代理过
-    let alive = true;
-    void proxyImagesInHtml(baseHtml, art?.url).then((result) => {
-      if (!alive) return;
-      if (result == null) { setProxiedContent(null); return; } // 无代理需要或浏览器环境
-      setProxiedContent({ key: baseHtml, html: result });
-    });
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseHtml, art?.url]);
+     由 ReaderProse 按可见图片节点获取共享租约；正文缓存仍保留原 URL。 */
+  const canSwitchFulltext = !!body.rawContent && body.rawContent !== body.content;
+  const baseHtml = showFulltext || !body.rawContent ? body.content : body.rawContent;
   /* 正文两路呈现（审计 F14 / OPT-012）：源码态展示的是**原始文本**（当前用户选择的
      RSS 原文/提取全文/已消毒译文，未经图片代理——显示代理 base64 会冒充源码），
-     渲染态保持现行为（代理命中时用代理产物）。流式未消毒译文两路都是纯文本。
+     渲染态按节点获取图片资源，不重写正文缓存。流式未消毒译文两路都是纯文本。
      Note: 为何源码不能继续走 dangerouslySetInnerHTML、分离契约与取舍 —— 见
      .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
   const renderHtml = isShowingTranslatedProse
     ? body.translatedContent
-    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml);
+    : baseHtml;
   const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml;
-  const feedName = useAppStore((s) => (s.activeArticleId ? s.feedIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? '')?.feed.name ?? '' : ''));
+  const feedName = useAppStore((s) => (s.activeArticleId ? (s.sourceIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? '') ?? s.feedIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? ''))?.feed.name ?? '' : ''));
   const config = useAppStore(
     useShallow((s) => selectFeedConfig(s, art?.feedId ?? '')),
   );
@@ -120,19 +116,6 @@ export function Reader() {
     setSummaryOverride(null);
   }, [art?.id]);
 
-  /* 源级/分类级有效 autoSummary/autoTranslate（唯一 resolver 解析 mode+分类）：
-     打开文章即自动触发，等正文水合完成后再发起（翻译需要正文）。
-     静默失败：未配置 AI 不弹 toast（手动按钮仍会提示）。
-     TASK-122：水合完成判定从 bodyById 状态取（ready；cleared = AI 被清理但
-     正文保留——打开即按 auto 配置重新生成，即「清理后重开可再次生成」）。
-     OPT-011：effect 订阅**有效配置**（config 字段入依赖）——切换源的继承/显式
-     开关或分类默认后立即重评：
-     - 关闭 → 重跑时不触发（尚未发起的自动请求被立即阻止）；
-     - 开启 → 若本文尚无产物且在途为空则发起；
-     - 已经在途的请求不取消（政策：已发送的内容不可撤销，不声称可撤回）；
-       生成中标记（summarizingIds/translating）防重复发起。 */
-  const hydrated = (body.state === 'ready' || body.state === 'cleared') && body.content !== '';
-
   /* OPT-008B R3：正文修订失效的 Reader 自愈——条目引用的 contents 已更新时
      bodyCache.invalidateContentRevision 把记录清空回 cleared。重水合不能依赖
      Timeline 卡片的 useLazyHydrate（虚拟化会把卡片移出挂载窗；卡片不在树上就
@@ -143,40 +126,20 @@ export function Reader() {
   const activeArticleKey = art?.id;
   useEffect(() => {
     if (!activeArticleKey) return;
-    if (body.state !== 'cleared' || body.content !== '') return;
+    if (body.state !== 'unrequested' && (body.state !== 'cleared' || body.content !== '')) return;
     useAppStore.getState().ensureArticleContent(activeArticleKey);
     // Note: exhaustive-deps — 只随「目标文章 × 失效条件」执行；body 快照其余字段
     // 变化（AI 增量等）不该重复触发（重复入队由记录状态守卫兜底）。
   }, [activeArticleKey, body.state, body.content]);
-  /* OPT-013 B3：打开文章即取后端权威校验状态（五态显示的数据源）——刷新/重进
-     阅读器后 stale（签名不匹配/缺失）与 partial（0 < completed < total）仍如实
-     呈现，partial 不被当完整缓存。失败静默（校验故障不改变显示，也不触发重烧）。 */
+  /* 可见目标的输入变化才惰性只读验签：正文/提取/配置改变立即停止沿用旧 complete。
+     校验不会触发生成；相同输入的 Reader/卡片共用在途与缓存。 */
   useEffect(() => {
     if (!art) return;
-    useAppStore.getState().refreshAiStatus(art.id);
-    // Note: exhaustive-deps — 只在切换目标文章时刷新一次；art 其余字段变化不重取。
+    useAppStore.getState().ensureAiStatus(art.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [art?.id]);
+  }, [art?.id, aiStatusInput]);
 
-  useEffect(() => {
-    if (!art || !hydrated) return;
-    const st = useAppStore.getState();
-    if (st.dataMode !== 'tauri') return;
-    const cfg = selectFeedConfig(st, art.feedId);
-    if (cfg.autoSummary && !body.aiSummary && !st.summarizingIds[art.id]) {
-      st.triggerReaderSummary({ silent: true });
-    }
-    if (
-      cfg.autoTranslate
-      && !body.translatedContent
-      && !st.isShowingTranslatedProse
-      && !st.translatingIds[art.id]
-      && !st.translating
-    ) {
-      st.toggleReaderTranslation({ silent: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [art?.id, hydrated, config.autoSummary, config.autoTranslate]);
+  useReaderAutomaticAi(art?.id, readerViewRef);
 
   /* 滚动到正文底部 → 标已读（markReadOnScrollBottom，实施方案 §3 已读行为②） */
   useEffect(() => {
@@ -201,10 +164,10 @@ export function Reader() {
   const handleProseClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     if (target.tagName === 'IMG') {
-      const src = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
-      if (src && !src.startsWith('data:')) {
+      const source = originalProseImage(target as HTMLImageElement);
+      if (source) {
         e.preventDefault();
-        openLightbox(src);
+        openLightbox(source.url, undefined, source.pageUrl ?? art?.url);
       }
       return;
     }
@@ -237,9 +200,10 @@ export function Reader() {
             </button>
             <button
               className="toggle-action-btn"
+              disabled={!hasOriginalUrl}
               onClick={() => {
                 if (!art.url) { showToast('该条目没有原文链接'); return; }
-                void openExternal(art.url).catch(() => showToast('打开失败'));
+                void openExternalWithFeedback(art.url);
               }}
               title="在浏览器中查看原文"
             >
@@ -269,7 +233,7 @@ export function Reader() {
                 {/* TASK-100：署名中文化（此前 `By {author}` 中英混杂，其余 UI 全中文） */}
                 {art.author && <span>作者：{art.author}</span>}
               {art.author && <span>·</span>}
-              <span>{formatRelativeTime(art.publishedAt)}</span>
+              <span className="reader-meta-time">{formatRelativeTime(art.publishedAt)}</span>
               {art.tags.length > 0 && (
                 <>
                   <span>·</span>
@@ -279,7 +243,7 @@ export function Reader() {
               {settings.showReadTime && readTime && (
                 <>
                   <span>·</span>
-                  <span>{readTime}</span>
+                  <span className="reader-meta-read-time">{readTime}</span>
                 </>
               )}
             </div>
@@ -328,16 +292,17 @@ export function Reader() {
                     </button>
                     <button
                       className="ai-retry-btn"
-                      title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                      title="删除本机保存的全部分段进度与整篇译文，之后重新生成从零开始"
                       onClick={() => void clearAiProduct(art.id, 'translation')}
                     >
                       清除
                     </button>
                   </>
                 ) : null}
-                {dataMode === 'tauri' && (
+                {dataMode === 'tauri' && !locallyMissingBody && (body.state === 'ready' || (body.state === 'cleared' && body.content !== '')) && (!body.fulltextExtracted || canSwitchFulltext) && (
                   <button
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
+                    disabled={body.extractingFulltext || libraryRestoreBusy}
                     onClick={toggleReaderFulltext}
                     title={
                       !body.fulltextExtracted
@@ -349,7 +314,7 @@ export function Reader() {
                   >
                     <Icons.doc />
                     <span>
-                      {!body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
+                      {body.extractingFulltext ? '正在提取…' : !body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
                     </span>
                   </button>
                 )}
@@ -407,8 +372,16 @@ export function Reader() {
               </div>
             )}
 
+            {body.fulltextError && (
+              <div className="ai-error-row" role="status">
+                <span className="ai-error-text">{body.fulltextError}</span>
+                {!locallyMissingBody && <button className="ai-retry-btn"
+                  disabled={body.extractingFulltext || libraryRestoreBusy} onClick={extractCurrentArticle}>重试</button>}
+              </div>
+            )}
+
             {/* 正文：源码/渲染/流式三条路径收口在 ReaderProse（F14/OPT-012）。
-                传参含义：renderHtml 走渲染态（含代理产物），sourceText 走源码态
+                传参含义：renderHtml 走净化渲染态（图片节点由租约管理），sourceText 走源码态
                 （原始文本，不经代理），isStreamingTranslation 走纯文本。 */}
             {!isShowingTranslatedProse
               && (body.state === 'loading' || body.state === 'failed' || body.state === 'missing' || body.state === 'unrequested') ? (
@@ -421,17 +394,27 @@ export function Reader() {
                   Note: 为何在调用点分支、译文与空正文的边界 — 见
                   .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md */
               body.state === 'failed' ? (
-                <button
-                  className="hydrate-retry"
-                  onClick={() => useAppStore.getState().retryHydration(art.id)}
-                >
-                  正文加载失败：{body.message}（点击重试）
-                </button>
+                <HydrateFailure
+                  message={body.message}
+                  onRetry={() => useAppStore.getState().retryHydration(art.id)}
+                />
               ) : body.state === 'missing' ? (
                 <span className="hydrate-placeholder">{body.message}</span>
               ) : (
                 <span className="hydrate-placeholder">加载正文…</span>
               )
+            ) : !isShowingTranslatedProse && locallyMissingBody ? (
+              <div className="hydrate-failure" role="group" aria-label="本机未保存正文" aria-busy={body.extractingFulltext}>
+                <span className="hydrate-placeholder">本机未保存正文</span>
+                {hasOriginalUrl && dataMode === 'tauri' ? (
+                  <button type="button" className="hydrate-retry"
+                    disabled={body.extractingFulltext || libraryRestoreBusy} onClick={extractCurrentArticle}>
+                    {body.extractingFulltext ? '正在获取…' : '从原网页重新获取'}
+                  </button>
+                ) : (
+                  <span className="hydrate-placeholder">没有可用的原文链接，无法重新获取</span>
+                )}
+              </div>
             ) : (
               <ReaderProse
                 renderHtml={renderHtml}
@@ -443,6 +426,9 @@ export function Reader() {
                   fontSize: settings.fontSize,
                   lineHeight: settings.lineHeight / 100,
                 }}
+                imagePageUrl={art.url}
+                imageOwner={`${libraryGeneration}:${art.id}:${body.contentRevision}`}
+                imagesEnabled={!libraryRestoreBusy}
                 onClick={handleProseClick}
               />
             )}
@@ -452,3 +438,7 @@ export function Reader() {
     </main>
   );
 }
+
+
+
+

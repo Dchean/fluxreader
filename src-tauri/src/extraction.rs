@@ -41,12 +41,58 @@ pub fn extract_article(html: &str, url: &str) -> AppResult<String> {
 /// 摘要型 RSS（如少数派）不带 media 字段，但文章页有 og:image 可用作封面。
 pub fn lead_image(html: &str, base: &str) -> Option<String> {
     let doc = Html::parse_document(html);
+    let metadata = Selector::parse("meta[property], meta[name]").expect("metadata selector");
     doc.select(&LEAD_IMAGE_SELECTORS).find_map(|el| {
         let raw = el
             .value()
             .attr("content")
             .or_else(|| el.value().attr("href"))?
             .trim();
+        let family = el
+            .value()
+            .attr("property")
+            .or_else(|| el.value().attr("name"))
+            .unwrap_or_default();
+        // OG/Twitter 的尺寸描述属于最近一次 image 声明；不能把后续候选的尺寸
+        // 错套给前一张图。只在显式尺寸时剔除小图，无尺寸依旧可用。
+        let mut width = None;
+        let mut height = None;
+        let mut seen = false;
+        if family.ends_with("image") {
+            for meta in doc.select(&metadata) {
+                if meta.id() == el.id() {
+                    seen = true;
+                    continue;
+                }
+                if !seen {
+                    continue;
+                }
+                let key = meta
+                    .value()
+                    .attr("property")
+                    .or_else(|| meta.value().attr("name"))
+                    .unwrap_or_default();
+                if key == family {
+                    break;
+                }
+                if key == format!("{family}:width") {
+                    width = meta
+                        .value()
+                        .attr("content")
+                        .and_then(|value| value.parse().ok());
+                }
+                if key == format!("{family}:height") {
+                    height = meta
+                        .value()
+                        .attr("content")
+                        .and_then(|value| value.parse().ok());
+                }
+            }
+        }
+        let roles = el.value().attr("class").unwrap_or_default();
+        if !crate::sanitize::cover_image_candidate(raw, width, height, roles) {
+            return None;
+        }
         resolve_http_url(raw, base)
     })
 }
@@ -85,6 +131,20 @@ pub fn degradation_reason(original_html: &str, extracted_html: &str) -> Option<&
 #[cfg(test)]
 mod tests {
     use super::{degradation_reason, lead_image};
+
+    #[test]
+    fn lead_image_skips_sized_pixel_without_rejecting_unknown_size_normal_cover() {
+        let html = r#"<meta property="og:image" content="tiny.jpg"><meta property="og:image:width" content="1"><meta property="og:image:height" content="1"><meta property="og:image" content="news.jpg">"#;
+        assert_eq!(
+            lead_image(html, "https://example.com/article").as_deref(),
+            Some("https://example.com/news.jpg")
+        );
+        let html = r#"<meta property="og:image" content="small.jpg"><meta property="og:image:width" content="48"><meta property="og:image:height" content="48"><meta name="twitter:image" content="large.jpg">"#;
+        assert_eq!(
+            lead_image(html, "https://example.com/article").as_deref(),
+            Some("https://example.com/large.jpg")
+        );
+    }
 
     #[test]
     fn lead_image_reads_og_image() {

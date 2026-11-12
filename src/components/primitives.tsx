@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from './icons';
 import { useFocusTrap } from './useFocusTrap';
@@ -16,18 +16,24 @@ export interface DropdownOption {
   icon?: ReactNode;
 }
 
+/** 设置卡片标题向内部原生控件提供稳定名称；控件自己的 ariaLabel 优先。 */
+const SettingCardLabelContext = createContext<string | null>(null);
+
 interface FluxDropdownProps {
   options: DropdownOption[];
   value: string;
   onChange: (value: string) => void;
   width?: number | string;
+  ariaLabel?: string;
 }
 
-export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDropdownProps) {
+export function FluxDropdown({ options, value, onChange, width = 160, ariaLabel }: FluxDropdownProps) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const triggerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+  const settingLabel = useContext(SettingCardLabelContext);
   /* 键盘高亮项：与选中项分开——方向键移动高亮，Enter 才提交（与原生 select 一致） */
   const [activeIndex, setActiveIndex] = useState(-1);
 
@@ -78,15 +84,21 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
       e.stopPropagation();
       setOpen(false);
     };
+    const onFocus = (e: FocusEvent) => {
+      const target = e.target as Node;
+      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
+    };
     const onReflow = () => updatePosition();
     window.addEventListener('click', onDocClick, true);
     document.addEventListener('keydown', onEsc, true);
+    document.addEventListener('focusin', onFocus);
     /* capture: 捕获弹窗内部滚动容器的滚动（settings-content-pane 等），菜单实时跟随 */
     window.addEventListener('scroll', onReflow, true);
     window.addEventListener('resize', onReflow);
     return () => {
       window.removeEventListener('click', onDocClick, true);
       document.removeEventListener('keydown', onEsc, true);
+      document.removeEventListener('focusin', onFocus);
       window.removeEventListener('scroll', onReflow, true);
       window.removeEventListener('resize', onReflow);
     };
@@ -94,10 +106,25 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
 
   const current = options.find((o) => o.value === value) ?? options[0];
   const selectedIndex = Math.max(0, options.findIndex((o) => o.value === current?.value));
+  const activeOptionId = open && activeIndex >= 0 && activeIndex < options.length
+    ? `${menuId}-option-${activeIndex}` : undefined;
+  useEffect(() => {
+    if (!activeOptionId) return;
+    document.getElementById(activeOptionId)?.scrollIntoView({ block: 'nearest' });
+  }, [activeOptionId]);
 
   /* 键盘：触发器上用方向键/Enter/Space 打开；打开后用方向键移动高亮、Enter 提交、
      Esc 关闭（Esc 已由上面的 document 捕获处理）。全部动作与鼠标点击等价。 */
   const onTriggerKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Tab') {
+      setOpen(false);
+      return;
+    }
+    if (open && (e.key === 'Home' || e.key === 'End')) {
+      e.preventDefault();
+      setActiveIndex(e.key === 'Home' ? 0 : options.length - 1);
+      return;
+    }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       /* 空选项列表：不打开、不移动（否则下面的取模会得到 NaN）。 */
@@ -129,7 +156,9 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
         tabIndex={0}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={current?.label}
+        aria-controls={open ? menuId : undefined}
+        aria-activedescendant={activeOptionId}
+        aria-label={ariaLabel ?? settingLabel ?? current?.label}
         onKeyDown={onTriggerKeyDown}
         onClick={() => setOpen((v) => {
           if (!v) setActiveIndex(selectedIndex);
@@ -141,14 +170,16 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
       </div>
       {open &&
         createPortal(
-          <div className="flux-dropdown-menu" style={menuStyle} ref={menuRef} role="listbox">
+          <div id={menuId} className="flux-dropdown-menu" style={menuStyle} ref={menuRef} role="listbox" aria-label={ariaLabel ?? settingLabel ?? current?.label}>
             {options.map((opt, i) => (
               <div
                 key={opt.value}
+                id={`${menuId}-option-${i}`}
                 className={`flux-dropdown-option ${opt.value === value ? 'active' : ''} ${i === activeIndex ? 'kb-active' : ''}`}
                 role="option"
                 aria-selected={opt.value === value}
                 onMouseEnter={() => setActiveIndex(i)}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   onChange(opt.value);
                   setOpen(false);
@@ -176,6 +207,8 @@ interface SwitchProps {
   checked: boolean;
   onChange: (val: boolean) => void;
   id?: string;
+  /** 无可见 label 包裹时（如设置卡片右列）使用的稳定名称。 */
+  ariaLabel?: string;
   /** 紧凑档：定宽密集控制列用 32×18，常规档为 40×22 */
   compact?: boolean;
 }
@@ -185,14 +218,17 @@ function SwitchTrack({
   checked,
   onChange,
   id,
+  ariaLabel,
   compact,
   Container,
 }: SwitchProps & { Container: 'label' | 'span' }) {
+  const settingLabel = useContext(SettingCardLabelContext);
   return (
     <Container className={compact ? 'switch-control compact' : 'switch-control'}>
       <input
         type="checkbox"
         id={id}
+        aria-label={ariaLabel ?? settingLabel ?? undefined}
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
@@ -202,18 +238,18 @@ function SwitchTrack({
 }
 
 /** 独立开关：自带 label，整块可点（设置卡片右侧） */
-export function Switch({ checked, onChange, id, compact }: SwitchProps) {
+export function Switch({ checked, onChange, id, ariaLabel, compact }: SwitchProps) {
   return (
-    <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="label" />
+    <SwitchTrack checked={checked} onChange={onChange} id={id} ariaLabel={ariaLabel} compact={compact} Container="label" />
   );
 }
 
 /** 行内开关：不渲染自身 label，供外层 label 包裹。
  *  嵌套 label 是无效 HTML，且点文字会双触发；用非 label 容器后，
  *  外层 label 的文字与开关共用一次点击语义。 */
-export function SwitchInline({ checked, onChange, id, compact }: SwitchProps) {
+export function SwitchInline({ checked, onChange, id, ariaLabel, compact }: SwitchProps) {
   return (
-    <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="span" />
+    <SwitchTrack checked={checked} onChange={onChange} id={id} ariaLabel={ariaLabel} compact={compact} Container="span" />
   );
 }
 
@@ -228,21 +264,25 @@ interface AiModeSelectProps {
   mode: FeedAiMode;
   /** 所属分类的布尔默认（仅用于「继承（开/关）」标签回显） */
   categoryOn: boolean;
+  /** 组可能包含不同布局，继承提示不能伪造统一的开/关结果。 */
+  inheritLabel?: string;
   onChange: (mode: FeedAiMode) => void;
   /** 悬停说明（如「关闭只阻止尚未发起的自动请求」） */
   title?: string;
   width?: number | string;
+  ariaLabel?: string;
 }
 
-export function AiModeSelect({ mode, categoryOn, onChange, title, width = 96 }: AiModeSelectProps) {
+export function AiModeSelect({ mode, categoryOn, inheritLabel, onChange, title, width = 96, ariaLabel }: AiModeSelectProps) {
   return (
     <span className="ai-mode-select" title={title}>
       <FluxDropdown
         width={width}
         value={mode}
+        ariaLabel={ariaLabel}
         onChange={(v) => onChange(v as FeedAiMode)}
         options={[
-          { value: 'inherit', label: `继承（${categoryOn ? '开' : '关'}）` },
+          { value: 'inherit', label: inheritLabel ?? `继承（${categoryOn ? '开' : '关'}）` },
           { value: 'on', label: '开启' },
           { value: 'off', label: '关闭' },
         ]}
@@ -262,14 +302,17 @@ interface SettingCardProps {
 }
 
 export function SettingCard({ title, desc, children }: SettingCardProps) {
+  const titleId = useId();
   return (
-    <div className="setting-card">
+    <div className="setting-card" role="group" aria-labelledby={titleId}>
       {/* 左列文字允许收缩（min-width:0 在 CSS），控件列 flex-shrink:0 —— 窄窗口下文字不再被压到一字一行 */}
       <div className="setting-card-text">
-        <h5>{title}</h5>
+        <h5 id={titleId}>{title}</h5>
         {desc && <p>{desc}</p>}
       </div>
-      {children}
+      <SettingCardLabelContext.Provider value={title}>
+        {children}
+      </SettingCardLabelContext.Provider>
     </div>
   );
 }
@@ -355,17 +398,9 @@ interface ModalOverlayProps {
 }
 
 export function ModalOverlay({ open, onClose, children, contentWidth, ariaLabel }: ModalOverlayProps) {
-  /* TASK-100 B（UI P2-7 最小实现）：打开时把焦点移入弹窗容器（tabIndex=-1），
-     关闭时归还触发元素焦点。此前打开态焦点仍留在触发控件上，Tab 可从弹窗
-     游走到背后三栏内容（REQ-047 只管了关闭态 inert），关闭后焦点落回 body。
-     注意：children 自带 autoFocus 的输入框（搜索框、改名输入框等）优先——
-     React 在提交时先应用子组件的 autoFocus，effect 运行时若焦点已在弹窗内
-     则不再抢占。 */
-  /* TASK-100 B（UI P2-7）：打开时焦点移入弹窗容器、关闭时归还触发元素——
-     children 自带 autoFocus 的输入框（搜索框、改名输入框等）优先（effect 运行时
-     焦点已在弹窗内则不抢占）。2026-11-01 升级为共享 useFocusTrap：同一契约由
-     ConfirmDialog / PlayerFullOverlay / Lightbox 复用，并补 Tab 循环——焦点
-     不再从打开的弹窗穿透到被覆盖的三栏内容（见 useFocusTrap 头注 Note）。 */
+  /* 共享 hook 先保存外部焦点，再聚焦 data-modal-autofocus 控件或容器；
+     与 ConfirmDialog / PlayerFullOverlay / Lightbox 共用 Tab 循环和嵌套还焦。
+     不能让子输入的 React autoFocus 先于触发点捕获（见 useFocusTrap 头注 Note）。 */
   const cardRef = useRef<HTMLDivElement>(null);
   const { onTrapKeyDown } = useFocusTrap(open, cardRef);
   return (

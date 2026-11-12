@@ -60,6 +60,7 @@
      2026-11-02-五调色盘WCAG全量收敛落地.md */
   --text-tertiary: #8891a1;
   --accent: #4880c8;
+  --nav-selected-bg: #3b69a4;
   --accent-light: #6a9ee2;
   --accent-glow: rgba(72, 128, 200, 0.22);
   --accent-subtle: rgba(72, 128, 200, 0.15);
@@ -104,6 +105,7 @@
   --text-secondary: #a497b8;
   --text-tertiary: #958ba7;
   --accent: #7873b8;
+  --nav-selected-bg: #625e97;
   --accent-light: #9893dc;
   --accent-glow: rgba(120, 115, 184, 0.22);
   --accent-subtle: rgba(120, 115, 184, 0.15);
@@ -126,6 +128,7 @@
   --text-secondary: #95ad9e;
   --text-tertiary: #7f9d87;
   --accent: #419e79;
+  --nav-selected-bg: #358263;
   --accent-light: #5dbda7;
   --accent-glow: rgba(65, 158, 121, 0.22);
   --accent-subtle: rgba(65, 158, 121, 0.15);
@@ -148,6 +151,7 @@
   --text-secondary: #bda199;
   --text-tertiary: #a48b82;
   --accent: #c46d54;
+  --nav-selected-bg: #a15945;
   --accent-light: #dc8972;
   --accent-glow: rgba(196, 109, 84, 0.22);
   --accent-subtle: rgba(196, 109, 84, 0.15);

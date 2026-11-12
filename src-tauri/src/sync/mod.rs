@@ -29,6 +29,16 @@
 
 use serde::Serialize;
 
+/// Internal per-attempt authority data, never a cross-round state cache.
+/// Content may reuse IDs for discovery only. A failed field is not re-requested
+/// by the same attempt's final state pass; successful fields are read fresh.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct AuthoritySnapshot {
+    pub unread: Option<Vec<i64>>,
+    pub starred: Option<Vec<i64>>,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
     pub pushed_states: usize,
@@ -53,10 +63,43 @@ pub struct SyncReport {
     /// 消费点只有事件判定，多出的字段会成为无人消费的 API 面）。
     #[serde(skip)]
     pub entries_data_changed: bool,
+    /// 已有远端源元数据实际改变；不增加 pulled_feeds 的新增计数。
+    #[serde(skip)]
+    pub feeds_data_changed: bool,
     /// 本轮条目页遇到尚无本地 feed 绑定的远端 feed。内部信号：states 阶段可
     /// 在只读订阅发现后重试一次；不属于对外 report schema。
     #[serde(skip)]
     pub binding_incomplete: bool,
+    /// The content pass was refused before HTTP by persistent source admission.
+    /// This is not a newly discovered feed and must not bypass discovery throttling.
+    #[serde(skip)]
+    pub pull_admission_blocked: bool,
+    /// Complete content rounds retain their time cursor if the state phase failed.
+    #[serde(skip)]
+    pub states_incomplete: bool,
+    /// Content window completed, but its time cursor is committed only after
+    /// the complete round's final state read. Page/history checkpoints are separate.
+    #[serde(skip)]
+    pub content_cursor_candidate: Option<i64>,
+    /// Only identities first created and committed by this round's feed import.
+    /// These receipts may extend a later content pass's source baseline, never
+    /// replace an already-captured lifecycle. They are not part of the IPC schema.
+    #[serde(skip)]
+    pub discovered_sources: std::collections::HashMap<i64, (String, i64)>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub authority_snapshot: Option<std::sync::Arc<AuthoritySnapshot>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub unverified_state_ids: std::collections::BTreeSet<i64>,
+    /// Content IDs already requested in this attempt; cold proof never retries
+    /// the same failed body request under a different collection name.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub content_requested_ids: std::collections::HashSet<i64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub origin_proof_requested_ids: std::collections::HashSet<i64>,
     /// 本轮出现**认证类失败**（greader/fever 的 401/403 状态码错误与 Fever
     /// api_key 失败——错误构造点的结构化标记，经各捕获点 [`SyncReport::note_client_error`]
     /// 汇入）。会话缓存回落（`report_has_auth_failure`）的判定输入，取代曾经的
@@ -64,9 +107,89 @@ pub struct SyncReport {
     /// `serde(skip)`：内部信号，不属于对外 report schema（同上两字段的选型）。
     #[serde(skip)]
     pub auth_failure: bool,
+    /// 仅由 AppError 的认证标记登记；errors 保持追加，合并时平移索引。
+    /// 原始 DB/协议错误直接追加时默认非认证，不靠消息内容推断。
+    #[serde(skip)]
+    pub auth_error_indices: Vec<usize>,
 }
 
 impl SyncReport {
+    pub fn absorb(&mut self, other: Self) {
+        let error_offset = self.errors.len();
+        self.pushed_states += other.pushed_states;
+        self.pushed_feeds += other.pushed_feeds;
+        self.pulled_feeds += other.pulled_feeds;
+        self.pulled_entries += other.pulled_entries;
+        self.merged_states += other.merged_states;
+        self.removed_feeds += other.removed_feeds;
+        self.entries_data_changed |= other.entries_data_changed;
+        self.feeds_data_changed |= other.feeds_data_changed;
+        self.binding_incomplete |= other.binding_incomplete;
+        self.pull_admission_blocked |= other.pull_admission_blocked;
+        self.states_incomplete |= other.states_incomplete;
+        self.content_cursor_candidate = other
+            .content_cursor_candidate
+            .or(self.content_cursor_candidate);
+        for (id, token) in other.discovered_sources {
+            self.discovered_sources.entry(id).or_insert(token);
+        }
+        if other.authority_snapshot.is_some() {
+            self.authority_snapshot = other.authority_snapshot;
+        }
+        self.unverified_state_ids.extend(other.unverified_state_ids);
+        self.content_requested_ids
+            .extend(other.content_requested_ids);
+        self.origin_proof_requested_ids
+            .extend(other.origin_proof_requested_ids);
+        self.auth_failure |= other.auth_failure;
+        self.auth_error_indices.extend(
+            other
+                .auth_error_indices
+                .into_iter()
+                .map(|index| error_offset + index),
+        );
+        self.errors.extend(other.errors);
+    }
+
+    /// 重试保留已提交变化与非认证故障事实；已恢复的认证失败不再报最终故障。
+    /// 历史消息明确引用当时状态，不能把已确认队项描述为当前仍在等待。
+    fn preserve_changes_from(&mut self, earlier: &Self) {
+        self.pushed_states += earlier.pushed_states;
+        self.pushed_feeds += earlier.pushed_feeds;
+        self.pulled_feeds += earlier.pulled_feeds;
+        self.pulled_entries += earlier.pulled_entries;
+        self.merged_states += earlier.merged_states;
+        self.removed_feeds += earlier.removed_feeds;
+        self.entries_data_changed |= earlier.entries_data_changed;
+        self.feeds_data_changed |= earlier.feeds_data_changed;
+        let retry_succeeded = self.errors.is_empty();
+        for (index, message) in earlier.errors.iter().enumerate() {
+            if earlier.auth_error_indices.contains(&index) {
+                continue;
+            }
+            self.errors.push(format!(
+                "重认证前曾发生：「{message}」（{}）",
+                if retry_succeeded {
+                    "后续阶段重试已完成；引号内为当时状态"
+                } else {
+                    "后续已重试，仍有错误；引号内为当时状态"
+                },
+            ));
+        }
+    }
+
+    /// 原子登记同一条客户端错误及分类；note_client_error 仅保留检测兼容用途。
+    fn push_client_error(&mut self, err: &crate::error::AppError, message: String) {
+        self.push_classified_error(message, err.is_auth_failure());
+    }
+
+    fn push_classified_error(&mut self, message: String, is_auth: bool) {
+        if is_auth {
+            self.auth_failure = true;
+            self.auth_error_indices.push(self.errors.len());
+        }
+        self.errors.push(message);
+    }
     /// 客户端错误进报告前的标记登记：错误文案仍由调用方照旧拼接进 `errors`
     /// （IPC 面逐字不变），仅当错误携带认证失败标记（`AppError::auth` /
     /// `auth_if`）时置位 `auth_failure`。各 HTTP 捕获点在 push 进 errors 前调用；
@@ -89,7 +212,8 @@ impl SyncReport {
     ///   （`greader_pull.rs` / `fever_pull.rs` 的 reconcile——真实变化）。
     ///   订阅发现只产生真实的 `pulled_feeds`/`removed_feeds`；既有源匹配不再
     ///   伪造计数，绑定写错误进入 report 而不是被吞掉；
-    /// - `pulled_feeds` / `removed_feeds`：订阅层增删。
+    /// - `pulled_feeds` / `removed_feeds`：订阅层增删；`feeds_data_changed`
+    ///   表达已有源 URL/站点元数据实际更新，不伪造新增计数。
     ///
     /// 明确**不**包含：`pulled_entries`（旧口径计数——守卫通过但值未变的条目
     /// 也计数，不能冒充语义变化）、`pushed_states` / `pushed_feeds`（本地变更
@@ -98,6 +222,7 @@ impl SyncReport {
     /// `false` 返回是这一契约的单点实现，供 scheduler 与测试共用。
     pub fn has_data_change(&self) -> bool {
         self.entries_data_changed
+            || self.feeds_data_changed
             || self.merged_states > 0
             || self.pulled_feeds > 0
             || self.removed_feeds > 0
@@ -107,6 +232,65 @@ impl SyncReport {
 #[cfg(test)]
 mod report_change_tests {
     use super::*;
+
+    #[test]
+    fn retry_keeps_raw_and_same_text_non_auth_errors_with_absorb_offsets() {
+        let auth = crate::error::AppError::new("auth", "same message").auth();
+        let non_auth = crate::error::AppError::new("db", "same message");
+        let mut earlier = SyncReport {
+            pushed_states: 2,
+            entries_data_changed: true,
+            ..Default::default()
+        };
+        earlier.errors.push("raw SQL diagnostic".into());
+        earlier.push_client_error(&auth, "identical diagnostic".into());
+        earlier.push_client_error(&non_auth, "identical diagnostic".into());
+        let mut absorbed = SyncReport::default();
+        absorbed.errors.push("raw before absorb".into());
+        absorbed.absorb(earlier);
+        assert_eq!(absorbed.auth_error_indices, vec![2]);
+        absorbed.errors.push("raw after absorb".into());
+        let mut retry = SyncReport {
+            pushed_states: 3,
+            ..Default::default()
+        };
+        retry.preserve_changes_from(&absorbed);
+        assert_eq!(retry.pushed_states, 5);
+        assert!(retry.has_data_change());
+        assert!(!retry.auth_failure);
+        assert_eq!(
+            retry.errors.len(),
+            4,
+            "only the typed auth entry is removed"
+        );
+        assert_eq!(
+            retry
+                .errors
+                .iter()
+                .filter(|message| message.contains("identical diagnostic"))
+                .count(),
+            1
+        );
+        assert!(retry
+            .errors
+            .iter()
+            .all(|message| message.contains("后续阶段重试已完成")));
+    }
+
+    #[test]
+    fn retry_retains_all_non_auth_facts_even_when_messages_repeat() {
+        let mut earlier = SyncReport::default();
+        earlier.errors.extend(["repeat".into(), "repeat".into()]);
+        let auth = crate::error::AppError::new("auth", "authentication failed").auth();
+        let mut retry = SyncReport::default();
+        retry.push_client_error(&auth, "retry auth failed".into());
+        retry.preserve_changes_from(&earlier);
+        assert_eq!(retry.auth_error_indices, vec![0]);
+        assert_eq!(retry.errors.len(), 3);
+        assert!(retry.errors[1..]
+            .iter()
+            .all(|message| message.contains("后续已重试，仍有错误")));
+    }
 
     /// OPT-007（F11）/ R3+R4+R5 判别力：
     /// - 条目层实际变化（标记）与订阅层增删必须算数据变化；
@@ -204,8 +388,12 @@ mod fever_pull;
 mod greader_pull;
 mod phases;
 mod push;
+pub mod runtime;
 mod session;
 mod subscriptions;
+
+#[cfg(test)]
+mod state_lane_tests;
 
 pub use credentials::*;
 pub use phases::*;

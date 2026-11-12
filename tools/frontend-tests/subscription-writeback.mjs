@@ -38,26 +38,26 @@ export async function run(ctx) {
     && subscriptionWriteSummary(st({}), 'fever') === ''
     && subscriptionWriteSummary(st({}), null) === '');
 
-  checkNew('(opt009b3-sum-2) pending → 「订阅写回：等待 N 项」',
-    subscriptionWriteSummary(st({ pending: 2 }), 'greader') === '订阅写回：等待 2 项');
+  checkNew('(opt009b3-sum-2) pending → 「订阅写回：订阅变更待推送 N 项」',
+    subscriptionWriteSummary(st({ pending: 2 }), 'greader') === '订阅写回：订阅变更待推送 2 项');
 
-  checkNew('(opt009b3-sum-3) failed（pending 子集）→ 部分失败 + 最近错误；错误按码点截断 60 字符（不劈代理对）',
+  checkNew('(opt009b3-sum-3) failed（pending 子集）→ 失败子计数 + 最近错误；错误按码点截断 60 字符（不劈代理对）',
     subscriptionWriteSummary(st({ pending: 2, failed: 1, last_error: '订阅编辑 https://x 推送失败: HTTP 500' }), 'greader')
-      === '订阅写回：等待 2 项，其中 1 项失败（订阅编辑 https://x 推送失败: HTTP 500）'
+      === '订阅写回：订阅变更待推送 2 项，其中 1 项失败（订阅编辑 https://x 推送失败: HTTP 500）'
     && subscriptionWriteSummary(st({ pending: 1, failed: 1, last_error: '错'.repeat(80) }), 'greader')
-      === `订阅写回：等待 1 项，其中 1 项失败（${'错'.repeat(60)}…）`
+      === `订阅写回：订阅变更待推送 1 项，其中 1 项失败（${'错'.repeat(60)}…）`
     && subscriptionWriteSummary(st({ pending: 1, failed: 1 }), 'greader')
-      === '订阅写回：等待 1 项，其中 1 项失败');
+      === '订阅写回：订阅变更待推送 1 项，其中 1 项失败');
 
   checkNew('(opt009b3-sum-4) local_only → 必须如实「仅本地生效」且点名协议（Fever ≠ 已同步；不得写成成功也不得隐藏）',
     subscriptionWriteSummary(st({ local_only: 3 }), 'fever')
-      === '订阅写回：3 项仅本地生效（Fever 协议不支持远端写回）'
+      === '订阅写回：3 项仅本地生效（Fever 不支持订阅写回）'
     && subscriptionWriteSummary(st({ local_only: 1 }), null)
-      === '订阅写回：1 项仅本地生效（当前协议不支持远端写回）');
+      === '订阅写回：1 项仅本地生效（当前协议不支持订阅写回）');
 
   checkNew('(opt009b3-sum-5) 组合输入（pending + local_only）两段并存，不互相吞并',
     subscriptionWriteSummary(st({ pending: 1, failed: 1, local_only: 2, last_error: '网络失败' }), 'fever')
-      === '订阅写回：等待 1 项，其中 1 项失败（网络失败）；2 项仅本地生效（Fever 协议不支持远端写回）');
+      === '订阅写回：订阅变更待推送 1 项，其中 1 项失败（网络失败）；2 项仅本地生效（Fever 不支持订阅写回）');
 
   /* ============================================================
      B：能力矩阵逐动作投影（Fever 行必须全部可见「仅本地」）
@@ -141,7 +141,7 @@ export async function run(ctx) {
     /* 摘要随事件渲染 */
     checkNew('(opt009b3-store-2) 事件载荷 → 摘要行（Fever：等待 + 仅本地两段并存）',
       subscriptionWriteSummary(s1.subOutboxStats, 'fever')
-        === '订阅写回：等待 2 项，其中 1 项失败（订阅推送失败: HTTP 500）；3 项仅本地生效（Fever 协议不支持远端写回）');
+        === '订阅写回：订阅变更待推送 2 项，其中 1 项失败（订阅推送失败: HTTP 500）；3 项仅本地生效（Fever 不支持订阅写回）');
 
     /* D-2：挂载/手动刷新走真实 IPC 读回（成功路径） */
     be.stats = { pending: 5, failed: 0, local_only: 0, last_error: null };

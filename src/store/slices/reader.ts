@@ -1,8 +1,10 @@
 import type { StateCreator } from 'zustand';
-import { api, extractError } from '../../lib/api';
-import { applyBodyRow, applyExtractedFulltext, dropBodyEntry, getBodyEntry, markBodyFailed, markBodyLoading, markBodyMissing } from '../bodyCache';
+import { api, articleRowToEntry, extractError } from '../../lib/api';
+import { isHttpUrl } from '../../lib/external';
+import { applyBodyRow, applyExtractedFulltext, beginFulltextReadback, beginFulltextRequest, dropBodyEntry, finishFulltextReadback, finishFulltextRequest, getBodyEntry, isFulltextTargetCurrent, markBodyFailed, markBodyLoading, markBodyMissing, reconcileFulltextTargetRow } from '../bodyCache';
+import type { FulltextRequest, FulltextTarget } from '../bodyCache';
 import type { EntryRollbackClaim } from '../internals';
-import { appStore, applyReadReceipt, asReadReceipts, beginEntryFieldWrite, beginLocalFlagWrite, currentLocalFlagWriteSerial, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, rollbackEntryClaims, scheduleCountsReconcile, syncCurrentViewCache } from '../internals';
+import { appStore, applyReadReceipt, asReadReceipts, beginEntryFieldWrite, beginLocalFlagWrite, currentLocalFlagWriteSerial, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, scheduleCountsReconcile, syncCurrentViewCache, trackEntryFlagWrite } from '../internals';
 import type { AppState } from '../types';
 
 /** 阅读器 slice：选中文章、正文水合（懒加载 + 批量合批）与卡片就地标读/收藏。
@@ -18,6 +20,7 @@ export type ReaderSlice = Pick<
   | 'bodyCacheNonce'
   | 'openedReadIds'
   | 'selectArticle'
+  | 'markEntryOpened'
   | 'ensureArticleContent'
   | 'retryHydration'
   | 'hydrateArticleContent'
@@ -38,9 +41,13 @@ export type ReaderSlice = Pick<
    几秒 + 切换卡顿」的根因。这里把同一帧内的请求合批：微任务 flush 成一次
    get_articles IPC + 一次 set。 */
 let hydrationQueue: Set<string> | null = null;
+let hydrationQueueGeneration = -1;
 let hydrationFlushScheduled = false;
 
 function enqueueHydration(id: string) {
+  const generation = appStore().getState().libraryGeneration;
+  if (hydrationQueueGeneration !== generation) hydrationQueue = null;
+  hydrationQueueGeneration = generation;
   if (!hydrationQueue) hydrationQueue = new Set();
   hydrationQueue.add(id);
   if (hydrationFlushScheduled) return;
@@ -49,9 +56,12 @@ function enqueueHydration(id: string) {
   Promise.resolve().then(() => {
     hydrationFlushScheduled = false;
     const q = hydrationQueue;
+    const queuedGeneration = hydrationQueueGeneration;
     hydrationQueue = null;
     if (!q || q.size === 0) return;
-    appStore().getState().hydrateArticleContent(Array.from(q));
+    const state = appStore().getState();
+    if (state.libraryGeneration !== queuedGeneration) return;
+    state.hydrateArticleContent(Array.from(q));
   });
 }
 
@@ -76,77 +86,210 @@ function shouldExtractFulltext(html: string): boolean {
   return truncationMarks.test(text);
 }
 
-/** OPT-008B R3：提取成功响应携带的提交后 (contentId, contentRevision)——
-    applyExtractedFulltext 落记录使下一次 reload 的修订比较相等，刚提取的正文
-    不被清空重取。旧后端/降级响应缺省时返回 undefined（保持记录现值）。 */
-function extractIdentity(res: { contentId?: number | null; contentRevision?: number }): { contentId: number | null; contentRev: number } | undefined {
-  if (typeof res.contentRevision !== 'number' || !Number.isFinite(res.contentRevision)) return undefined;
-  return { contentId: typeof res.contentId === 'number' ? res.contentId : null, contentRev: res.contentRevision };
+/** 只有当前后端受检提交返回的真实身份可以结束恢复；缺回执不冒充成功。 */
+function extractIdentity(res: { contentId?: number | null; contentRevision?: number }): { contentId: number; contentRev: number } | undefined {
+  if (typeof res.contentId !== 'number' || !Number.isSafeInteger(res.contentId) || res.contentId <= 0
+    || typeof res.contentRevision !== 'number' || !Number.isSafeInteger(res.contentRevision) || res.contentRevision < 0) return undefined;
+  return { contentId: res.contentId, contentRev: res.contentRevision };
 }
 
 export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (set, get) => {
+  /** 正文stamp只保护缓存落地；恢复后连提示、重试闭包及嵌套请求也必须失效。
+   * 同库切篇不换代，失败restore也不换代，原离屏重试语义保持。
+   * Note: SUI-A1 — 见 .agents/notes/implemented/architecture/2026-11-09-本地同步与便携恢复界面边界.md */
+  const libraryCallbacks = () => {
+    const generation = get().libraryGeneration;
+    return <Args extends unknown[]>(callback: (...args: Args) => void) => (...args: Args): void => {
+      if (get().libraryGeneration === generation) callback(...args);
+    };
+  };
   /* Note: 正文重试只认失败文章 id；allowDetached 允许视图外/已切走的目标继续走 by-id 详情链 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md */
   const retryArticleContentFor = (id: string): void => {
     get().ensureArticleContent(id, { extractFulltext: true, allowDetached: true });
   };
   const showArticleContentRetry = (id: string, message: string): void => {
+    const inLibrary = libraryCallbacks();
     get().showToast(message, {
       label: '重试',
       key: `reader:content:${id}`,
-      run: () => retryArticleContentFor(id),
+      run: inLibrary(() => retryArticleContentFor(id)),
     });
+  };
+
+  /** 命令归属之外的共同目标资格。列表CID/rev/标题可能仍是旧快照，正文对与锚
+   * 只读实体；已接受轻位置/详情的变化由统一通知永久撤销，URL再补看当前轻行。 */
+  const fulltextTargetStatus = (id: string, ticket: FulltextRequest): 'current' | 'unknown' | 'stale' => {
+    if (ticket.retired || ticket.target.revoked) return 'stale';
+    const entry = get().entries.find(item => item.id === id);
+    if (entry?.unavailable || (entry?.url !== undefined && entry.url !== ticket.target.url)) {
+      ticket.target.revoked = true;
+      return 'stale';
+    }
+    const current = getBodyEntry(id);
+    if (!current) return 'unknown';
+    if (!isFulltextTargetCurrent(current, ticket)) {
+      ticket.target.revoked = true;
+      return 'stale';
+    }
+    return 'current';
   };
 
   // Note: 全文重试只使用失败时文章 id，不得回读 activeArticleId — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
   const extractFulltextFor = (
     id: string,
-    opts?: { announce?: boolean; allowDetached?: boolean },
+    opts?: { announce?: boolean; allowDetached?: boolean; url?: string },
   ): void => {
     const { entries, dataMode } = get();
-    if (dataMode !== 'tauri') return;
+    if (dataMode !== 'tauri' || get().libraryRestoreBusy) return;
     const art = entries.find((a) => a.id === id);
-    if (!art && !opts?.allowDetached) {
+    if (art?.unavailable || (!art && !opts?.allowDetached)) {
       if (opts?.announce) get().showToast('全文提取重试目标已失效，未执行');
       return;
     }
     const rec = getBodyEntry(id);
-    if (!rec && !opts?.allowDetached) {
-      get().ensureArticleContent(id, { extractFulltext: true });
+    if (!rec) {
+      get().ensureArticleContent(id, { extractFulltext: true, allowDetached: opts?.allowDetached });
       return;
     }
-    if (!opts?.allowDetached && !art?.url) {
-      get().showToast('该条目没有原文链接');
+    if (rec.state === 'missing') return;
+    const url = art ? art.url : opts?.url;
+    if (!url || !isHttpUrl(url)) {
+      if (opts?.announce) get().showToast('该条目没有可用的原文链接');
       return;
     }
+    const request = beginFulltextRequest(id, url);
+    if (!request) return;
+    const recovering = rec.state === 'ready' && !rec.content.trim();
     if (opts?.announce) {
-      get().showToast(rec?.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
+      get().showToast(recovering ? '正在从原网页获取…' : rec.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
     }
+    const inLibrary = libraryCallbacks();
+    // Note: 缺正文恢复与普通提取共用文章、正文戳、请求归属和资料库代次守卫 — 见 .agents/notes/implemented/architecture/2026-10-06-正文与-AI-产物的实体缓存.md
+    const isCurrent = () => {
+      const current = getBodyEntry(id);
+      return !get().libraryRestoreBusy && current?.fulltextRequest === request
+        && fulltextTargetStatus(id, request) === 'current';
+    };
+    // LRU 淘汰只丢缓存，不证明内容已更新。错误中心保留的轻身份可按原 ID
+    // 重新核对；不保留正文副本/无界墓碑，也不借详情水合触发自动全文或标读。
+    const readEvictedTarget = (target: FulltextTarget): void => {
+      if (target.revoked || get().libraryRestoreBusy || getBodyEntry(id)) return;
+      const stamp = markBodyLoading(id);
+      const verification = beginFulltextReadback(id, target);
+      if (!verification) return;
+      let retryPending = false;
+      // 普通详情可以在同一 stamp 上先完成：stamp 只判失效，不是本请求的
+      // 独占归属。缓存写入总是换记录对象，成功/失败/旧重试都须保留此归属。
+      const loadingOwner = getBodyEntry(id);
+      const reportReadFailure = (message: string, missing = false) => {
+        if (fulltextTargetStatus(id, verification) === 'stale') return;
+        const current = getBodyEntry(id);
+        if (current && current !== loadingOwner) return;
+        if (current) {
+          if (missing) markBodyMissing(id, stamp);
+          else markBodyFailed(id, stamp, message);
+        }
+        const failureOwner = getBodyEntry(id);
+        retryPending = true;
+        get().showToast(message, { label: '重试', key: `reader:fulltext:${id}`, run: inLibrary(() => {
+          if (fulltextTargetStatus(id, verification) === 'stale' || get().libraryRestoreBusy) return;
+          const latest = getBodyEntry(id);
+          if (latest && latest !== failureOwner) return;
+          if (latest) dropBodyEntry(id);
+          verification.retired = true;
+          readEvictedTarget(target);
+        }) });
+      };
+      void api.getArticle(Number(id)).then(inLibrary((row) => {
+        if (fulltextTargetStatus(id, verification) === 'stale') return;
+        const current = getBodyEntry(id);
+        if (!current) { reportReadFailure('正文缓存已变化，请重试'); return; }
+        if (current !== loadingOwner) return;
+        if (!row) { reportReadFailure('正文加载失败：文章不存在或已被删除', true); return; }
+        if (get().libraryRestoreBusy) { reportReadFailure('资料库正在恢复，请稍后重试正文获取'); return; }
+        const entry = get().entries.find(item => item.id === id);
+        if (!applyBodyRow(id, row, stamp, { aiSummary: entry?.aiSummary ?? '',
+          translatedContent: entry?.translatedContent ?? '', translationDraftOwner: entry?.translationDraftOwner })) return;
+        reconcileFulltextTargetRow(id, row);
+        if (fulltextTargetStatus(id, verification) !== 'current') {
+          get().showToast('条目已更新，未执行旧的全文重试'); return;
+        }
+        finishFulltextReadback(id, verification);
+        extractFulltextFor(id, { announce: true, allowDetached: true, url: row.url ?? undefined });
+      })).catch(inLibrary((error: unknown) => reportReadFailure(`正文加载失败：${extractError(error)}`)))
+        .finally(inLibrary(() => { if (!retryPending) finishFulltextReadback(id, verification); }));
+    };
+    const reportFailure = (message: string) => {
+      if (!isCurrent()) { finishFulltextRequest(id, request); return; }
+      if (!finishFulltextRequest(id, request, message)) return;
+      get().showToast(message, {
+        label: '重试', key: `reader:fulltext:${id}`,
+        run: inLibrary(() => {
+          if (get().libraryRestoreBusy) return;
+          const status = fulltextTargetStatus(id, request);
+          if (status === 'stale') return;
+          if (status === 'unknown') {
+            request.retired = true;
+            readEvictedTarget(request.target);
+            return;
+          }
+          const current = getBodyEntry(id);
+          if (current?.fulltextFailure?.ticket !== request) return;
+          extractFulltextFor(id, { announce: true, allowDetached: true, url });
+        }),
+      });
+    };
     void api
       .extractFulltext(Number(id))
-      .then((res) => {
-        if (!res) return;
+      .then(inLibrary((res) => {
+        if (!isCurrent()) { finishFulltextRequest(id, request); return; }
+        if (!res) { reportFailure('未获取到正文，请重试'); return; }
         if (res.degraded) {
-          get().showToast(
-            `未采用全文提取：${res.reason ?? '提取结果不可用'}`,
-            {
-              label: '重试',
-              key: `reader:fulltext:${id}`,
-              run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
-            },
-          );
+          reportFailure(`未采用全文提取：${res.reason ?? '提取结果不可用'}`);
           return;
         }
-        applyExtractedFulltext(id, res.html, extractIdentity(res));
-        if (get().activeArticleId === id) set({ showFulltext: true });
-        if (opts?.announce) get().showToast('全文提取完成');
-      })
-      .catch((e: unknown) => {
-        get().showToast(`全文提取失败：${extractError(e)}`, {
-          label: '重试',
-          key: `reader:fulltext:${id}`,
-          run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
+        if (!res.html.trim()) { reportFailure('原网页未返回可用正文，请重试或查看原文'); return; }
+        const identity = extractIdentity(res);
+        if (!identity) { reportFailure('未能确认正文已保存，请重试'); return; }
+        applyExtractedFulltext(id, res.html, identity);
+        set((s) => {
+          // 列表的 CID/rev 是上次属性快照的基线；提前抬高它会把旧 reload 误判为
+          // 新修订并清空刚恢复的 body。真实提交身份仅落正文实体，等新快照自行对齐。
+          const entries = s.entries.map((entry) => entry.id === id ? { ...entry,
+            bodyMissing: false, fulltextExtracted: true } : entry);
+          syncCurrentViewCache(entries);
+          return { entries };
         });
-      });
+        if (get().activeArticleId === id) set({ showFulltext: true });
+        if (opts?.announce) get().showToast(recovering ? '正文已获取' : '全文提取完成');
+        // 封面/画廊信息只取真实详情，不从返回 HTML 猜测；回读不覆盖读藏状态。
+        const metadata = beginFulltextReadback(id, request.target.url);
+        if (!metadata) return;
+        const metadataCurrent = () => !get().libraryRestoreBusy
+          && getBodyEntry(id)?.fulltextReadback === metadata && fulltextTargetStatus(id, metadata) === 'current';
+        void api.getArticle(Number(id)).then(inLibrary((row) => {
+          if (!metadataCurrent() || !row || row.content_id !== identity.contentId || row.content_revision !== identity.contentRev
+            || row.url !== metadata.target.url || (metadata.target.anchor !== null && `${row.feed_id}|${row.title}` !== metadata.target.anchor)) return;
+          const fresh = articleRowToEntry(row);
+          set((s) => {
+            // 元数据回读只补媒体：正文戳不代表媒体新鲜度。URL/snippet由原属性
+            // 链路维护，不能借媒体版本覆盖较新非媒体字段或改变正文失效基线。
+            const entries = s.entries.map((entry) => entry.id === id
+              && (fresh.mediaRevision ?? 0) >= (entry.mediaRevision ?? 0) ? { ...entry,
+              cover: fresh.cover, imageUrl: fresh.imageUrl,
+              imageCount: fresh.imageCount, mediaRevision: fresh.mediaRevision,
+              audioUrl: fresh.audioUrl, enclosureUrl: fresh.enclosureUrl, durationSec: fresh.durationSec,
+            } : entry);
+            syncCurrentViewCache(entries);
+            return { entries };
+          });
+        })).catch(inLibrary((error: unknown) => {
+          if (metadataCurrent()) get().showToast(`正文已获取，条目信息刷新失败：${extractError(error)}`);
+        })).finally(inLibrary(() => finishFulltextReadback(id, metadata)));
+      }))
+      .catch(inLibrary((e: unknown) => {
+        reportFailure(`全文提取失败：${extractError(e)}`);
+      }));
   };
 
   return ({
@@ -162,15 +305,17 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
      仅在 clearReaderSelection bump——本 action 只发信号，不携带载荷：原选中卡
      id 由 Timeline 在 activeArticleId 跟随 effect 用 ref 记账（关闭 commit 时
      该 ref 保留关闭前值），Timeline 的 readerClose effect 消费本信号归还焦点。
-     选型理由见下方 clearReaderSelection 长注释与 timelineAnchor.ts 头注 X2 节。 */
+     选型理由见下方 clearReaderSelection 长注释与 readingPosition.ts 头注 X2 节。 */
   readerCloseNonce: 0,
 
   /* ================= 阅读器 ================= */
 
-  selectArticle: (id) => {
+  markEntryOpened: (id) => {
+    // 灯箱详情可能晚于恢复前沿才完成；所有打开副作用共享此守卫，既有写仍完整结清。
+    if (get().libraryRestoreBusy) return;
     const { entries, settings, dataMode } = get();
     const art = entries.find((a) => a.id === id);
-    if (!art) return;
+    if (!art || art.unavailable) return;
     const shouldMarkRead = dataMode === 'tauri' && settings.markReadOnOpen && !art.isRead;
     if (shouldMarkRead) {
       /* 后端模式：已读落库（不重载快照，本地同步置位即可） */
@@ -184,12 +329,14 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          使卡片在未读筛选下原地变灰而非消失）。 */
       markEntriesRead(new Set([id]));
       const claim: EntryRollbackClaim = { id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') };
+      const settle = trackEntryFlagWrite(claim, true);
       beginLocalFlagWrite();
       beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
       const flagSerialAtRequest = currentLocalFlagWriteSerial();
       void api.setRead(Number(id), true).then((receipt) => {
         endLocalFlagWrite();
         endEntryFieldWrite(id, 'isRead');
+        settle(false);
         /* OPT-008B R2/N1：读闭包可能一并标读同 URL 未读副本——回执驱动条目/
            计数本地收敛（被点行已乐观翻转，跳过重复扣减）。 */
         applyReadReceipt(asReadReceipts(receipt), new Set([id]), flagSerialAtRequest);
@@ -197,13 +344,21 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       }).catch((e) => {
         endLocalFlagWrite();
         endEntryFieldWrite(id, 'isRead');
-        const outcome = rollbackEntryClaims([claim]);
+        const outcome = settle(true);
         /* R2：回滚被接管跳过（如快照替换）时乐观计数不可线性复原——强制一次
            权威对账（不受 dedup 门控），失败保守留待下次 reload 自愈。 */
         scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
         get().showToast(`标读失败：${extractError(e)}`);
       });
     }
+  },
+
+  selectArticle: (id) => {
+    const st = get();
+    if (!st.entries.some((entry) => entry.id === id)) return;
+    // 文章分区选中即展示正文；其它分区只选中，不借隐藏 Reader 发起阅读副作用。
+    const opensReader = st.activeContentLayout === 'article';
+    if (opensReader) get().markEntryOpened(id);
     set((s) => ({
       /* 记录"本次会话中被打开过"：即使标已读，在未读筛选下也保留显示（原地变灰） */
       openedReadIds: { ...s.openedReadIds, [id]: true },
@@ -219,7 +374,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       translating: false,
     }));
     /* 打开文章：触发「智能全文」判定（摘要型源才提取原文；列表卡片水合不触发） */
-    get().ensureArticleContent(id, { extractFulltext: true });
+    if (opensReader) get().ensureArticleContent(id, { extractFulltext: true });
   },
 
   /** 正文懒加载（幂等）：列表快照不含 HTML，选中/社交卡片挂载时拉详情水合。
@@ -237,6 +392,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const { dataMode, entries } = get();
     if (dataMode !== 'tauri') return;
     const art = entries.find((a) => a.id === id);
+    if (art?.unavailable) return;
     if (!art && !opts?.allowDetached) return;
     if (opts?.extractFulltext) {
       /* 打开文章：需要完整详情（含 url/fulltext_extracted）+ 智能全文判定。
@@ -245,7 +401,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          TASK-122：发起前签失效戳（记录现 revision）；期间发生显式失效
          （清理 AI 缓存 / 再次生成）则迟到的详情响应整体丢弃。 */
       const stamp = markBodyLoading(id);
-      void api.getArticle(Number(id)).then((row) => {
+      const inLibrary = libraryCallbacks();
+      void api.getArticle(Number(id)).then(inLibrary((row) => {
         if (!row) {
           /* 详情缺行 = 文章不存在（旧实现静默 return，记录卡 loading；TASK-122
              终态化：missing 呈现「文章不存在」，可经 retryHydration 幂等重试） */
@@ -266,11 +423,13 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
            仅视图行轻字段同步跳过。 */
         const generating = !!(get().summarizingIds[id] || get().translatingIds[id]);
         const rec = getBodyEntry(id);
-        applyBodyRow(id, row, stamp, {
+        const accepted = applyBodyRow(id, row, stamp, {
           aiSummary: generating ? (cur?.aiSummary || '') : (rec?.aiSummary ?? cur?.aiSummary ?? ''),
           translatedContent: generating ? (cur?.translatedContent || '') : (rec?.translatedContent ?? cur?.translatedContent ?? ''),
+          translationDraftOwner: generating ? cur?.translationDraftOwner : rec ? rec.translationDraftOwner : cur?.translationDraftOwner,
         });
-        if (!cur) return;
+        if (accepted) reconcileFulltextTargetRow(id, row);
+        if (!accepted || !cur) return;
         /* 视图行轻字段照旧同步：snippet/url（列表行可能缺 url）；无变化不 set
            （保持 entries 引用稳定，避免无谓重渲染） */
         const nextUrl = cur.url ?? row.url ?? undefined;
@@ -284,47 +443,16 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         }
         const mode = get().settings.defaultOpenMode;
         const alreadyExtracted = row.fulltext_extracted ?? false;
-        if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(row.content_html ?? '')) {
-          void api
-            .extractFulltext(Number(id))
-            .then((res) => {
-              if (!res) return;
-              /* TASK-076（P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920）：
-                 后端现在直接给结构化 degraded 标志，取代此前「返回内容 == 当前正文」
-                 的字符串比对——那种猜法在正文恰好相同时会误判，而且静默、用户看不到
-                 原因。降级时如实提示并保持原状（不置标志、不切全文视图）。 */
-              if (res.degraded) {
-                get().showToast(
-                  `未采用全文提取：${res.reason ?? '提取结果不可用'}`,
-                  {
-                    label: '重试',
-                    key: `reader:fulltext:${id}`,
-                    run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
-                  },
-                );
-                return;
-              }
-              /* R3：以响应携带的提交后身份落记录——下一次 reload 修订比较相等，
-                 刚提取的正文不被清空重取（active Reader / 卡片 / AI 输入同源）。 */
-              applyExtractedFulltext(id, res.html, extractIdentity(res));
-              if (get().activeArticleId === id) set({ showFulltext: true });
-            })
-            .catch((e: unknown) => {
-              const msg = extractError(e);
-              get().showToast(`全文提取失败：${msg}`, {
-                label: '重试',
-                key: `reader:fulltext:${id}`,
-                run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
-              });
-            });
+        if (mode === 'fulltext' && isHttpUrl(row.url) && !alreadyExtracted && shouldExtractFulltext(row.content_html ?? '')) {
+          extractFulltextFor(id);
         }
-      }).catch((e: unknown) => {
+      })).catch(inLibrary((e: unknown) => {
         /* 打开文章的详情拉取失败：Reader 不能静默空白（REQ-001 排查 P1-8）。
            TASK-122：失败落 bodyById failed 态（卡片内联重试入口可用） */
         const msg = extractError(e);
         markBodyFailed(id, stamp, msg);
         showArticleContentRetry(id, `正文加载失败：${msg}`);
-      });
+      }));
       return;
     }
     /* 列表卡片（社交/通知）水合：bodyById 已有记录且**不是 cleared** 则短路
@@ -378,25 +506,11 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
        「记录存在」拦下；响应落地按 stamp 比对丢弃失效后的迟到响应 */
     const stamps = new Map<string, number>(pending.map((id) => [id, markBodyLoading(id)] as const));
     const pendingSet = new Set(pending);
-    void api.getArticles(pending.map(Number)).then((rows) => {
-      /* 构建 id → 详情 映射，一次性合并（单次 map，单次 set） */
+    const inLibrary = libraryCallbacks();
+    void api.getArticles(pending.map(Number)).then(inLibrary((rows) => {
+      /* 正文接受资格同时约束轻字段，迟到旧批次不能先覆盖 snippet/url。 */
       const byId = new Map((rows ?? []).map((r) => [String(r.id), r] as const));
-      /* TASK-122：视图行侧只同步轻字段（snippet/url）；正文/AI 落 bodyById */
-      set((s) => {
-        let changed = false;
-        const entries = s.entries.map((a) => {
-          if (!pendingSet.has(a.id)) return a;
-          const row = byId.get(a.id);
-          if (!row) return a;
-          const nextUrl = a.url ?? row.url ?? undefined;
-          const nextSnippet = row.snippet || a.snippet;
-          if (nextUrl === a.url && nextSnippet === a.snippet) return a;
-          changed = true;
-          return { ...a, url: nextUrl, snippet: nextSnippet };
-        });
-        if (changed) syncCurrentViewCache(entries);
-        return changed ? { entries } : {};
-      });
+      const acceptedIds = new Set<string>();
       /* 正文/AI 落记录：逐 id 现态复核——只写仍是 **loading** 的记录（本批的
          在途标记）：他路已水合（selectArticle 详情先落地 → ready）、显式失效
          （cleared）的 id 一律跳过——迟到的旧批次不得覆盖新状态（TASK-103 语义，
@@ -417,12 +531,31 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         }
         const generating = !!(get().summarizingIds[id] || get().translatingIds[id]);
         const entry = get().entries.find((a) => a.id === id);
-        applyBodyRow(id, row, stamps.get(id) ?? 0, {
+        const accepted = applyBodyRow(id, row, stamps.get(id) ?? 0, {
           aiSummary: generating ? (entry?.aiSummary || '') : (rec.aiSummary || entry?.aiSummary || ''),
           translatedContent: generating ? (entry?.translatedContent || '') : (rec.translatedContent || entry?.translatedContent || ''),
+          translationDraftOwner: generating ? entry?.translationDraftOwner : rec.translatedContent ? rec.translationDraftOwner : entry?.translationDraftOwner,
         });
+        if (accepted) {
+          reconcileFulltextTargetRow(id, row);
+          acceptedIds.add(id);
+        }
       }
-    }).catch((e: unknown) => {
+      set((s) => {
+        let changed = false;
+        const entries = s.entries.map((a) => {
+          if (!pendingSet.has(a.id) || !acceptedIds.has(a.id)) return a;
+          const row = byId.get(a.id)!;
+          const nextUrl = a.url ?? row.url ?? undefined;
+          const nextSnippet = row.snippet || a.snippet;
+          if (nextUrl === a.url && nextSnippet === a.snippet) return a;
+          changed = true;
+          return { ...a, url: nextUrl, snippet: nextSnippet };
+        });
+        if (changed) syncCurrentViewCache(entries);
+        return changed ? { entries } : {};
+      });
+    })).catch(inLibrary((e: unknown) => {
       /* 批量水合失败：错误落到对应记录（卡片内联重试），不再静默假加载。
          TASK-103：只对「仍在途（loading）」的 id 落 failed——过期失败不得污染
          已被快照替换/他路水合/显式失效的新状态 */
@@ -431,7 +564,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         const rec = getBodyEntry(id);
         if (rec?.state === 'loading') markBodyFailed(id, stamps.get(id) ?? 0, msg);
       }
-    });
+    }));
   },
 
   /* TASK-115②：关闭阅读器（Esc / App 全局快捷键的唯一关闭路径）。修前只清
@@ -441,8 +574,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
      选型（Timeline 消费关闭信号 vs 本 action 记录原 id）：选前者——本 action
      只 bump 不透明计数器，原选中卡由 Timeline 在 activeArticleId 跟随 effect
      里记录（关闭时刻它必然持有最后选中的文章 id）。理由：store 不反向依赖
-     components 层（timelineAnchor 在 components/ 下，store→components 是
-     倒挂方向，会开循环依赖的口子）；且「只有原 id 字段无法区分连续两次开关
+     components 层；共享位置虽归lib/readingPosition，DOM焦点仍由Timeline消费。
+     且「只有原 id 字段无法区分连续两次开关
      同一篇」（值不变不触发 effect），nonce 计数器才是可靠的重触发信号。 */
   clearReaderSelection: () =>
     set((s) => ({
@@ -456,7 +589,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     })),
 
   /** 手动全文提取：Readability 拉原文网页存 content（TASK-122：落 bodyById）；
-      rawContent 始终保留 RSS 原文（供「全文 ↔ RSS 正文」切换回跳）。
+      rawContent 仅在当前缓存确实持有 RSS 原文时可用于回切；不承诺跨重开保留。
       提取成功后进入全文视图。 */
   extractCurrentArticle: () => {
     const id = get().activeArticleId;
@@ -473,8 +606,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const rec = getBodyEntry(activeArticleId);
     if (!rec) return;
     if (rec.fulltextExtracted) {
-      // 已提取：直接切换视图
-      set({ showFulltext: !showFulltext });
+      if (rec.rawContent && rec.rawContent !== rec.content) set({ showFulltext: !showFulltext });
     } else {
       // 未提取：触发提取
       get().extractCurrentArticle();
@@ -514,6 +646,9 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
   toggleReaderRenderMode: () => set((s) => ({ isRawRenderMode: !s.isRawRenderMode })),
 
   markEntriesReadBulk: (ids) => {
+    // 已排队的 Reader scroll / Timeline 滚出 effect 不受 DOM inert 撤销。
+    // 恢复先等已有读写前沿；这段期间不得再登记旧成员的被动标读。
+    if (get().libraryRestoreBusy) return;
     if (ids.length === 0) return;
     const { dataMode, entries } = get();
     /* 只处理未读项：已读的重复 setRead 无意义（还会刷 sync_queue）。
@@ -551,6 +686,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          不再只提示不回滚。openedReadIds 不回撤：「打开过」的原地变灰保留语义
          不随落库失败撤销（与打开即标读回滚的边界裁定同口径）。 */
       const claims: EntryRollbackClaim[] = unread.map((id) => ({ id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') }));
+      const settlements = claims.map((claim) => trackEntryFlagWrite(claim, true));
       beginLocalFlagWrite();
       for (const id of unread) beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
       const flagSerialAtRequest = currentLocalFlagWriteSerial();
@@ -558,15 +694,16 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       void api.setReadBulk(unread.map((id) => Number(id)), true).then((receipt) => {
         endLocalFlagWrite();
         for (const id of unread) endEntryFieldWrite(id, 'isRead');
+        for (const settle of settlements) settle(false);
         /* OPT-008B R2/N1：整批回执（含闭包副本）驱动条目/计数本地收敛。 */
         applyReadReceipt(asReadReceipts(receipt), listed, flagSerialAtRequest);
         scheduleCountsReconcile();
       }).catch(() => {
         endLocalFlagWrite();
         for (const id of unread) endEntryFieldWrite(id, 'isRead');
-        const outcome = rollbackEntryClaims(claims);
+        const takenOver = settlements.map((settle) => settle(true)).some((outcome) => outcome.takenOver);
         /* R2：同单条路径——存在被接管跳过的声明时强制权威对账。 */
-        scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
+        scheduleCountsReconcile(takenOver ? { force: true } : undefined);
         get().showToast('批量标读失败');
       });
     }

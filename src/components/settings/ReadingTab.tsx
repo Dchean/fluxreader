@@ -25,6 +25,7 @@ export function ReadingTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="字号"
             min={13}
             max={24}
             value={settings.fontSize}
@@ -38,6 +39,7 @@ export function ReadingTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="行高"
             min={130}
             max={240}
             value={settings.lineHeight}
@@ -53,6 +55,7 @@ export function ReadingTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="正文最大宽度"
             min={560}
             max={1100}
             step={20}
@@ -67,6 +70,23 @@ export function ReadingTab() {
         <Switch checked={settings.showReadTime} onChange={(v) => updateSettings({ showReadTime: v })} />
       </SettingCard>
 
+      <div className="settings-group-title">自动 AI · 布局默认</div>
+      <SettingCard title="文章摘要">
+        <Switch ariaLabel="文章自动摘要" checked={settings.articleAutoSummary} onChange={(v) => updateSettings({ articleAutoSummary: v })} />
+      </SettingCard>
+      <SettingCard title="文章翻译">
+        <Switch ariaLabel="文章自动翻译" checked={settings.articleAutoTranslate} onChange={(v) => updateSettings({ articleAutoTranslate: v })} />
+      </SettingCard>
+      <SettingCard title="社交翻译">
+        <Switch ariaLabel="社交自动翻译" checked={settings.socialAutoTranslate} onChange={(v) => updateSettings({ socialAutoTranslate: v })} />
+      </SettingCard>
+      <SettingCard title="通知摘要">
+        <Switch ariaLabel="通知自动摘要" checked={settings.notificationAutoSummary} onChange={(v) => updateSettings({ notificationAutoSummary: v })} />
+      </SettingCard>
+      <SettingCard title="通知翻译">
+        <Switch ariaLabel="通知自动翻译" checked={settings.notificationAutoTranslate} onChange={(v) => updateSettings({ notificationAutoTranslate: v })} />
+      </SettingCard>
+
       <div className="settings-group-title">打开方式</div>
       <SettingCard title="默认打开方式" desc="遇到部分未提供全文的 RSS 订阅源时自动执行正文提取">
         <FluxDropdown
@@ -78,9 +98,6 @@ export function ReadingTab() {
             { value: 'fulltext', label: '自动全文' },
           ]}
         />
-      </SettingCard>
-      <SettingCard title="智能去重" desc="同一篇文章被多个订阅源推送时只保留最先入库的一份">
-        <Switch checked={settings.smartDedup} onChange={(v) => updateSettings({ smartDedup: v })} />
       </SettingCard>
     </>
   );

@@ -60,11 +60,11 @@ async fn seed_local_article(
     let a = db::NewArticle {
         guid: format!("guid-{url}"),
         url: Some(url.into()),
-        title: "Local Article".into(),
+        title: "Remote Entry".into(),
         author: None,
         summary: None,
-        content_html: Some("<p>local</p>".into()),
-        body_text: "local".into(),
+        content_html: Some("<p>Mock fetched content</p>".into()),
+        body_text: "Mock fetched content".into(),
         image_url: None,
         enclosure_url: None,
         enclosure_mime: None,
@@ -111,11 +111,11 @@ async fn seed_local_articles_in_one_feed(
         let a = db::NewArticle {
             guid: format!("guid-{url}"),
             url: Some((*url).into()),
-            title: format!("Local Article {url}"),
+            title: "Remote Entry".into(),
             author: None,
             summary: None,
-            content_html: Some("<p>local</p>".into()),
-            body_text: "local".into(),
+            content_html: Some("<p>Mock fetched content</p>".into()),
+            body_text: "Mock fetched content".into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -201,7 +201,7 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     let revived = {
         let conn = db.lock().await;
         conn.query_row(
-            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+            "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -226,7 +226,7 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     let existed = {
         let conn = db.lock().await;
         conn.query_row(
-            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+            "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -311,7 +311,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         let conn = db.lock().await;
         let revived = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
                 [],
                 |r| r.get::<_, i64>(0),
             )
@@ -336,7 +336,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         );
         let revived = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
                 [],
                 |r| r.get::<_, i64>(0),
             )
@@ -392,7 +392,9 @@ async fn fresh_empty_db_pull_creates_remote_subscriptions() {
             .unwrap();
         assert_eq!(folders, 0, "前置条件：新库应零 folder");
         let feeds: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(feeds, 0, "前置条件：新库应零订阅");
     }
@@ -403,7 +405,9 @@ async fn fresh_empty_db_pull_creates_remote_subscriptions() {
 
     let conn = db.lock().await;
     let local_feeds: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(
         local_feeds, 2,
@@ -486,7 +490,7 @@ async fn pull_feed_insert_failure_must_be_reported() {
         let conn = db.lock().await;
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [failing_url],
                 |r| r.get(0),
             )
@@ -533,7 +537,7 @@ async fn pull_entry_insert_failure_must_be_reported() {
     let entry_id = server.add_entry_ret(10, entry_url, "Will Fail", false, false);
 
     // 注入确定性失败：插该 guid 的文章时 RAISE(ABORT)
-    let guid = format!("remote-{entry_id}");
+    let guid = db::remote_identity_guid(&entry_id.to_string());
     {
         let conn = db.lock().await;
         conn.execute_batch(&format!(
@@ -593,7 +597,9 @@ async fn pull_feed_failure_is_reported_not_swallowed() {
 
     let conn = db.lock().await;
     let local_feeds: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     // 契约：要么真的建出来了；要么没建出来但必须给出原因（不得静默）
@@ -1023,11 +1029,11 @@ async fn reconcile_skipped_when_state_fetch_fails() {
         let a = db::NewArticle {
             guid: "guid-c1".into(),
             url: Some("http://127.0.0.1:8765/post/1".into()),
-            title: "Local Article".into(),
+            title: "Remote Entry".into(),
             author: None,
             summary: None,
-            content_html: Some("<p>local</p>".into()),
-            body_text: "local".into(),
+            content_html: Some("<p>Mock fetched content</p>".into()),
+            body_text: "Mock fetched content".into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -1214,6 +1220,45 @@ async fn add_feed_pushes_folder_membership() {
     assert_eq!(bound, Some(101), "本地订阅应绑定 quick_add 返回的远端 id");
 }
 
+/// 空 URL 的 legacy add_feed 不得进入 quick_add：trim 后为空即在计划阶段跳过，
+/// 队列行保留并维持 local_only/no_feed_url，不向服务端发送无效订阅请求。
+#[tokio::test]
+async fn whitespace_only_add_feed_url_does_not_enter_quick_add() {
+    let (db, http, server) = setup("gap_empty_add_feed_url").await;
+    {
+        let conn = db.lock().await;
+        db::enqueue_sync(&conn, None, Some(" \t\n "), "add_feed", None).unwrap();
+    }
+
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+
+    assert!(
+        server.subscribed_urls.lock().unwrap().is_empty(),
+        "trim 后为空的 add_feed 不得进入 quick_add"
+    );
+
+    let conn = db.lock().await;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE action = 'add_feed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "空 URL 队项必须保留，不得静默删除");
+    let (status, reason, last_error_class): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT status, unbound_reason, last_error_class
+               FROM sync_queue WHERE action = 'add_feed'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, db::SYNC_QUEUE_STATUS_LOCAL_ONLY);
+    assert_eq!(reason.as_deref(), Some("no_feed_url"));
+    assert_eq!(last_error_class.as_deref(), Some("unbound"));
+}
+
 /// A-4：分类改名后，远端旧 label 不再被 pull 复活成重复空目录。
 #[tokio::test]
 async fn folder_rename_does_not_revive_old_label() {
@@ -1307,7 +1352,7 @@ async fn folder_delete_does_not_revive_folder_or_feeds() {
         .ok();
     let feed: Option<i64> = conn
         .query_row(
-            "SELECT id FROM feeds WHERE feed_url = ?1",
+            "SELECT id FROM feeds WHERE active=1 AND feed_url = ?1",
             [feed_url],
             |r| r.get(0),
         )
@@ -1370,9 +1415,10 @@ async fn folder_tombstone_cleared_when_remote_drops_label() {
     let _ = server;
 }
 
-/// A-8：超过保留期且仍无法绑定远端的状态队列项被老化清理并记录。
+/// A-8 修订：超过保留期且仍无法绑定远端的状态队列项转为
+/// expired_unconfirmed；队项与本地 read/star 都必须保留。
 #[tokio::test]
-async fn stale_unbound_queue_items_are_pruned() {
+async fn stale_unbound_queue_items_expire_without_losing_local_state() {
     let (db, http, _server) = setup("gap_a8").await;
     // 本地直连文章：URL 在远端不存在对应 entry → 永不绑定 remote_id
     let aid = {
@@ -1424,15 +1470,23 @@ async fn stale_unbound_queue_items_are_pruned() {
         .await
         .expect("states phase");
 
-    let left: i64 = {
+    let (left, status, is_read): (i64, String, i64) = {
         let conn = db.lock().await;
-        conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
-            .unwrap()
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM sync_queue),
+                    (SELECT status FROM sync_queue LIMIT 1),
+                    (SELECT is_read FROM articles WHERE id = ?1)",
+            [aid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
     };
-    assert_eq!(left, 0, "陈旧且无法绑定的队列项应被老化清理");
+    assert_eq!(left, 1, "陈旧意图必须保留，不得物理删除");
+    assert_eq!(status, "expired_unconfirmed");
+    assert_eq!(is_read, 1, "本地已读状态不得因队列老化回滚");
     assert!(
         report.errors.iter().any(|e| e.contains("队列老化")),
-        "应记录老化清理动作，实际 {:?}",
+        "应记录老化转态动作，实际 {:?}",
         report.errors
     );
 }

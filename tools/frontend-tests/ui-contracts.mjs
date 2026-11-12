@@ -1,5 +1,6 @@
 // tools/frontend-tests/ui-contracts.mjs
-// 领域模块：组件/文案/SSR 与源码形态契约（含真实 SSR 输出与源级防回退）
+// 领域模块：组件/文案/SSR 与仍需静态佐证的接线契约。
+// 源码断言只能逐项在行为覆盖成立后退出；替代对应见测试门禁与断言纪律 Note。
 // OPT-016C 拆分自 tools/frontend-regression.mjs（旧行区间 5553-5888、5889-5943、5945-6004、6006-6270、6272-6475、6477-6579、6581-7026、7028-7125、7127-7228、7230-7412、7414-7515、7517-7646、7648-7743、7745-7842）；
 // 断言名称/条件文本原样迁移，仅做路径深度适配（import.meta.url 与动态 import 深一层）与
 // 共享可变状态的 S. 归属重写。数据所有权：共享假后端/夹具/记录归 harness（见 harness.mjs 头注），
@@ -30,7 +31,7 @@ export async function run(ctx) {
     sentinelMode(0, false, false) === 'idle');
   checkNew('(d1) 哨兵判定：空列表 + 补拉中 ⇒ loading（用户看得到「正在取更多」）',
     sentinelMode(0, false, true) === 'loading');
-  checkNew('(d2) 哨兵判定：空列表 + 已到底 ⇒ hidden（不与「暂无匹配内容」重复）',
+  checkNew('(d2) 哨兵判定：空列表 + 已到底 ⇒ hidden（不与空态文案重复）',
     sentinelMode(0, true, false) === 'hidden' && sentinelMode(0, true, true) === 'hidden');
   checkNew('(d3) 哨兵判定：非空列表三态照旧（待滚动 / 加载中 / 已到底），051 前行为不变',
     sentinelMode(5, false, false) === 'idle' && sentinelMode(5, false, true) === 'loading'
@@ -55,6 +56,13 @@ export async function run(ctx) {
   checkNew('(d5) SSR：空列表未到底态哨兵落在滚动容器内 ⇒ 节点确实被渲染',
     html.includes('timeline-load-more') && html.includes('load-more-idle')
     && html.indexOf('id="timelineContentScroll"') < html.indexOf('timeline-load-more'));
+
+  /* 2026-11-04：全刷入口必须随 syncMode 如实描述源集合。 */
+  const { refreshAllLabel } = await import('../../dist-test/lib/copyPolicy.js');
+  checkNew('刷新文案：direct 显示「刷新全部订阅源」',
+    refreshAllLabel('direct') === '刷新全部订阅源');
+  checkNew('刷新文案：hybrid 显示「刷新本地订阅源」',
+    refreshAllLabel('hybrid') === '刷新本地订阅源');
 
   /* ============================================================
      TASK-059：Endpoint 自动适配（只填域名）
@@ -200,16 +208,18 @@ export async function run(ctx) {
     !!blanks && blanks.includes('1 项失败') === false && blanks.includes('2 项失败')
     && blanks.includes('原因未提供'));
 
-  /* (f4) 既有成功文案一字未改——用**源码文本**核对，而不是只断言常量存在 */
+  /* (f4) 成功路径文案仍在——用**源码文本**核对，而不是只断言常量存在 */
   const fs = await import('node:fs');
   const syncTabSrc = fs.readFileSync(new URL('../../src/components/settings/SyncTab.tsx', import.meta.url), 'utf8');
   const syncSliceSrc = fs.readFileSync(new URL('../../src/store/slices/sync.ts', import.meta.url), 'utf8');
-  checkNew('(f4) 成功路径文案逐字保留在源码中（改动前就有、改动后仍在）',
-    syncTabSrc.includes("'已拉取订阅源，正在同步文章状态…'")
-    && syncTabSrc.includes("'后端同步完成'")
-    && syncSliceSrc.includes("'订阅同步完成，正在同步文章状态…'"));
-  checkNew('(f4) 「后端同步完成」只在 errors 为空的分支出现（不被失败路径复用）',
-    /failures\.length > 0 \? failures\.join\('；'\) : '后端同步完成'/.test(syncTabSrc));
+  checkNew('(f4) 单IPC完整同步才显示账户完成，两条入口均消费sync_run并保留刷新结果反馈',
+    syncTabSrc.includes("'账户同步完成'")
+    && syncTabSrc.includes('api.syncRun()')
+    && syncSliceSrc.includes('api.syncRun()')
+    && syncSliceSrc.includes('已刷新，新增'));
+  checkNew('(f4) 「账户同步完成」只在 errors 为空的分支出现（不被失败路径复用）',
+    /if \(failures\.length > 0\)/.test(syncTabSrc)
+    && (syncTabSrc.match(/'账户同步完成'/g) || []).length === 1);
   checkNew('(f4) 两处调用点**都**消费了 report 的 errors（只改一处不算完成）',
     syncTabSrc.includes('syncFailureMessage(') && syncSliceSrc.includes('syncFailureMessage('));
   checkNew('(f4) 手动链保留既有「N 个源直连失败」信息，且与同步失败信息**共存**（不互相吞掉）',
@@ -243,6 +253,13 @@ export async function run(ctx) {
   const restoreInvokeF5 = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
     S.invokeCalls.push({ cmd, args });
     switch (cmd) {
+      case 'sync_run': {
+        const phase = (which) => ({
+          pushed_states: 0, pushed_feeds: 0, pulled_feeds: 0, pulled_entries: 0,
+          merged_states: 0, errors: syncPhasePlan[which].errors,
+        });
+        return Promise.resolve({ activity_id: 1, feeds: phase('feeds'), states: phase('states'), error: null });
+      }
       case 'sync_phase': {
         /* api.syncPhase 的调用形态是 `inv('sync_phase', { which, full })`——
            第二参数**就是** args 对象本身（不像 list_articles 那样再包一层 `{ args }`）。
@@ -259,6 +276,9 @@ export async function run(ctx) {
       case 'refresh_all_feeds': return Promise.resolve(refreshPlan.value);
       case 'list_folders': return Promise.resolve([]);
       case 'list_feeds': return Promise.resolve([]);
+      case 'list_article_sources': return Promise.resolve([]);
+      case 'list_article_member_ids': return Promise.resolve([]);
+      case 'get_article_updates': return Promise.resolve({ items: [], missing_ids: [] });
       case 'list_articles': return Promise.resolve([]);
       case 'article_counts': return Promise.resolve({});
       default: return Promise.resolve(null);
@@ -422,11 +442,14 @@ export async function run(ctx) {
     const expectEntry = {
       id: '42', feedId: '7', title: 'Fixture Article',
       publishedAt: Date.parse('2026-09-19T01:00:00+08:00'),
+      firstSeenAt: Date.parse('2026-09-18T00:00:00+08:00'),
+      publishedAtSource: 'feed_clamped',
       isRead: false, isStarred: true, tags: [], source: 'miniflux',
+      retained: false, bodyMissing: false, imageCount: 1, mediaRevision: 3,
       snippet: 'snippet text', author: 'Fixture Author',
       cover: 'https://e.example/img.png', imageUrl: 'https://e.example/img.png',
       audioUrl: 'https://e.example/audio.mp3', enclosureUrl: 'https://e.example/audio.mp3',
-      durationSec: 1234, url: 'https://e.example/a',
+      durationSec: 1234, url: 'https://e.example/a', urlKnown: true,
       aiSummary: 'fixture summary',
       /* TASK-122：content/rawContent 不再映射进视图行（正文真值源 bodyById） */
       translatedContent: '<p>translated</p>', fulltextExtracted: false,
@@ -439,6 +462,7 @@ export async function run(ctx) {
     };
     const expectFeed = {
       id: '7', name: 'Fixture Feed', url: 'https://f.example/rss',
+      syncId: 'source-fixture', subscriptionState: 'active', effectiveLayout: 'article',
       favicon: 'https://f.example/favicon.ico', layout: 'article',
       autoSummary: true, autoTranslate: false, fetchFailed: false,
       /* OPT-011：三态 mode 是真值（fixture 的 mode 与 bool 取值刻意不一致——
@@ -456,7 +480,10 @@ export async function run(ctx) {
     const wrong = (actual, expected) => Object.keys(expected).filter(
       (k) => k in actual && !sameValue(actual[k], expected[k]));
 
-    /* 【TASK-122 改动理由】articleRowToEntry 不再映射 content/rawContent 进视图行
+    /* 2026-11-11 门禁适配：R5 新增 urlKnown 区分“已确认无 URL”与“尚未提供 URL”。
+       原完整键表漏了该键，当前非空 fixture 应为 true；仅补全期望，不收窄比较器。
+       null/undefined 的真实恢复行为沿用 reader-body-recovery.test.mjs。
+       【TASK-122 改动理由】articleRowToEntry 不再映射 content/rawContent 进视图行
        （正文真值源 bodyById；with_content 恒 false，映射本就是空转）——期望键集
        同步收窄，其余键逐键取值断言不变。 */
     checkNew('(r) articleRowToEntry 键集合与逐键取值全量一致（缺键/多键/错值/接错源任一即失败；TASK-122 起不含 content/rawContent）',
@@ -474,275 +501,17 @@ export async function run(ctx) {
       missing(brokenEntry, expectEntry).length === 1 && missing(brokenEntry, expectEntry)[0] === 'cover');
     checkNew('(r) 比较器自检：cover 接错数据源（取 imageUrl 之外的值）必须被判定为失败',
       wrong({ ...entry, cover: 'https://wrong.example/x.png' }, expectEntry).includes('cover'));
+    const missingUrlKnown = { ...entry };
+    delete missingUrlKnown.urlKnown;
+    checkNew('(r) 比较器自检：删除 urlKnown 映射必须被判定为失败',
+      missing(missingUrlKnown, expectEntry).length === 1
+      && missing(missingUrlKnown, expectEntry)[0] === 'urlKnown');
+    checkNew('(r) 比较器自检：非空 URL 的 urlKnown 反向为 false 必须被判定为失败',
+      wrong({ ...entry, urlKnown: false }, expectEntry).includes('urlKnown'));
   }
 
-/* ============================================================
-   TASK-092（REQ-106 ③）：封面图片位统一代理 / 失败回退 / 失效上报
-   驱动 src/lib/coverImage.ts（五处图片位共用的状态机，ui-loader 就地转译），
-   fetch_image / report_broken_cover 由本段落临时包一层 __INVOKE__ 可控假后端
-   （段末恢复）。组件是否真的调用这些函数：SSR 渲染 CoverImage + 源码形态断言。
-   ============================================================ */
-{
-  const cov = await import('../../src/lib/coverImage.ts');
-  const ip = await import('../../src/lib/imageProxy.ts');
-  const fsC = await import('node:fs');
-  const readSrc = (p) => fsC.readFileSync(new URL(p, import.meta.url), 'utf8');
-  const prevInvokeC = globalThis.__INVOKE__;
-  const cCalls = [];
-  const fetchPlan = new Map(); // url -> 'png' | 'html' | 'reject' | 'empty'
-  let reportReject = false;
-  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
-  const HTML = Array.from(new TextEncoder().encode('<!doctype html><html><body>请登录</body></html>'));
-  const nCmd = (cmd, url) => cCalls.filter((c) => c.cmd === cmd && (url === undefined || c.args.url === url)).length;
-  const reports = () => cCalls.filter((c) => c.cmd === 'report_broken_cover').map((c) => `${c.args.articleId}|${c.args.url}`);
-  const SSPAI = 'https://cdnfile.sspai.com/2026/09/cover.png?imageView2/2/w/300';
-  const DOUBAN = 'https://img9.doubanio.com/view/photo/l/public/p1.jpg';
-  const PLAIN = 'https://images.example.com/c.jpg';
-  const unhandled = [];
-  const onUnhandled = (e) => { unhandled.push(e); };
-  const warns = [];
-  // R1：临时覆盖统一在 try 内注册、finally 复原（成功/异常都保全；注册本身分步兜底）
-  let restoreInvokeC = null;
-  let restoreWarnC = null;
-  try {
-    restoreInvokeC = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
-      if (cmd === 'fetch_image') {
-        cCalls.push({ cmd, args });
-        const plan = fetchPlan.get(args.url) ?? 'png';
-        if (plan === 'reject') return Promise.reject({ code: 'imageFetch', message: 'HTTP 错误: 403' });
-        if (plan === 'empty') return Promise.resolve([]);
-        return Promise.resolve(plan === 'html' ? HTML : PNG);
-      }
-      if (cmd === 'report_broken_cover') {
-        cCalls.push({ cmd, args });
-        return reportReject ? Promise.reject({ code: 'db', message: 'database is locked' }) : Promise.resolve(true);
-      }
-      return prevInvokeC(cmd, args);
-    });
-    restoreWarnC = overrideGlobal(console, 'warn', (...a) => { warns.push(a.map(String).join(' ')); });
-    process.on('unhandledRejection', onUnhandled);
-    cov.resetCoverCacheForTest();
-
-    /* A1/A2：取图路径只由 imageProxy.needsImageProxy 决定 */
-    checkNew('(cov-a1) 取图路径：sspai/doubanio 走代理，普通图床直连，空 cover 为 none（判定来自 imageProxy）',
-      cov.coverRoute(SSPAI) === 'proxy' && cov.coverRoute(DOUBAN) === 'proxy'
-      && cov.coverRoute(PLAIN) === 'direct' && cov.coverRoute('') === 'none'
-      && cov.coverRoute(null) === 'none' && cov.coverRoute(undefined) === 'none'
-      && cov.coverRoute('data:image/png;base64,AA==') === 'direct');
-    {
-      const cs = readSrc('../../src/lib/coverImage.ts');
-      const code = cs.split('\n').filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
-      checkNew('(cov-a1) 判定规则只在 imageProxy.ts 一处：coverImage.ts 调用 needsImageProxy 且代码里不含任何图床域名',
-        code.includes('needsImageProxy(src)') && !/sspai|doubanio/.test(code));
-    }
-
-    /* A1：代理成功 → data: URL，fetch_image 带 pageUrl 只发一次 */
-    cov.driveCover(SSPAI, 'https://sspai.com/post/1', '11');
-    const loadingState = cov.getCoverState(SSPAI).status;
-    await nTick(10);
-    const okState = cov.getCoverState(SSPAI);
-    checkNew('(cov-a1) 代理成功：先 loading，再 ready 为 data:image/png URL；fetch_image 1 次且带 {url,pageUrl}',
-      loadingState === 'loading' && okState.status === 'ready' && okState.src.startsWith('data:image/png;base64,')
-      && nCmd('fetch_image', SSPAI) === 1
-      && cCalls.find((c) => c.cmd === 'fetch_image').args.pageUrl === 'https://sspai.com/post/1');
-    checkNew('(cov-a4) 渲染决策：代理未返回前是占位（pending，不直连防盗链图），返回后是 data: 的 img',
-      cov.coverView(SSPAI, { status: 'loading' }).kind === 'placeholder'
-      && cov.coverView(SSPAI, { status: 'idle' }).kind === 'placeholder'
-      && cov.coverView(SSPAI, okState).kind === 'img' && cov.coverView(SSPAI, okState).direct === false
-      && cov.coverView(SSPAI, okState).src.startsWith('data:'));
-
-    /* A2：直连域名不触发 fetch_image */
-    const fBefore = nCmd('fetch_image');
-    cov.driveCover(PLAIN, 'https://example.com/a', '12');
-    await nTick(10);
-    const plainView = cov.coverView(PLAIN, cov.getCoverState(PLAIN));
-    checkNew('(cov-a2) 不需代理的域名直连：不触发 fetch_image，渲染为原 URL 的直连 img',
-      nCmd('fetch_image') === fBefore && plainView.kind === 'img' && plainView.direct === true && plainView.src === PLAIN);
-
-    /* B5/C8：代理失败 → 占位 + 上报 */
-    fetchPlan.set(DOUBAN, 'reject');
-    cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21');
-    await nTick(10);
-    cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21'); // 组件状态变化后 effect 再跑一次
-    await nTick(10);
-    checkNew('(cov-b5) 代理失败（fetch_image 拒绝）→ failed，渲染为占位而非 img',
-      cov.getCoverState(DOUBAN).status === 'failed'
-      && cov.coverView(DOUBAN, cov.getCoverState(DOUBAN)).kind === 'placeholder');
-    const firstReport = cCalls.find((c) => c.cmd === 'report_broken_cover');
-    checkNew('(cov-c8) 失败即上报 report_broken_cover，参数 {articleId:number, url}（Tauri camelCase 契约）',
-      reports().includes(`21|${DOUBAN}`) && firstReport?.args.articleId === 21
-      && Object.keys(firstReport?.args ?? {}).sort().join(',') === 'articleId,url');
-
-    /* B7：同一会话失败 URL 不再请求；C8 幂等 */
-    for (let i = 0; i < 5; i++) cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21');
-    cov.requestProxiedCover(DOUBAN, 'https://movie.douban.com/x');
-    await nTick(10);
-    checkNew('(cov-b7) 失败的 URL 同会话内不再发 fetch_image（再驱动 6 次后仍只 1 次）',
-      nCmd('fetch_image', DOUBAN) === 1);
-    checkNew('(cov-c8) 同条目同 URL 只上报一次（重复驱动后 report_broken_cover 仍 1 次）',
-      reports().filter((r) => r === `21|${DOUBAN}`).length === 1);
-    /* C9：迷你播放条 + 全屏播放器 + 灯箱展示同一 cover（同一条目 id）→ 共用缓存与去重 */
-    cov.driveCover(DOUBAN, undefined, '21');
-    cov.driveCover(DOUBAN, undefined, '21');
-    cov.driveCover(DOUBAN, undefined, '21');
-    await nTick(10);
-    checkNew('(cov-c9) 播放条/灯箱与卡片展示同一 cover：零新增取图、零新增上报',
-      nCmd('fetch_image', DOUBAN) === 1 && reports().filter((r) => r === `21|${DOUBAN}`).length === 1);
-    cov.driveCover(DOUBAN, undefined, '22');
-    await nTick(10);
-    checkNew('(cov-c8) 另一条目引用同一失效 URL：该条目上报一次，但不重新取图',
-      nCmd('fetch_image', DOUBAN) === 1 && reports().filter((r) => r === `22|${DOUBAN}`).length === 1);
-    checkNew('(cov-c8) 无条目 id（正文图进灯箱）/ data: URL 不上报',
-      cov.reportCoverFailure(null, DOUBAN) === false && cov.reportCoverFailure('', DOUBAN) === false
-      && cov.reportCoverFailure('31', 'data:image/png;base64,AA==') === false);
-
-    /* B5：代理返回空字节 → 占位 */
-    const EMPTYB = 'https://rssfile.sspai.com/empty.jpg';
-    fetchPlan.set(EMPTYB, 'empty');
-    cov.driveCover(EMPTYB, undefined, '41');
-    await nTick(10);
-    checkNew('(cov-b5) 代理返回空字节 → failed（reason=empty）',
-      cov.getCoverState(EMPTYB).status === 'failed' && cov.getCoverState(EMPTYB).reason === 'empty');
-
-    /* D11：字节不是图片 → 占位 + 上报，不注入 DOM */
-    const LOGIN = 'https://cdnfile.sspai.com/login-wall.jpg';
-    fetchPlan.set(LOGIN, 'html');
-    cov.driveCover(LOGIN, undefined, '51');
-    await nTick(10);
-    cov.driveCover(LOGIN, undefined, '51');
-    await nTick(10);
-    checkNew('(cov-d11) 代理字节是 HTML 登录页 → failed(not-image)，不产出 data: URL，渲染占位',
-      cov.getCoverState(LOGIN).status === 'failed' && cov.getCoverState(LOGIN).reason === 'not-image'
-      && cov.coverView(LOGIN, cov.getCoverState(LOGIN)).kind === 'placeholder');
-    checkNew('(cov-d11) 非图片字节同样上报一次', reports().filter((r) => r === `51|${LOGIN}`).length === 1);
-    const strict = await ip.fetchProxiedImage(LOGIN);
-    checkNew('(cov-d11) fetchProxiedImage 对 HTML 字节返回 not-image（严格判定在 imageProxy.ts）',
-      strict.ok === false && strict.reason === 'not-image');
-
-    /* A3：画廊的 proxyImageUrl 行为逐字保留（不做严格判定，仍按 image/jpeg 兜底） */
-    const galleryHtml = await ip.proxyImageUrl(LOGIN);
-    checkNew('(cov-a3) 画廊 proxyImageUrl 行为不变：非图片字节仍按修前逻辑兜底为 data:image/jpeg',
-      typeof galleryHtml === 'string' && galleryHtml.startsWith('data:image/jpeg;base64,'));
-    {
-      const tl = readSrc('../../src/components/Timeline.tsx');
-      const gal = tl.slice(tl.indexOf('const GalleryCard = memo('), tl.indexOf('/* ---------- 播客卡片'));
-      checkNew('(cov-a3) 画廊卡片仍走 proxyImageUrl(src, item.url) + proxiedSrc ?? item.imageUrl，未换成 CoverImage',
-        gal.length > 0 && gal.includes('void proxyImageUrl(src, item.url)')
-        && gal.includes('const imgSrc = proxiedSrc ?? item.imageUrl;') && !gal.includes('<CoverImage'));
-    }
-
-    /* 直连失败（img onError）→ 占位 + 上报 + 不再请求 */
-    const DIRECT_BAD = 'https://images.example.com/404.jpg';
-    cov.driveCover(DIRECT_BAD, undefined, '61');
-    const directBefore = cov.coverView(DIRECT_BAD, cov.getCoverState(DIRECT_BAD));
-    cov.onCoverError(DIRECT_BAD);
-    cov.driveCover(DIRECT_BAD, undefined, '61');
-    cov.driveCover(DIRECT_BAD, undefined, '61');
-    await nTick(10);
-    checkNew('(cov-b5) 直连 onError → failed，之后渲染占位（不再挂 img 重新请求）',
-      directBefore.kind === 'img' && cov.getCoverState(DIRECT_BAD).status === 'failed'
-      && cov.coverView(DIRECT_BAD, cov.getCoverState(DIRECT_BAD)).kind === 'placeholder'
-      && nCmd('fetch_image', DIRECT_BAD) === 0);
-    checkNew('(cov-c8) 直连失败上报一次', reports().filter((r) => r === `61|${DIRECT_BAD}`).length === 1);
-
-    /* D10：空 cover 不渲染 img、不代理、不上报 */
-    const beforeEmpty = cCalls.length;
-    cov.driveCover('', 'https://sspai.com/post/2', '71');
-    cov.driveCover(null, undefined, '71');
-    cov.driveCover(undefined, undefined, '71');
-    await nTick(10);
-    checkNew('(cov-d10) 空 cover（空串/null/undefined）：零 fetch_image、零上报、渲染决策为 none',
-      cCalls.length === beforeEmpty && cov.coverView('', { status: 'idle' }).kind === 'none'
-      && cov.coverView(null, { status: 'idle' }).kind === 'none');
-
-    /* 上报本身失败：静默（console.warn），不产生未处理的 rejection */
-    reportReject = true;
-    const RB = 'https://images.example.com/report-fails.jpg';
-    cov.onCoverError(RB);
-    cov.driveCover(RB, undefined, '81');
-    await nTick(30);
-    reportReject = false;
-    checkNew('(cov-c8) report_broken_cover 失败时静默：无 unhandledRejection，仅 console.warn',
-      reports().includes(`81|${RB}`) && unhandled.length === 0 && warns.some((w) => w.includes('report_broken_cover')));
-
-    /* 组件接线：SSR 渲染 CoverImage（组件真的消费 coverView 的决策） */
-    {
-      const { renderToStaticMarkup } = await import('react-dom/server');
-      const { createElement } = await import('react');
-      const { CoverImage } = await import('../../src/components/CoverImage.tsx');
-      const r = (props) => renderToStaticMarkup(createElement(CoverImage, { className: 'card-cover-thumb', alt: 'cover', ...props }));
-      const hEmpty = r({ src: '', articleId: '1' });
-      const hPending = r({ src: 'https://cdnfile.sspai.com/never-requested.png', articleId: '1' });
-      const hReady = r({ src: SSPAI, articleId: '11' });
-      const hFailed = r({ src: DOUBAN, articleId: '21' });
-      const hDirect = r({ src: PLAIN, articleId: '12' });
-      checkNew('(cov-d10) SSR：空 cover 不产出任何 <img>',
-        hEmpty === '' && !r({ src: null }).includes('<img'));
-      checkNew('(cov-a4) SSR：代理未返回时渲染同类名占位（card-cover-thumb cover-fallback，pending），无 <img>',
-        !hPending.includes('<img') && hPending.includes('class="card-cover-thumb cover-fallback"')
-        && hPending.includes('data-cover-state="pending"'));
-      checkNew('(cov-a1) SSR：代理成功渲染 data: 的 <img>（沿用原类名）',
-        /<img[^>]*src="data:image\/png;base64,/.test(hReady) && hReady.includes('class="card-cover-thumb"'));
-      checkNew('(cov-b5) SSR：失败渲染占位（failed）+ 图标，无 <img>（不出破图图标）',
-        !hFailed.includes('<img') && hFailed.includes('data-cover-state="failed"') && hFailed.includes('svg-icon'));
-      checkNew('(cov-a2) SSR：直连渲染原 URL + referrerPolicy=no-referrer（与修前一致）',
-        hDirect.includes(`src="${PLAIN}"`) && /referrerpolicy="no-referrer"/i.test(hDirect));
-    }
-
-    /* 组件与五处图片位的源码接线（SSR 读不到 effect / onError / 真实 store，故以源码形态钉住） */
-    {
-      const ci = readSrc('../../src/components/CoverImage.tsx');
-      checkNew('(cov-wire) CoverImage：effect 调 driveCover(url, pageUrl, articleId)、渲染走 coverView、代理与直连 img 都挂 onCoverError',
-        /useEffect\(\(\) => \{ driveCover\(url, pageUrl, articleId\); \}/.test(ci)
-        && ci.includes('coverView(url, state)')
-        && (ci.match(/onError=\{\(\) => onCoverError\(url\)\}/g) || []).length === 2
-        && /data-cover-route="proxy"[^>]*onError=\{\(\) => onCoverError\(url\)\}/.test(ci)
-        && /data-cover-route="direct"[\s\S]*?onError=\{\(\) => onCoverError\(url\)\}/.test(ci));
-      const tl = readSrc('../../src/components/Timeline.tsx');
-      const pb = readSrc('../../src/components/PlayerBar.tsx');
-      const ov = readSrc('../../src/components/Overlays.tsx');
-      const cut = (s, a, b) => { const i = s.indexOf(a); return i < 0 ? '' : s.slice(i, s.indexOf(b, i)); };
-      const fiveSites = [
-        ['文章卡', cut(tl, 'card-main-content', 'card-footer'), 'src={art.cover}', 'articleId={art.id}'],
-        ['播客卡', cut(tl, 'className={`podcast-card', 'podcast-show-name'), 'src={item.cover}', 'articleId={item.id}'],
-        ['迷你播放条', cut(pb, 'player-track-info', 'player-titles'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
-        ['全屏播放器', cut(pb, 'player-full-cover-wrap', 'player-full-meta'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
-        ['灯箱', cut(ov, 'export function Lightbox()', 'export function NewCategoryModal()'), 'src={lightboxUrl}', 'articleId={lightboxEntryId}'],
-      ];
-      const badSites = fiveSites.filter(([, blk, a, b]) => !(blk.includes('<CoverImage') && blk.includes(a) && blk.includes(b) && !/<img\b/.test(blk)));
-      checkNew(`(cov-wire) 五处图片位全部改用 CoverImage（带条目 id）且不再有裸 <img>（不合规：${badSites.map((s) => s[0]).join('、') || '无'}）`,
-        badSites.length === 0);
-    }
-
-    /* C9 数据面：播放条 cover 与条目 id 同源；灯箱带条目 id；关闭清空 */
-    {
-      store.getState().playPodcastEpisode('第 A 集', '节目', DOUBAN, 'https://a.example/ea.mp3', '21');
-      const pA = store.getState().player;
-      store.getState().playPodcastEpisode('第 B 集', '节目', '', 'https://a.example/eb.mp3', '22');
-      const pB = store.getState().player;
-      checkNew('(cov-c9) 播放条封面记下所属条目 id；新剧集无 cover 时 cover 与 id 一起沿用（上报对象与显示一致）',
-        pA.cover === DOUBAN && pA.coverEntryId === '21' && pB.cover === DOUBAN && pB.coverEntryId === '21');
-      store.getState().closePodcastBar();
-      store.getState().openLightbox(DOUBAN, '21');
-      const lbOpen = { url: store.getState().lightboxUrl, id: store.getState().lightboxEntryId };
-      store.getState().closeLightbox();
-      store.getState().openLightbox('https://x.example/prose.png');
-      const lbProse = store.getState().lightboxEntryId;
-      store.getState().closeLightbox();
-      checkNew('(cov-c9) 灯箱携带条目 id（画廊）/ 正文图为 null；关闭同时清空 url 与 id',
-        lbOpen.url === DOUBAN && lbOpen.id === '21' && lbProse === null
-        && store.getState().lightboxUrl === null && store.getState().lightboxEntryId === null);
-      const tl = readSrc('../../src/components/Timeline.tsx');
-      checkNew('(cov-c9) 画廊打开灯箱时带上条目 id（灯箱失败可按条目上报）',
-        tl.includes('if (lightboxSrc) openLightbox(lightboxSrc, item.id);'));
-    }
-  } finally {
-    process.off('unhandledRejection', onUnhandled);
-    if (restoreWarnC) restoreWarnC();
-    if (restoreInvokeC) restoreInvokeC();
-    cov.resetCoverCacheForTest();
-  }
-}
+  const { run: runImageResources } = await import('./image-resources.mjs');
+  await runImageResources(ctx);
 
 /* ============================================================
    TASK-094（REQ-107）：三布局列表可达性 —— 列表查询带 layout、分页游标/视图
@@ -754,11 +523,9 @@ export async function run(ctx) {
 
    断言分层（证据强度如实说明）：
    - (r7-key)：键函数形态断言（scopePageKey / scopeQueryArgs 含布局）。
-   - (r7-switch)/(reach-args)：内存假后端下走真实 store 动作，断言**请求参数**
-     带 layout、各布局首批 offset=0、切回不重复不跳页。本段假后端刻意不做布局
-     过滤（后端过滤语义由 Rust 侧 list_articles_layout_* / article_index 对齐
-     测试锁定；真机假后端 tmp/task-094/mock_backend_094.py 逐字复刻谓词），
-     因此可见集合断言一律走 selectVisibleEntries（前端布局过滤仍生效）。
+   - (r7-switch)/(reach-args)：内存假后端下走真实 store 动作，成员查询按布局
+     过滤，属性页只按捕获ID返回；每布局600条，验证首500、尾100、往返恢复
+     与精确ID顺序。此处不再使用把跨布局1200行混入article查询的旧夹具。
    - (reach-cap)/(reach-sentinel)：refillDecision 纯函数判定 + Timeline 源码形态
      （判定真的接进 effect 与哨兵分支）；真实点击/滚动的交互证据由真机 harness
      （tmp/task-094/ui/）取证。
@@ -804,6 +571,7 @@ export async function run(ctx) {
       let out = rows94.slice();
       if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
       if (a.folder_id != null) out = out.filter((r) => (FEEDS94.find((f) => f.id === r.feed_id) || {}).folder_id === a.folder_id);
+      if (a.layout) out = out.filter((r) => (r.feed_id === 11 ? 'social' : 'article') === a.layout);
       const dir = a.newest_first === false ? 1 : -1;
       out.sort((x, y) => (dir * (Date.parse(x.published_at) - Date.parse(y.published_at))) || (dir * (x.id - y.id)));
       if (a.last_published != null && a.last_id != null) {
@@ -820,10 +588,13 @@ export async function run(ctx) {
       switch (cmd) {
         case 'list_folders': return Promise.resolve(FOLDERS94);
         case 'list_feeds': return Promise.resolve(FEEDS94);
+        case 'list_article_sources': return Promise.resolve(FEEDS94);
         case 'feed_counts': return Promise.resolve([]);
         case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
         case 'sync_status': return Promise.resolve({ connected: false });
         case 'list_articles': return Promise.resolve(queryRows94((args && args.args) || {}));
+        case 'list_article_member_ids': return Promise.resolve(queryRows94(args?.args ?? {}).map((r) => r.id));
+        case 'get_article_updates': return Promise.resolve({ items: args.ids.map((id) => rows94.find((r) => r.id === id)).filter(Boolean), missing_ids: [] });
         case 'article_index': return Promise.resolve(0);
         case 'get_articles': return Promise.resolve([]);
         case 'get_setting': return Promise.resolve(null);
@@ -835,6 +606,7 @@ export async function run(ctx) {
     const nTick94 = (ms = 20) => new Promise((r) => setTimeout(r, ms));
     const store94 = (await import('../../dist-test/store.js')).useAppStore;
     const { selectVisibleEntries } = await import('../../dist-test/store.js');
+    await ctx.resetStore();
     viewEntriesCache.clear();
     rows94 = [];
     for (let i = 0; i < 600; i += 1) {
@@ -851,37 +623,39 @@ export async function run(ctx) {
     });
     store94.getState().selectLayout('article');
     await store94.getState().reloadFromBackend();
-    const r7First = calls94.find((c) => c.cmd === 'list_articles');
-    checkNew('(reach-args) 列表首批请求带 layout=article 且 offset=0（后端查询的布局维度）',
-      r7First?.args.args.layout === 'article' && r7First?.args.args.offset === 0);
+    const r7First = calls94.find((c) => c.cmd === 'list_article_member_ids');
+    checkNew('(reach-args) 首次捕获article全部600成员，首批只回读正确的500个ID',
+      r7First?.args.args.layout === 'article' && store94.getState().readingSession?.memberIds.length === 600
+      && calls94.find((c) => c.cmd === 'get_article_updates')?.args.ids.join(',') === Array.from({length:500},(_,i)=>8000+i).join(','));
 
     calls94.length = 0;
     await store94.getState().loadMoreArticles();
     const idsBeforeLeave = selectVisibleEntries(store94.getState()).map((e) => e.id);
     /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（article 布局首页
        末行 id 9249，交错序最后一行）——判别意图不变：锚取自该布局自己的游标桶。 */
-    checkNew('(r7-switch) article 第 2 页：请求沿用该布局自己的游标（keyset 锚 last_id=9249），可见集合增长到 500 且无重复',
-      calls94.find((c) => c.cmd === 'list_articles')?.args.args.last_id === 9249
-      && calls94.find((c) => c.cmd === 'list_articles')?.args.args.offset === undefined
-      && idsBeforeLeave.length === 500 && new Set(idsBeforeLeave).size === 500
+    checkNew('(r7-switch) article 第2页回读8500至8599，全部600可达且无跨布局重复',
+      calls94.find((c) => c.cmd === 'get_article_updates')?.args.ids.join(',') === Array.from({length:100},(_,i)=>8500+i).join(',')
+      && !calls94.some((c) => c.cmd === 'list_article_member_ids')
+      && idsBeforeLeave.length === 600 && new Set(idsBeforeLeave).size === 600
       && idsBeforeLeave.every((id) => Number(id) >= 8000 && Number(id) < 9000)
-      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 600);
 
     /* 切到 social：该口径首批从 offset=0 开始（请求带 layout=social），游标分桶互不污染 */
     calls94.length = 0;
     store94.getState().selectLayout('social');
     const r7SocialSync = store94.getState();
-    checkNew('(r7-switch) 切 social 同步阶段：游标从 0 起步（不继承 article 的 1000），article 桶原样保留',
-      r7SocialSync.articlesLimit === 0 && r7SocialSync.articlesCursor['article|all']?.loaded === 1000);
+    checkNew('(r7-switch) 切social同步阶段尚无新成员，保留article的600进度供返回',
+      !r7SocialSync.readingSession?.ready && selectVisibleEntries(r7SocialSync).length === 0
+      && r7SocialSync.articlesCursor['article|all']?.loaded === 600);
     await nTick94(30);
-    const r7SocialCall = calls94.find((c) => c.cmd === 'list_articles');
+    const r7SocialCall = calls94.find((c) => c.cmd === 'list_article_member_ids');
     const r7SocialIds = selectVisibleEntries(store94.getState()).map((e) => e.id);
-    checkNew('(reach-args) social 首批请求带 layout=social 且 offset=0；可见条目只含 social 源',
-      r7SocialCall?.args.args.layout === 'social' && r7SocialCall?.args.args.offset === 0
-      && r7SocialIds.length > 0 && r7SocialIds.every((id) => Number(id) >= 9000));
+    checkNew('(reach-args) social 新捕获600成员且首500只含social源',
+      r7SocialCall?.args.args.layout === 'social' && store94.getState().readingSession?.memberIds.length === 600
+      && r7SocialIds.length === 500 && r7SocialIds.every((id) => Number(id) >= 9000));
     checkNew('(r7-switch) social 游标记在 social 桶（与 article 桶并存）：两布局各自记账',
       store94.getState().articlesCursor['social|all']?.loaded === 500
-      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 600);
 
     /* 切回 article：缓存命中同步恢复快照，游标与恢复的快照长度对齐（既有 selectFeed
        同一契约——不从 0 起步、不继承 social 桶）；后台刷新 + 续一页后，
@@ -889,9 +663,8 @@ export async function run(ctx) {
     calls94.length = 0;
     store94.getState().selectLayout('article');
     const r7BackSync = store94.getState();
-    checkNew('(r7-switch) 切回 article 同步恢复：游标与恢复的快照长度对齐（不从 0 起步），social 桶不污染 article 桶',
-      r7BackSync.articlesLimit === r7BackSync.entries.length && r7BackSync.articlesLimit > 0
-      && r7BackSync.articlesCursor['article|all']?.loaded === r7BackSync.articlesLimit
+    checkNew('(r7-switch) 切回article先重捕获会话，旧social桶仍保留而不冒充当前成员',
+      !r7BackSync.readingSession?.ready
       && r7BackSync.articlesCursor['social|all']?.loaded === 500);
     await nTick94(30);
     await store94.getState().loadMoreArticles();
@@ -899,7 +672,7 @@ export async function run(ctx) {
     checkNew('(r7-switch) 切回 article 续一页后：可见集合与离开前逐位一致（无重复、无缺失段），游标连续',
       r7BackIds.length === idsBeforeLeave.length && r7BackIds.join(',') === idsBeforeLeave.join(',')
       && new Set(r7BackIds).size === r7BackIds.length
-      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 600);
 
     /* 视图缓存按「布局 × 视图 × 范围」分桶：两布局各有快照（R7 缓存半边） */
     checkNew('(r7-cache) 视图缓存键含布局：article 与 social 各有独立快照，互不冒充',
@@ -908,11 +681,13 @@ export async function run(ctx) {
 
     /* anchorToArticle 与列表同口径：article_index 请求带 layout */
     calls94.length = 0;
-    store94.setState({ activeFeedFilter: '10', activeArticleId: null });
+    store94.getState().selectFeed('10');
+    await ctx.waitUntil(() => store94.getState().readingSession?.ready && store94.getState().backendReloadsInFlight === 0);
+    calls94.length = 0;
     await store94.getState().anchorToArticle('8003');
-    checkNew('(reach-args) anchorToArticle 的 article_index / list_articles 请求同样带 layout（锚定与列表同口径）',
-      calls94.some((c) => c.cmd === 'article_index' && c.args.args.layout === 'article')
-      && calls94.filter((c) => c.cmd === 'list_articles').every((c) => c.args.args.layout === 'article'));
+    checkNew('(reach-args) 同会话锚定直接定位已捕获成员，不重新查旧动态索引',
+      store94.getState().activeArticleId === '8003' && store94.getState().readingSession.query.layout === 'article'
+      && !calls94.some((c) => c.cmd === 'article_index' || c.cmd === 'list_articles'));
   } finally {
     globalThis.__INVOKE__ = prevInvoke94;
     viewEntriesCache.clear();
@@ -1024,11 +799,13 @@ export async function run(ctx) {
     && zOf('player-full-overlay') < zOf('modal-overlay'));
 
   /* ---------- fix-9：画廊 img 补 onError + cover-fallback 占位 ---------- */
-  checkNew('(fix-9) 画廊 img 补 onError（记入共享封面失败态）且失败/无图均出占位（与另四处统一）',
-    tlFix.includes("import { onCoverError } from '../lib/coverImage'")
-    && tlFix.includes('onError={onImgError}')
+  // 首图已来自独立gallery images；局部占位保留，不能污染封面URL缓存/上报。
+  // gallery-media挂载域断言error→原节点键盘打开→重试、同URL封面缓存仍idle。
+  checkNew('(fix-9) 画廊首图 onError 留局部失败占位，媒体源变化不复用失败且不污染封面状态',
+    tlFix.includes('onError={onImgError}')
     && tlFix.includes("imgFailed ? ' cover-fallback' : ''")
-    && tlFix.includes('if (prevImageUrl !== item.imageUrl) {'));
+    && tlFix.includes('const onImgError = () => lease?.failDecode();')
+    && !tlFix.includes('onCoverError('));
 
   /* ---------- fix-10：空必填输入禁用主按钮 ---------- */
   const ovFix = srcOf('../../src/components/Overlays.tsx');
@@ -1113,10 +890,12 @@ export async function run(ctx) {
         switch (cmd) {
           case 'list_folders': return Promise.resolve(FOLDERS);
           case 'list_feeds': return Promise.resolve(FEEDS);
+          case 'list_article_sources': return Promise.resolve(FEEDS);
           case 'feed_counts': return Promise.resolve([]);
         case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
           case 'sync_status': return Promise.resolve({ connected: false });
-          case 'list_articles': {
+          case 'list_article_member_ids':
+          case 'get_article_updates': {
             const a = (args && args.args) || {};
             let out = [];
             for (let i = 0; i < 600; i += 1) {
@@ -1127,25 +906,20 @@ export async function run(ctx) {
               }));
             }
             if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
-            /* TASK-117：keyset 锚成对给出时按谓词续拉（published_at 两两互异，字符串比较即可） */
-            if (a.last_published != null && a.last_id != null) {
-              out = out.filter((r) => r.published_at < a.last_published
-                || (r.published_at === a.last_published && r.id < a.last_id));
-              out = out.slice(0, a.limit != null ? a.limit : undefined);
-            } else {
-              out = out.slice(a.offset || 0, a.limit != null ? (a.offset || 0) + a.limit : undefined);
-            }
+            const payload = cmd === 'list_article_member_ids' ? out.map((r) => r.id)
+              : { items: args.ids.map((id) => out.find((r) => r.id === id)).filter(Boolean), missing_ids: [] };
             if (delayed) {
               delayed = null;
-              return new Promise((resolve) => setTimeout(() => resolve(out), 60));
+              return new Promise((resolve) => setTimeout(() => resolve(payload), 60));
             }
-            return Promise.resolve(out);
+            return Promise.resolve(payload);
           }
           default: return Promise.resolve(null);
         }
       };
       const { isBackendReloadInFlight } = await import('../../dist-test/store/slices/bootstrap.js');
       const viewCache = (await import('../../dist-test/store/internals.js')).viewEntriesCache;
+      await ctx.resetStore();
       viewCache.clear();
       store.setState({
         dataMode: 'tauri', dataLoading: false, bootstrapError: null,
@@ -1164,14 +938,15 @@ export async function run(ctx) {
       delayed = true;
       feedFilter = 11;
       calls.length = 0;
-      store.getState().selectFeed('feed-11');
+      store.getState().selectFeed('11');
       checkNew('(t100-p3-1) 切范围后 reload 在途：isBackendReloadInFlight() 为真',
         isBackendReloadInFlight() === true);
       const idsBeforeReload = store.getState().entries.length;
       await store.getState().loadMoreArticles();
       await nTick100(5);
-      checkNew('(t100-p3-1) 在途窗口内 loadMoreArticles 被拦截：未发出第二发 list_articles（修前会把新口径一页 append 到旧列表尾）',
-        calls.filter((c) => c.cmd === 'list_articles').length === 1
+      checkNew('(t100-p3-1) 新成员查询在途时续页被拦截：仅一发成员查询，未抢跑属性页',
+        calls.filter((c) => c.cmd === 'list_article_member_ids').length === 1
+          && !calls.some((c) => c.cmd === 'get_article_updates')
           && store.getState().entries.length === idsBeforeReload);
       // reload 落地后拦截解除，续拉恢复
       await nTick100(120);
@@ -1179,18 +954,31 @@ export async function run(ctx) {
         isBackendReloadInFlight() === false
           && store.getState().entries.length === 500
           && store.getState().entries.every((e) => e.feedId === '11')
-          && store.getState().articlesCursor['article|feed-11']?.loaded === 500);
+          && store.getState().articlesCursor['article|11']?.loaded === 500);
       calls.length = 0;
       await store.getState().loadMoreArticles();
       /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（feed-11 首页
          末行 id 150499 的原文锚）——判别意图不变：续拉带该范围的游标。 */
-      checkNew('(t100-p3-1) 落地后续拉放行：第 2 页请求带该范围 keyset 锚 last_id=150499（假后端每源共 600 行，追加 100 行收敛到底）',
-        calls.filter((c) => c.cmd === 'list_articles').length === 1
-          && calls.find((c) => c.cmd === 'list_articles')?.args.args.last_id === 150499
-          && calls.find((c) => c.cmd === 'list_articles')?.args.args.last_published
-            === new Date(Date.UTC(2026, 8, 4, 10, 0, 0) - 499 * 1000).toISOString()
+      checkNew('(t100-p3-1) 新会话落地后回读自身最后100成员，完整600条收敛到底',
+        calls.filter((c) => c.cmd === 'get_article_updates').length === 1
+          && calls.find((c) => c.cmd === 'get_article_updates')?.args.ids.join(',') === Array.from({length:100},(_,i)=>150500+i).join(',')
+          && !calls.some((c) => c.cmd === 'list_article_member_ids')
           && store.getState().entries.length === 600
           && store.getState().articlesExhausted === true);
+      // 同会话属性刷新也必须持锁；不能因成员列表已ready而让续页并发抢写。
+      delayed = true;
+      calls.length = 0;
+      const refresh = store.getState().reloadFromBackend();
+      await nTick100(5);
+      await store.getState().loadMoreArticles();
+      checkNew('(t100-p3-1) ready会话的属性刷新在途时仍持锁，续页不额外读取',
+        isBackendReloadInFlight() && store.getState().backendReloadsInFlight === 1
+        && calls.filter((c) => c.cmd === 'get_article_updates').length === 1);
+      await refresh;
+      checkNew('(t100-p3-1) 属性刷新结束释放当前代资源，成员顺序与完整600条不变',
+        !isBackendReloadInFlight() && store.getState().backendReloadsInFlight === 0
+        && store.getState().readingSession.memberIds.join(',') === Array.from({length:600},(_,i)=>String(150000+i)).join(',')
+        && store.getState().entries.length === 600);
       feedFilter = null;
     } finally {
       globalThis.__INVOKE__ = prevInvoke;
@@ -1207,9 +995,15 @@ export async function run(ctx) {
           case 'sync_phase':
             if (syncPhaseError) return Promise.reject(syncPhaseError);
             return Promise.resolve({ pushed_states: 0, pushed_feeds: 0, pulled_feeds: 0, pulled_entries: 0, merged_states: 0, errors: [] });
+          case 'sync_run':
+            if (syncPhaseError) return Promise.reject(syncPhaseError);
+            return Promise.resolve({ activity_id: 1, feeds: { errors: [] }, states: { errors: [] }, error: null });
           case 'refresh_all_feeds': return Promise.resolve({ new_articles: 0, failed_feeds: 0 });
           case 'list_folders': return Promise.resolve([]);
           case 'list_feeds': return Promise.resolve([]);
+          case 'list_article_sources': return Promise.resolve([]);
+          case 'list_article_member_ids': return Promise.resolve([]);
+          case 'get_article_updates': return Promise.resolve({ items: [], missing_ids: [] });
           case 'list_articles': return Promise.resolve([]);
           case 'feed_counts': return Promise.resolve([]);
         case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
@@ -1217,9 +1011,9 @@ export async function run(ctx) {
           default: return Promise.resolve(null);
         }
       };
-      store.setState({ dataMode: 'tauri', dataLoading: false, bootstrapError: null, toasts: [], syncStatus: 'synced' });
+      store.setState({ dataMode: 'tauri', dataLoading: false, bootstrapError: null, toasts: [], syncStatus: 'synced', readingSession: null, entries: [] });
       // 场景 1：notConnected（既有语义）→ 静默跳过订阅层，走纯直连刷新
-      syncPhaseError = { code: 'notConnected', message: '未连接后端' };
+      syncPhaseError = { code: 'notConnected', message: '未连接同步服务' };
       store.getState().triggerManualSync();
       await nTick100(60);
       const toast1 = store.getState().toasts.at(-1)?.text ?? '';
@@ -1324,7 +1118,6 @@ export async function run(ctx) {
     const shortcuts = src100('../../src/components/settings/ShortcutsTab.tsx');
     const syncTab = src100('../../src/components/settings/SyncTab.tsx');
     const apiSrc = src100('../../src/lib/api.ts');
-    const bootstrap = src100('../../src/store/slices/bootstrap.ts');
     const internals = src100('../../src/store/internals.ts');
     const ctxMenu = src100('../../src/components/ContextMenu.tsx');
     const feedsTab = src100('../../src/components/settings/FeedsTab.tsx');
@@ -1334,19 +1127,46 @@ export async function run(ctx) {
     const baseCss = src100('../../src/styles/base.css');
     const indexHtml = src100('../../index.html');
     const readme = src100('../../README.md');
+    const localSyncModel = src100('../../src-tauri/src/db/settings.rs');
+    const settingAllowlist = localSyncModel.match(/pub const SYNC_SETTING_KEYS:[\s\S]*?= &\[([\s\S]*?)\];/)?.[1] ?? '';
 
-    /* P3-1：reload 在途拦截（行为断言见上，这里锁守卫的存在性） */
-    checkNew('(t100-p3-1) 守卫接线：loadMoreArticles 入口检查 isBackendReloadInFlight；两个 reload 以计数器包裹',
-      bootstrap.includes('if (isBackendReloadInFlight()) return;')
-      && bootstrap.includes('backendReloadInFlight++')
-      && bootstrap.includes('backendReloadInFlight--')
-      && (bootstrap.match(/backendReloadInFlight--/g) || []).length === 2);
-    /* 【TASK-119 更新理由】原 reloadGeneration 已统一为查询实例代际
-       queryGeneration（模块级改名，保护语义等价保留）——断言随统一语义更新
-       措辞，并**强化**：新代际状态同样锁定为模块级（不得泄漏进 store）。 */
-    checkNew('(t100-p3-1) 计数器与查询代际（TASK-119 统一后的 queryGeneration）同为模块级状态（不得被 setState 泄漏进 store）',
-      !bootstrap.includes('reloadInFlight: ') && !bootstrap.includes('queryGeneration: ')
-      && bootstrap.includes('let backendReloadInFlight = 0;') && bootstrap.includes('let queryGeneration = 0;'));
+    /* D29 契约断言：README 只负责表达「同步什么 / 什么留在本机」，
+       不锁某一句固定文案；旧配置快照退役后改查 local_sync 设置白名单，保留否定句反例。 */
+    const readmeLocalSyncContract = (markdown) => {
+      const bullet = markdown.match(/^-\s+\*\*本地资料库同步\*\*[：:](.*)$/m)?.[1] ?? '';
+      const clauses = bullet.split(/[；;。]/).map((part) => part.trim()).filter(Boolean);
+      const localOnly = (clause) =>
+        /(?:本机|本地)/.test(clause)
+        && /(?:不参与同步|不同步|保留)/.test(clause);
+      const negatedSync = /(?:不参与同步|不同步|不进行同步)/;
+      return {
+        scope: clauses.some((clause) =>
+          /订阅源/.test(clause)
+          && /客户端设置/.test(clause)
+          && /读藏状态/.test(clause)
+          && /未读\/收藏正文/.test(clause)
+          && /同步/.test(clause)
+          && !negatedSync.test(clause)),
+        aiLocal: clauses.some((clause) =>
+          /AI\s*配置/.test(clause) && /模型/.test(clause) && /AI\s*产物/.test(clause) && localOnly(clause)),
+        credentialsLocal: clauses.some((clause) =>
+          /(?:API\s*Key|API\s*密钥|密码|凭据)/i.test(clause) && localOnly(clause)),
+        noObsoleteModelClaim: !/模型等非敏感配置/.test(bullet),
+        rssExclusive: /与\s*RSS\s*同步服务互斥/.test(bullet),
+      };
+    };
+    const readmePasses = (markdown) => {
+      const contract = readmeLocalSyncContract(markdown);
+      return contract.scope
+        && contract.aiLocal
+        && contract.credentialsLocal
+        && contract.rssExclusive
+        && contract.noObsoleteModelClaim;
+    };
+
+    /* P3-1旧全局计数器形态已被当前请求serial/Set替代。
+       上方真实成员查询和ready会话属性刷新分别验证在途拦截、释放及数据保全；
+       pagination-and-cache的A/B重叠反例另锁旧请求不阻断新会话。 */
 
     /* P3-2：fetchFailed 假 affordance */
     checkNew('(t100-p3-2) fetchFailed 警示点改为非点击承诺「最近一次抓取失败」（重试走旁边独立刷新钮）',
@@ -1376,8 +1196,8 @@ export async function run(ctx) {
       syncTab.includes('已断开连接，但本地刷新失败'));
     checkNew('(t100-p3-9) SyncReport 补 removed_feeds 声明，SyncTab 同步报告消费（对账删除计数，纯信息展示）',
       apiSrc.includes('removed_feeds?: number;')
-        && syncTab.includes('removedFeeds += feedsReport.removed_feeds')
-        && syncTab.includes('removedFeeds += statesReport.removed_feeds')
+        && syncTab.includes('removedFeeds += report?.removed_feeds')
+        && syncTab.includes("['feeds', 'states']")
         && syncTab.includes('本次对账移除'));
 
     /* P3-10：mock addFeed 失败可见（行为断言见上） */
@@ -1388,9 +1208,32 @@ export async function run(ctx) {
     checkNew('(t100-d29) api.ts 搜索注释更正为 LIKE 子串（FTS5 仅历史遗留提法），不再宣称 FTS5 全文搜索',
       !apiSrc.includes('FTS5 全文搜索')
         && apiSrc.includes('LIKE 子串匹配'));
-    checkNew('(t100-d29) README 同步范围更正：AI 配置/模型名不在白名单',
-      readme.includes('AI 配置（含模型名）不在白名单')
-        && !readme.includes('模型等非敏感配置'));
+    checkNew('(t100-d29) README 本地WebDAV语义：订阅/设置/读藏/保护正文参与同步，RSS互斥；AI配置/产物和凭据仅本机',
+      readmePasses(readme));
+    checkNew('(t100-d29) WebDAV设置白名单含AI行为，排除AI服务配置与凭据（真实payload由local_sync后端套件验证）',
+      settingAllowlist.includes('articleAutoSummary') && settingAllowlist.includes('fontSize')
+        && !/ai_config|password|apiKey|credentials|token/.test(settingAllowlist));
+    const localOnlyTail = '与 RSS 同步服务互斥。AI 配置（包括模型名）及 AI 产物留在本机，不参与同步。'
+      + 'API Key 与密码等凭据保留在本地，不同步。';
+    const positiveReadme = '- **本地资料库同步**：通过 WebDAV 在多设备间同步订阅源、客户端设置、读藏状态及未读/收藏正文。'
+      + localOnlyTail;
+    const negativeReadmes = ['不参与同步', '不同步', '不进行同步'].map((negation) =>
+      '- **本地资料库同步**：通过 WebDAV 在多台设备间同步；'
+      + `订阅源、客户端设置、读藏状态及未读/收藏正文${negation}。${localOnlyTail}`);
+    const singleObjectReadme = '- **本地资料库同步**：通过 WebDAV 同步订阅源。'
+      + localOnlyTail;
+    const crossClauseReadme = '- **本地资料库同步**：订阅源可同步；客户端设置、读藏状态及未读/收藏正文可同步。'
+      + localOnlyTail;
+    const obsoleteModelReadme = positiveReadme + '模型等非敏感配置也会同步。';
+    checkNew('(t100-d29) README readmePasses 自检：完整正向样本通过',
+      readmePasses(positiveReadme) === true);
+    checkNew('(t100-d29) README readmePasses 自检：AI/凭据正确但含旧模型说法判红',
+      readmePasses(obsoleteModelReadme) === false);
+    checkNew('(t100-d29) README readmePasses 自检：不参与同步/不同步/不进行同步三类否定句均判红',
+      negativeReadmes.every((sample) => readmePasses(sample) === false));
+    checkNew('(t100-d29) README readmePasses 自检：仅单对象与跨分句均判红',
+      readmePasses(singleObjectReadme) === false
+        && readmePasses(crossClauseReadme) === false);
 
     /* D28：base.css 历史注释乱码重建（73 行 / 114 处 U+FFFD → 0） */
     const fffd = String.fromCharCode(0xfffd);
@@ -1402,12 +1245,12 @@ export async function run(ctx) {
         && baseCss.includes('层级最高：盖过设置弹窗（150）与下拉菜单（2000） */'));
 
     /* UI P2-2：J/K 范围文案 + Social/Notif 卡 roving */
-    /* 【TASK-114 更新理由】X3 把 J/K 从「仅文章」扩展到全部虚拟化布局（画廊除外），
-       旧文案「文章布局」正是本卡收口的不一致点——随之改准并钉住新范围（明示画廊
-       不支持）；「不得宣传成整个时间流」的防误伤边界（!includes 时间流）保留。 */
-    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案随 TASK-114 改准：虚拟化四布局生效、明示画廊不支持（旧「文章布局」清零）',
-      shortcuts.includes("'文章/社交/播客/通知（画廊不支持）'")
+    /* 【2026-11-04 更新理由】J/K 已覆盖画廊；旧「画廊不支持」文案是历史
+       产品判断，不再描述现状。 */
+    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案覆盖五布局（旧「文章布局」/「画廊不支持」清零）',
+      shortcuts.includes("'全部内容布局'")
       && !shortcuts.includes("'文章布局'")
+      && !shortcuts.includes('画廊不支持')
       && !shortcuts.includes("'时间流'"));
     checkNew('(t100-uip2-2) SocialCard/NotifCard 补 role="article" + tabIndex + 方向键 roving，融入既有 tabindex 体系',
       timeline.includes("role=\"article\"")
@@ -1428,12 +1271,12 @@ export async function run(ctx) {
         && primitives.includes('onKeyDown={onTrapKeyDown}'));
     checkNew('(t100-uip2-7/W4) Lightbox 焦点契约同源 useFocusTrap（打开移入/关闭归还/Tab 循环）',
       overlays.includes('useFocusTrap(!!lightboxUrl, overlayRef)')
-        && overlays.includes('onKeyDown={onTrapKeyDown}'));
+        && /onKeyDown=\{\(e\) => \{\s*onTrapKeyDown\(e\);/.test(overlays));
 
     /* U7：Esc 链补 closeAskVisible */
-    checkNew('(t100-u7) App.tsx Esc 链首支补 closeAskVisible（确认框 3000 自带 Esc > 弹窗 150 > 播放器 140）',
+    checkNew('(t100-u7) App.tsx Esc 链首支补 closeAskVisible（只取消询问，不提交关闭动作）',
       app.indexOf('if (s.closeAskVisible)') < app.indexOf('else if (s.searchOpen) s.closeSearch()')
-        && app.includes("s.answerCloseAsk('tray', false)"));
+        && app.includes('s.dismissCloseAsk()'));
 
     /* U2：叫法统一「添加订阅源」 */
     checkNew('(t100-u2) 右键菜单与设置页 FeedsTab 统一「添加订阅源」，两套旧叫法清零',
@@ -1496,9 +1339,12 @@ export async function run(ctx) {
       !timeline.includes('opacity: 0.45')
         && baseCss.includes('.hydrate-placeholder {')
         && baseCss.includes('opacity: 0.45;'));
-    checkNew('(t100-c25) 双刷新入口 busy 统一「禁用+转圈」：小图标钮补 disabled，CSS 提供禁用态',
-      sidebar.includes('disabled={isBusy}')
-        && baseCss.includes('.sync-refresh-btn:disabled'));
+    checkNew('(t100-c25) 同步入口回收为「灯=手动同步、文字=设置」：重复刷新图标/大按钮清零，忙时灯 disabled，呼吸动画有 reduced-motion 关闭',
+      sidebar.includes('disabled={syncView.busy}')
+        && !sidebar.includes('sync-refresh-btn')
+        && !sidebar.includes('sidebar-refresh-all')
+        && baseCss.includes('.sync-dot--syncing')
+        && baseCss.includes('animation: none !important;'));
     checkNew('(t100-c27) primitives.tsx stale 注释更正：确认框 z-index 3000（修前注释写 300）',
       primitives.includes('z-index 为 3000') && !primitives.includes('z-index 300，'));
     checkNew('(t100-c17) #e67e22 token 化：tokens.css 新增 --feed-error，base.css 引用，硬编码清零',
@@ -1530,40 +1376,42 @@ export async function run(ctx) {
   const src101 = (p) => fs101.readFileSync(new URL(p, import.meta.url), 'utf8');
 
   const syncTab101 = src101('../../src/components/settings/SyncTab.tsx');
-  const configSync101 = src101('../../src/components/settings/ConfigSyncSection.tsx');
+  const configSync101 = src101('../../src/components/settings/PortableBackupSection.tsx');
   const cacheCleanup101 = src101('../../src/components/settings/CacheCleanupSection.tsx');
   const general101 = src101('../../src/components/settings/GeneralTab.tsx');
 
-  /* ---------- V1：SyncTab 主提示（唯一带 marginTop:8 的 mini-dialog-hint） ---------- */
-  const mainHint101 =
-    syncTab101.match(/<div className="mini-dialog-hint" style=\{\{ marginTop: 8 \}\}>\s*([\s\S]*?)<\/div>/)?.[1]
-      ?.replace(/\s+/g, '') ?? '';
+  /* ---------- V1：SyncTab 按钮语义（2026-11-04 起不再常驻说明） ---------- */
+  const testButtonTitle101 =
+    syncTab101.match(/title="([^"]*只验证登录[^"]*)"/)?.[1] ?? '';
+  const saveButtonTitle101 =
+    syncTab101.match(/title="([^"]*保存后拉取订阅[^"]*)"/)?.[1] ?? '';
 
-  checkNew('(t101-v1a) 语义a：「测试连接」仅验证登录（TASK-102 精简口径，验证语义保留）',
-    mainHint101.includes('「测试连接」仅验证登录'));
-  checkNew('(t101-v1b) 语义b：「保存并同步」确认后拉取订阅与文章（拉取只由保存触发，TASK-102 口径）',
-    mainHint101.includes('「保存并同步」确认后拉取订阅与文章'));
-  checkNew('(t101-v1c) 语义c：断开删除语义移出常驻提示（TASK-102），仅由断开确认框承载',
-    !mainHint101.includes('断开')
-    && syncTab101.includes('断开后将移除从服务端拉取的订阅与文章'));
+  checkNew('(t101-v1a) 语义a：「测试连接」仅验证登录（收进按钮 title，验证语义保留）',
+    testButtonTitle101.includes('只验证登录'));
+  checkNew('(t101-v1b) 语义b：「保存并同步」说明拉取对象（订阅、阅读状态与文章）',
+    saveButtonTitle101.includes('拉取订阅、阅读状态与文章'));
+  checkNew('(t101-v1c) 断开删除语义仅由断开确认框承载',
+    !testButtonTitle101.includes('断开')
+    && !saveButtonTitle101.includes('断开')
+    && syncTab101.includes('断开后将移除从同步服务拉取的订阅与文章'));
   checkNew('(t101-v1-d) 已读/收藏回传句删除（TASK-102：解释性冗余；TASK-101 曾取保留，owner 返工改删）',
-    !mainHint101.includes('回传') && !syncTab101.includes('约1秒内回传'));
-  checkNew('(t101-v1-len) 新主提示单句 ≤40 字（V1 短句口径；修前单段 74 字）',
-    mainHint101.length > 0
-    && mainHint101.split('。').filter(Boolean).every((s) => s.length <= 40));
+    !syncTab101.includes('约1秒内回传') && !syncTab101.includes('已读/收藏等变更约 1 秒内'));
+  checkNew('(t101-v1-len) 两个动作 title 均 ≤48 字（说明不靠常驻长句）',
+    testButtonTitle101.length > 0 && testButtonTitle101.length <= 48
+    && saveButtonTitle101.length > 0 && saveButtonTitle101.length <= 48);
   checkNew('(t101-v1-old) 被点名旧长句四种片段整段清零',
     !syncTab101.includes('只验证连通性（秒级）')
     && !syncTab101.includes('会立即在后台拉取订阅与文章状态')
     && !syncTab101.includes('已读/收藏等变更约 1 秒内推送到服务端')
     && !syncTab101.includes('断开连接会移除服务端拉取的订阅与文章'));
-  checkNew('(t101-v1-e) SyncTab 恰一块 mini-dialog-hint（动作区主提示；Fever 提示已并入协议卡 desc，TASK-102）',
-    (syncTab101.match(/mini-dialog-hint/g) || []).length === 1);
+  checkNew('(t101-v1-e) SyncTab 动作区不再保留常驻 mini-dialog-hint',
+    (syncTab101.match(/mini-dialog-hint/g) || []).length === 0);
 
   /* ---------- V2：Fever「API 密码」提示（TASK-102 起并入「同步协议」卡 desc 位，
       独立 mini-dialog-hint 与包裹 div 均删除；≤32 字预算内 FreshRSS/个人设置
       细节让位，「Fever/GReader 均用」+「非登录密码」核心误区纠正保留） ---------- */
   const protoCard101 =
-    syncTab101.slice(syncTab101.indexOf('title="同步协议"'), syncTab101.indexOf('title="后端 Endpoint"'));
+    syncTab101.slice(syncTab101.indexOf('title="同步协议"'), syncTab101.indexOf('title="同步服务地址"'));
   const protoDesc101 = protoCard101.match(/desc="([^"]+)"/)?.[1] ?? '';
 
   checkNew('(t101-v2a) API 密码提示在协议卡 desc 位：Fever/GReader 通用且点明非登录密码（TASK-102 口径）',
@@ -1577,23 +1425,19 @@ export async function run(ctx) {
     && !protoCard101.includes('<div'));
 
   /* ---------- 审计项源级断言：三处 >60 字 desc 的压缩前后锁定 ---------- */
-  checkNew('(t101-audit-1) SyncTab 用户名 desc 63→45 字：集成页配置/GReader·Fever 共用/非账号密码 三语义全保留',
-    syncTab101.includes('Miniflux「集成」页配置的用户名，GReader / Fever 共用（非账号密码）')
+  checkNew('(t101-audit-1) SyncTab 用户名 desc：同步服务 API 用户名/Miniflux 查看路径/非登录密码 三语义保留',
+    syncTab101.includes('同步服务生成的 API 用户名；Miniflux 在「集成」页查看（非登录密码）')
     && !syncTab101.includes('页单独配置的用户名')
     && !syncTab101.includes('非 Miniflux 账号密码'));
-  checkNew('(t101-audit-2) ConfigSyncSection Token desc 56→47 字：classic PAT/gist scope/fine-grained 不支持 全保留（TASK-102 ≤48 口径）',
-    configSync101.includes('手动填入；classic PAT 需勾 gist scope，fine-grained 不支持')
-    && !configSync101.includes('手动填入替代网页登录')
-    && !configSync101.includes('fine-grained PAT 不支持 Gist API'));
-  checkNew('(t101-audit-3) ConfigSyncSection WebDAV desc 55→31 字：配置文件名 fluxreader-config.json 保留（示例 URL 由输入框 placeholder 表达，TASK-102 ≤48 口径）',
-    configSync101.includes('配置在服务器存为 fluxreader-config.json')
-    && !configSync101.includes('例如 https://dav.example.com')
-    && !configSync101.includes('dav.example.com/fluxreader（配置存为'));
+  checkNew('(t101-audit-2) 便携恢复明确断开服务和重新输入凭据',
+    configSync101.includes('RSS 与 WebDAV 均会断开') && configSync101.includes('凭据需要重新输入'));
+  checkNew('(t101-audit-3) 便携预览明确缺正文与替换当前资料库',
+    configSync101.includes('缺少正文') && configSync101.includes('替换当前资料库'));
 
   /* ---------- 审计兜底：九个设置组件静态 desc 全量扫描，>60 字清零（修前 63/66/69 三处） ---------- */
   const auditedDescs101 = [
     'GeneralTab', 'ReadingTab', 'AppearanceTab', 'AboutTab', 'FeedsTab',
-    'AiTab', 'ConfigSyncSection', 'CacheCleanupSection', 'SyncTab',
+    'AiTab', 'LocalSyncSection', 'PortableBackupSection', 'DatabaseBackupSection', 'CacheCleanupSection', 'SyncTab',
   ].flatMap((f) => [...src101(`../../src/components/settings/${f}.tsx`).matchAll(/desc="([^"]+)"/g)])
     .map((m) => m[1]);
   checkNew('(t101-audit-4) 九组件静态 desc 扫描（' + auditedDescs101.length + ' 条）：>60 字长 desc 清零',
@@ -1604,12 +1448,15 @@ export async function run(ctx) {
      改为预览/合并/镜像语义——同步的是分类与源的 AI 开关及界面设置，
      含模型/密钥的 AI 服务配置不在同步范围（旧文案与后端白名单矛盾）。 */
   checkNew('(t101-audit-5) 确认与约束语义零丢失：断开确认、清理不可撤销、收藏与待同步保留、AI 缓存正文保留、下载预览确认、托盘真退出',
-    syncTab101.includes('断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？')
+    syncTab101.includes('断开后将移除从同步服务拉取的订阅与文章')
+    && syncTab101.includes('放弃尚未确认的已读/收藏同步队列')
+    && syncTab101.includes('本地直连订阅及其已读/收藏值保留')
+    && syncTab101.includes('不会在重连后自动补推')
     && cacheCleanup101.includes('此操作不可撤销')
-    && cacheCleanup101.includes('收藏文章与待同步状态始终保留')
-    && cacheCleanup101.includes('（收藏除外）')
+    && cacheCleanup101.includes('未读与收藏正文保留')
+    && cacheCleanup101.includes('已读、未收藏且无待同步状态')
     && cacheCleanup101.includes('正文保留')
-    && configSync101.includes('下载先预览：合并保留本地独有；镜像删除本地多出对象，确认后才写入')
+    && configSync101.includes('先校验并预览；确认后替换当前资料库')
     && general101.includes('托盘菜单「退出」才是真正退出'));
 }
 
@@ -1632,36 +1479,38 @@ export async function run(ctx) {
   const general102 = src102('../../src/components/settings/GeneralTab.tsx');
   const reading102 = src102('../../src/components/settings/ReadingTab.tsx');
   const about102 = src102('../../src/components/settings/AboutTab.tsx');
-  const configSync102 = src102('../../src/components/settings/ConfigSyncSection.tsx');
+  const configSync102 = src102('../../src/components/settings/PortableBackupSection.tsx');
   const cacheCleanup102 = src102('../../src/components/settings/CacheCleanupSection.tsx');
   const shared102 = src102('../../src/components/settings/shared.ts');
 
   /* ---------- X1：协议卡结构断言（对齐根因修复） ---------- */
   const protoCard102 = syncTab102.slice(
     syncTab102.indexOf('title="同步协议"'),
-    syncTab102.indexOf('title="后端 Endpoint"'),
+    syncTab102.indexOf('title="同步服务地址"'),
   );
   checkNew('(t102-x1a) 同步协议卡：SettingCard 开标签后直接是 FluxDropdown（直接子元素，无包裹层）',
     /title="同步协议"\s*desc="[^"]+"\s*>\s*<FluxDropdown/.test(syncTab102));
   checkNew('(t102-x1b) 同步协议卡：FluxDropdown 闭合后直接 </SettingCard>，卡内无包裹 div、无 hint',
-    /<FluxDropdown[\s\S]*?\/>\s*\n\s*<\/SettingCard>\s*\n\s*<SettingCard\s*\n\s*title="后端 Endpoint"/.test(syncTab102)
+    /<FluxDropdown[\s\S]*?\/>\s*\n\s*<\/SettingCard>\s*\n\s*<SettingCard\s*\n\s*title="同步服务地址"/.test(syncTab102)
     && !protoCard102.includes('<div')
     && !protoCard102.includes('mini-dialog-hint'));
 
-  /* ---------- X2：文案断言（单行提示 + 删除语义归位 + API 密码提示） ---------- */
-  const mainHint102 =
-    syncTab102.match(/<div className="mini-dialog-hint" style=\{\{ marginTop: 8 \}\}>\s*([\s\S]*?)<\/div>/)?.[1]
-      ?.replace(/\s+/g, '') ?? '';
-  checkNew('(t102-x2a) 动作区提示单行 ≤40 字：两按钮语义一一对齐（测试连接=仅验证登录；保存并同步=确认后拉取订阅与文章）',
-    mainHint102.length > 0 && mainHint102.length <= 40
-    && mainHint102.includes('「测试连接」仅验证登录')
-    && mainHint102.includes('「保存并同步」确认后拉取订阅与文章'));
-  checkNew('(t102-x2b) 「断开会移除拉取内容」不再常驻：主提示无「断开」，破坏性语义仅由断开确认框承载',
-    !mainHint102.includes('断开')
-    && syncTab102.includes('断开后将移除从服务端拉取的订阅与文章'));
+  /* ---------- X2：文案断言（按钮 title + 删除语义归位 + API 密码提示） ---------- */
+  const testButtonTitle102 =
+    syncTab102.match(/title="([^"]*只验证登录[^"]*)"/)?.[1] ?? '';
+  const saveButtonTitle102 =
+    syncTab102.match(/title="([^"]*保存后拉取订阅[^"]*)"/)?.[1] ?? '';
+  checkNew('(t102-x2a) 动作语义收进 title ≤48 字：测试连接=只验证登录；保存并同步=拉取订阅、状态与文章',
+    testButtonTitle102.length > 0 && testButtonTitle102.length <= 48
+    && saveButtonTitle102.length > 0 && saveButtonTitle102.length <= 48
+    && testButtonTitle102.includes('只验证登录')
+    && saveButtonTitle102.includes('拉取订阅、阅读状态与文章'));
+  checkNew('(t102-x2b) 「断开会移除拉取内容」不再常驻：按钮 title 无「断开」，破坏性语义仅由断开确认框承载',
+    !testButtonTitle102.includes('断开')
+    && !saveButtonTitle102.includes('断开')
+    && syncTab102.includes('断开后将移除从同步服务拉取的订阅与文章'));
   checkNew('(t102-x2c) 「已读/收藏约 1 秒回传」删除：常驻提示与整卡均不再出现',
-    !mainHint102.includes('回传')
-    && !syncTab102.includes('约 1 秒内回传')
+    !syncTab102.includes('约 1 秒内回传')
     && !syncTab102.includes('约1秒内回传'));
   const protoDesc102 = protoCard102.match(/desc="([^"]+)"/)?.[1] ?? '';
   checkNew('(t102-x2d) API 密码提示在协议卡 desc 位且 ≤32 字，卡内无第二行常驻 hint',
@@ -1673,7 +1522,7 @@ export async function run(ctx) {
   /* ---------- X3：全设置组件文案扫描守卫（新增长文案直接红） ---------- */
   const scanFiles102 = [
     'GeneralTab', 'ReadingTab', 'AppearanceTab', 'AboutTab', 'FeedsTab',
-    'AiTab', 'ConfigSyncSection', 'CacheCleanupSection', 'SyncTab',
+    'AiTab', 'LocalSyncSection', 'PortableBackupSection', 'DatabaseBackupSection', 'CacheCleanupSection', 'SyncTab',
     'AutoStartSwitch', 'ShortcutsTab', 'SettingsSidebarFooter',
   ];
   /* 去掉注释再取字面量：注释里的引号示例不计入文案；模板串（动态拼接的
@@ -1685,7 +1534,8 @@ export async function run(ctx) {
       .map((m) => m[1] ?? m[2]));
   /* 确认框 message 属对话框文案，不在 X3 desc/hint 范围（49 字，约束语义另锁） */
   const dialogAllowlist102 = new Set([
-    '断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？',
+    '断开后将移除从同步服务拉取的订阅与文章，并放弃尚未确认的已读/收藏同步队列。本地直连订阅及其已读/收藏值保留，但这些旧意图不会在重连后自动补推。确定断开吗？',
+    '更换账户将清理原账户的远端订阅与文章，并放弃尚未确认的已读/收藏同步队列。本地直连订阅及其已读/收藏值保留，旧意图不会迁移或自动补推到新账户。确定更换吗？',
   ]);
   const cjkCopy102 = [...new Set(literals102)]
     .filter((t) => /[\u4e00-\u9fff]/.test(t) && !dialogAllowlist102.has(t));
@@ -1705,23 +1555,95 @@ export async function run(ctx) {
     && !about102.includes('检测 GitHub Releases 上的最新版本')
     && !configSync102.includes('服务器登录账号')
     && !syncTab102.includes('集成密码（Google Reader / Fever 共用）'));
-  checkNew('(t102-x3c) 约束语义零丢失：留空提交=保持密码、托盘真退出、下载预览确认、清理不可撤销、收藏与待同步保留',
-    syncTab102.includes('留空提交 = 保持当前密码')
+  checkNew('(t102-x3c) 约束语义零丢失：留空提交=保持密码、托盘真退出、下载预览确认、清理不可撤销、未读/收藏/待同步保留',
+    syncTab102.includes('留空保持密码')
+    && syncTab102.includes('填写新值只更新密码')
+    && syncTab102.includes('换账号需同时改地址或用户名')
     && general102.includes('托盘菜单「退出」才是真正退出')
     /* OPT-010：下载覆盖旧文案改为预览/合并/镜像语义（含模型/密钥的 AI 服务
        配置不在同步范围——旧文案与后端白名单矛盾）。 */
-    && configSync102.includes('下载先预览：合并保留本地独有；镜像删除本地多出对象，确认后才写入')
+    && configSync102.includes('先校验并预览；确认后替换当前资料库')
     && cacheCleanup102.includes('此操作不可撤销')
-    && cacheCleanup102.includes('收藏文章与待同步状态始终保留'));
+    && cacheCleanup102.includes('未读与收藏正文保留')
+    && cacheCleanup102.includes('已读、未收藏且无待同步状态'));
   const subtitles102 = [...shared102.matchAll(/subtitle: '([^']+)'/g)].map((m) => m[1]);
   checkNew('(t102-x3d) 侧栏 8 个 tab subtitle（组标题级说明同口径）全部 ≤48 字',
     subtitles102.length === 8 && subtitles102.every((t) => t.length <= 48));
 }
 
 /* ============================================================
+   2026-11-04 用户文案精简：行为断言迁移。
+   组件真实挂载覆盖 DOM/点击/焦点/异步；本块只保留可抽为纯函数的行为，
+   以及一条静态标签源级例外（AiTab 文案没有运行时分支）。
+   ============================================================ */
+{
+  const fsCopy = await import('node:fs');
+  const srcCopy = (p) => fsCopy.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const aiTabCopy = srcCopy('../../src/components/settings/AiTab.tsx');
+  const externalEntryCopy = [
+    '../../src/components/ContextMenu.tsx',
+    '../../src/components/Reader.tsx',
+    '../../src/components/Timeline.tsx',
+    '../../src/components/settings/AboutTab.tsx',
+    '../../src/components/settings/PortableBackupSection.tsx',
+    '../../src/store/slices/sync.ts',
+  ].map((p) => srcCopy(p)).join('\n');
+  const copyPolicy = await import('../../dist-test/lib/copyPolicy.js');
+
+  checkNew('(copy-1) 未连接 AddFeed 只描述可选未来动作，不承诺同步页自动引导',
+    copyPolicy.addFeedSyncHint(false, null).includes('可在「同步本地订阅」中确认是否推送')
+    && !copyPolicy.addFeedSyncHint(false, null).includes('请在同步页')
+    && !copyPolicy.addFeedSyncHint(false, null).includes('自动同步'));
+  checkNew('(copy-2) GReader AddFeed 只承诺本次新增，不推送已有本地订阅',
+    copyPolicy.addFeedSyncHint(true, 'greader').includes('只会添加本次订阅')
+    && copyPolicy.addFeedSyncHint(true, 'greader').includes('不推送已有本地订阅')
+    && copyPolicy.addFeedShowsSyncSwitch(true, 'greader'));
+  checkNew('(copy-3) Fever AddFeed 只讲本机边界，不继承连接后的推送承诺',
+    copyPolicy.addFeedSyncHint(true, 'fever').includes('仅本地保存')
+    && !copyPolicy.addFeedSyncHint(true, 'fever').includes('连接同步服务后')
+    && !copyPolicy.addFeedSyncHint(true, 'fever').includes('同步本地订阅')
+    && !copyPolicy.addFeedShowsSyncSwitch(true, 'fever'));
+  checkNew('(copy-4) 已连接但协议未知：不显示同步开关，明确只保存在本机',
+    !copyPolicy.addFeedShowsSyncSwitch(true, null)
+    && copyPolicy.addFeedSyncHint(true, null).includes('只保存在本机')
+    && copyPolicy.addFeedSyncHint(true, null).includes('同步页确认连接状态'));
+  checkNew('(copy-5) 已连接且能力未加载：删除确认明确账户影响未知',
+    copyPolicy.unknownDeleteImpactWarning(true, false).includes('无法确认此操作对同步账户的影响')
+    && copyPolicy.unknownDeleteImpactWarning(true, false).includes('仅按本地后果继续'));
+  checkNew('(copy-6) 未连接或能力已加载：不制造“账户影响未知”警告',
+    copyPolicy.unknownDeleteImpactWarning(false, false) === null
+    && copyPolicy.unknownDeleteImpactWarning(true, true) === null);
+  checkNew('(copy-7) 搜索错误由查询与错误状态独立决定，不受结果条数影响',
+    copyPolicy.searchErrorVisible('添加', true)
+    && copyPolicy.searchErrorVisible('关键词', true));
+  checkNew('(copy-8) 空查询或未出错时不显示本地搜索错误',
+    !copyPolicy.searchErrorVisible('', true)
+    && !copyPolicy.searchErrorVisible('  ', true)
+    && !copyPolicy.searchErrorVisible('添加', false));
+  checkNew('(copy-9) 音频失败键按音频 URL 区分，换集不沿用上一集去重窗口',
+    copyPolicy.audioFailureKey('https://audio.example/a.mp3')
+      === 'audio:play:https://audio.example/a.mp3'
+    && copyPolicy.audioFailureKey('https://audio.example/a.mp3')
+      !== copyPolicy.audioFailureKey('https://audio.example/b.mp3'));
+  checkNew('(copy-10) 同一音频的 play reject 与 error 事件在窗口内只报一次',
+    copyPolicy.shouldReportAudioFailure(null, 'audio:play:a', 1000)
+    && !copyPolicy.shouldReportAudioFailure({ key: 'audio:play:a', at: 1000 }, 'audio:play:a', 2000)
+    && copyPolicy.shouldReportAudioFailure({ key: 'audio:play:a', at: 1000 }, 'audio:play:a', 4000)
+    && copyPolicy.shouldReportAudioFailure({ key: 'audio:play:a', at: 1000 }, 'audio:play:b', 2000));
+  checkNew('(copy-11) 外链入口统一封装：无直接 openExternal，失败说明检查默认浏览器并给出稍后重试方向',
+    copyPolicy.EXTERNAL_OPEN_FAILURE.includes('检查默认浏览器设置')
+    && copyPolicy.EXTERNAL_OPEN_FAILURE.includes('稍后重试')
+    && copyPolicy.EXTERNAL_OPEN_FAILURE !== '无法在浏览器中打开此链接'
+    && !/(?:void|await)\s+openExternal\(/.test(externalEntryCopy));
+  checkNew('(copy-12) 源级例外：AiTab 静态标签不含无信息英文括号',
+    !aiTabCopy.includes('(Prompt)')
+    && aiTabCopy.includes('摘要提示词') && aiTabCopy.includes('翻译提示词'));
+}
+
+/* ============================================================
    TASK-114（2026-10-06，REQ-005/008）：五布局状态与快捷键统一
    X1 NotifCard 水合三态（对齐 SocialCard，失败不再静默）/
-   X2 Enter 五卡统一（Social/Notif 补选中）/ X3 J/K 全虚拟化布局（画廊除外）。
+   X2 Enter 五卡统一（Social/Notif 补选中）/ X3 J/K 五布局统一。
 
    证据边界（如实说明）：renderToStaticMarkup 走 zustand 服务端快照——
    useSyncExternalStore 的 getServerSnapshot 读 getInitialState（createStore
@@ -1773,11 +1695,11 @@ export async function run(ctx) {
     notif114.indexOf('{fullText ? ('),
     notif114.indexOf(") : body.state === 'failed' ? ("),
   );
-  checkNew('(t114-x1b) NotifCard 失败态=内联重试（hydrate-retry + retryHydration(id)，文案域「正文加载失败：」，与 SocialCard 同形），失败分支不再回退 snippet（TASK-122：failed 判别态）',
+  checkNew('(t114-x1b) NotifCard 失败态=独立重试（HydrateFailure + retryHydration(id)，与 SocialCard 同形），失败分支不再回退 snippet',
     notifErrBranch114.length > 0
-    && notifErrBranch114.includes('className="hydrate-retry"')
+    && notifErrBranch114.includes('<HydrateFailure')
     && notifErrBranch114.includes('retryHydration(item.id)')
-    && notifErrBranch114.includes('正文加载失败：')
+    && notifErrBranch114.includes('message={body.message}')
     && !notifErrBranch114.includes('item.snippet')
     && !notifErrBranch114.includes('notif-body-text'));
 
@@ -1789,22 +1711,24 @@ export async function run(ctx) {
   checkNew('(t114-x1f) 正文分支先于失败分支（R1-F1）：「错误态+正文已到达」组合态显示正文而非假失败行（与 SocialCard content 优先逐分支对齐）',
     notifBodyBranch114.length > 0
     && notifBodyBranch114.includes('notif-body-text')
-    && notif114.indexOf('notif-body-text') < notif114.indexOf('className="hydrate-retry"'));
+    && notif114.indexOf('notif-body-text') < notif114.indexOf('<HydrateFailure'));
 
   checkNew('(t114-x1g) 纯失败态（无正文）不渲染「展开更多」（正文已被重试行替换，防死控件）；错误滞留+正文已达的组合态豁免（!!fullText，可展开水合全文，与修前/同态 SocialCard 一致；TASK-122：failed 判别态）',
     notif114.includes("{isLong && (body.state !== 'failed' || !!fullText) && (")
     && notif114.indexOf("{isLong && (body.state !== 'failed' || !!fullText) && (") < notif114.indexOf('className="notif-expand-btn"'));
 
-  checkNew('(t114-x1e) NotifCard 与 SocialCard 三态同构：两卡同为「错误重试 → 空正文 → 加载占位」条件链（占位类与文案逐一同形）',
-    social114.includes('className="hydrate-retry"') && notif114.includes('className="hydrate-retry"')
+  checkNew('(t114-x1e) NotifCard 与 SocialCard 三态同构：两卡同为「失败重试 → 空正文 → 加载占位」条件链',
+    social114.includes('<HydrateFailure') && notif114.includes('<HydrateFailure')
     && social114.includes('className="hydrate-placeholder"') && notif114.includes('className="hydrate-placeholder"')
     && social114.includes('暂无正文') && notif114.includes('暂无正文')
     && social114.includes('加载正文…') && notif114.includes('加载正文…'));
 
   /* ---------- X2：Enter/Space 五卡统一 ---------- */
-  checkNew('(t114-x2a) Enter/Space 键位五卡齐备（Article=选中 / Podcast=play / Gallery 两分支=灯箱 / Social、Notif=选中·新增）',
+  // Gallery图片/失败/空态现在共用稳定trigger；两套handler合一，真实键盘覆盖见gallery-media。
+  checkNew('(t114-x2a) Enter/Space 键位五卡齐备（Article=选中 / Podcast=play / Gallery稳定入口=灯箱 / Social、Notif=选中）',
     cnt114(article114, ENTER_GUARD) === 1 && cnt114(podcast114, ENTER_GUARD) === 1
-    && cnt114(gallery114, ENTER_GUARD) === 2 && cnt114(social114, ENTER_GUARD) === 1
+    && cnt114(gallery114, ENTER_GUARD) === 1 && gallery114.includes('className="gallery-media-trigger"')
+    && gallery114.includes('openImage(e.currentTarget)') && cnt114(social114, ENTER_GUARD) === 1
     && cnt114(notif114, ENTER_GUARD) === 1);
   checkNew('(t114-x2b) Social/Notif Enter 语义=选中（onSelect(item.id)，与 ArticleCard 同动作），且仅卡片本体响应（e.target 守卫：嵌套按钮/链接的键盘激活不被卡片级选中劫持）',
     social114.includes('if (e.target === e.currentTarget)') && notif114.includes('if (e.target === e.currentTarget)')
@@ -1814,7 +1738,7 @@ export async function run(ctx) {
     timeline114.includes('<SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle}')
     && timeline114.includes('<NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle}'));
 
-  /* ---------- X3：J/K 全虚拟化布局（画廊除外） ---------- */
+  /* ---------- X3：J/K 五布局统一 ---------- */
   const { jkLayoutAllowed, jkNextIndex } = await import('../../src/lib/jkNavigation.ts');
 
   /* 修前门控可复现：旧实现 activeContentLayout !== 'article' 即 return，
@@ -1823,18 +1747,18 @@ export async function run(ctx) {
   checkNew('(t114-x3a) 修前门控可复现：旧判定仅 article 放行，social/podcast/notification 一律拦下',
     legacyJkGate114('article') && !legacyJkGate114('social')
     && !legacyJkGate114('podcast') && !legacyJkGate114('notification'));
-  checkNew('(t114-x3b) J/K 门控：虚拟化四布局放行、画廊 image 拦下（与 Timeline 虚拟化开关同一口径）',
+  checkNew('(t114-x3b) J/K 门控：五种内容布局全部放行（画廊已接入同一键盘/焦点路径）',
     jkLayoutAllowed('article') && jkLayoutAllowed('social') && jkLayoutAllowed('podcast')
-    && jkLayoutAllowed('notification') && !jkLayoutAllowed('image'));
+    && jkLayoutAllowed('notification') && jkLayoutAllowed('image'));
   checkNew('(t114-x3c) J/K 推进真值表（与修前内联实现逐条等价）：j 末项回绕→0、k 首项回绕→末项、无选中 j→0/k→末项、空列表→-1',
     jkNextIndex(5, 4, true) === 0 && jkNextIndex(5, 0, false) === 4
     && jkNextIndex(5, -1, true) === 0 && jkNextIndex(5, -1, false) === 4
     && jkNextIndex(3, 1, true) === 2 && jkNextIndex(3, 1, false) === 0
     && jkNextIndex(0, -1, true) === -1 && jkNextIndex(0, -1, false) === -1);
 
-  /* store 层模拟：App.tsx J/K 分支语义可达性——五布局各绑一个源，虚拟化四布局
-     下 selectVisibleEntries 产出序列且「门控放行 ∧ 推进必得可选中目标」；image
-     布局条目虽在、门控拦下（不支持）。跑在本文件末尾，随后恢复 store。 */
+  /* store 层模拟：App.tsx J/K 分支语义可达性——五布局各绑一个源，逐布局
+     selectVisibleEntries 产出序列且「门控放行 ∧ 推进必得可选中目标」。
+     跑在本文件末尾，随后恢复 store。 */
   {
     const { selectVisibleEntries: sve114 } = await import('../../dist-test/store.js');
     const mkEntry114 = (id, feedId, ts) => ({
@@ -1866,18 +1790,13 @@ export async function run(ctx) {
     for (const [feedId, layout] of LAYOUT_FEEDS114) {
       store.setState({ activeContentLayout: layout });
       const items = sve114(store.getState());
-      if (layout === 'image') {
-        /* 画廊：条目在（3 条），但门控拦下——J/K 不可达（不支持） */
-        simOk114 = simOk114 && items.length === 3 && !jkLayoutAllowed(layout);
-        continue;
-      }
       /* 无选中按 j：门控放行 ∧ 推进落最新一条；再从首项 j 推进到位次第二 */
       const first = items[jkNextIndex(items.length, -1, true)];
       const second = items[jkNextIndex(items.length, 0, true)];
       simOk114 = simOk114 && jkLayoutAllowed(layout) && items.length === 3
         && !!first && first.id === `${feedId}3` && !!second && second.id === `${feedId}2`;
     }
-    checkNew('(t114-x3d) store 层五布局模拟：article/social/podcast/notification 逐布局门控放行且 selectVisibleEntries×jkNextIndex 必得可选中目标（j 依次落最新/次新）；image 条目在但门控拦下',
+    checkNew('(t114-x3d) store 层五布局模拟：article/social/image/podcast/notification 逐布局门控放行且 selectVisibleEntries×jkNextIndex 必得可选中目标（j 依次落最新/次新）',
       simOk114);
     store.setState({ activeContentLayout: prevLayout114, entries: [], feedIndex: new Map() });
   }
@@ -1887,10 +1806,11 @@ export async function run(ctx) {
     && app114.includes("jkNextIndex(items.length, curIdx, e.key === 'j')")
     && !app114.includes("s.activeContentLayout !== 'article'")
     && !app114.includes('nextIdx = e.key'));
-  checkNew('(t114-x3f) ShortcutsTab J/K 行同步：范围=文章/社交/播客/通知、明示画廊不支持（旧「文章布局」清零）',
-    shortcuts114.includes("'文章/社交/播客/通知（画廊不支持）'")
+  checkNew('(t114-x3f) ShortcutsTab J/K 行同步：范围=全部内容布局（旧「文章布局」/「画廊不支持」清零）',
+    shortcuts114.includes("'全部内容布局'")
     && shortcuts114.includes("'上下切换选中条目'")
-    && !shortcuts114.includes("'文章布局'"));
+    && !shortcuts114.includes("'文章布局'")
+    && !shortcuts114.includes('画廊不支持'));
 
   /* SSR 烟测（证据边界见块首注释）：NotifCard 三态改动后 Timeline 组件树仍可
      执行（与 d5 同口径的初值空态形态，不承载逐态取证） */
@@ -1923,50 +1843,91 @@ export async function run(ctx) {
 {
   const fs116 = await import('node:fs');
   const src116 = (p) => fs116.readFileSync(new URL(p, import.meta.url), 'utf8');
-  const { syncPillLabel } = await import('../../src/lib/syncPill.ts');
-  const mk116 = (o) => ({ syncStatus: 'synced', backgroundSyncing: false, syncConnected: true, waiting: 0, failed: 0, ...o });
+  const { syncPillLabel, syncPillView, SYNC_SUCCESS_LABEL_MS } = await import('../../src/lib/syncPill.ts');
+  const mk116 = (o) => ({
+    syncStatus: 'synced', backgroundSyncing: false, syncConnected: true,
+    account: 'alice', protocol: 'greader', lastSync: 0, waiting: 0, failed: 0,
+    subscription: { pending: 0, failed: 0, local_only: 0, last_error: null }, ...o,
+  });
+  const now116 = 1_800_000_000_000;
 
-  /* ---------- X1：pill 优先级真值表（纯函数单点） ---------- */
-  checkNew('(t116-x1a) 优先级1：error 恒「同步失败」——手动同步进行中（syncing）/后台同步中也不例外（修复失败被 syncing 覆盖的既有缺陷）',
+  /* ---------- X1：指示器优先级真值表（纯函数单点） ---------- */
+  checkNew('(t116-x1a) 优先级：同步中 > 空闲失败——error+backgroundSyncing 显示「同步中」、tone=syncing；空闲 error 才进入失败态',
     syncPillLabel(mk116({ syncStatus: 'error' })) === '同步失败'
-    && syncPillLabel(mk116({ syncStatus: 'error', backgroundSyncing: true })) === '同步失败');
-  checkNew('(t116-x1b) 优先级2：手动/后台同步中显示「同步中…」（error 缺席时）',
-    syncPillLabel(mk116({ syncStatus: 'syncing' })) === '同步中…'
-    && syncPillLabel(mk116({ backgroundSyncing: true })) === '同步中…');
-  checkNew('(t116-x1c) 优先级3：waiting>0 显示「等待同步 N 条」（未连接也如实——队列是本地事实，连接后自动补推）',
-    syncPillLabel(mk116({ waiting: 3 })) === '等待同步 3 条'
-    && syncPillLabel(mk116({ waiting: 1, syncConnected: false })) === '等待同步 1 条');
-  checkNew('(t116-x1d) failed>0 追加「· 部分失败」段（同一 pill 内，≤48 字）；无失败绝不追加（凭空出现的实现必红）',
-    syncPillLabel(mk116({ waiting: 2, failed: 1 })) === '等待同步 2 条 · 部分失败'
-    && syncPillLabel(mk116({ syncStatus: 'error', failed: 2 })) === '同步失败 · 部分失败'
-    && syncPillLabel(mk116({ syncStatus: 'syncing', failed: 1 })) === '同步中… · 部分失败'
-    && syncPillLabel(mk116({})) === '后端已同步');
+    && syncPillView(mk116({ syncStatus: 'error' })).tone === 'error'
+    && syncPillLabel(mk116({ syncStatus: 'error', backgroundSyncing: true })) === '同步中'
+    && syncPillView(mk116({ syncStatus: 'error', backgroundSyncing: true })).tone === 'syncing');
+  checkNew('(t116-x1b) 优先级2：手动/后台同步中显示「同步中」，且 tone=syncing（呼吸动画的单一输入）',
+    syncPillLabel(mk116({ syncStatus: 'syncing' })) === '同步中'
+    && syncPillLabel(mk116({ backgroundSyncing: true })) === '同步中'
+    && syncPillView(mk116({ backgroundSyncing: true })).tone === 'syncing');
+  checkNew('(t116-x1c) 常驻文案显示账户名；待推送只把 tone 变橙并把数量收进 details/tooltip',
+    syncPillLabel(mk116({ waiting: 3 })) === 'alice'
+    && syncPillView(mk116({ waiting: 3 })).tone === 'pending'
+    && syncPillView(mk116({ waiting: 3 })).details.includes('状态待推送 3 条')
+    && !syncPillLabel(mk116({ waiting: 3 })).includes('3'));
+  checkNew('(t116-x1d) 失败计数/失败终态显示「同步失败」、tone=error；无失败时绝不出现失败文案',
+    syncPillLabel(mk116({ waiting: 2, failed: 1 })) === '同步失败'
+    && syncPillView(mk116({ waiting: 2, failed: 1 })).tone === 'error'
+    && !syncPillLabel(mk116({})).includes('失败'));
+  checkNew('(t116-x1g) local-only/等待绑定/过期意图：文案仍是账户名，tone 橙色，数量只进详情',
+    syncPillLabel(mk116({ bindableRetry: 44 })) === 'alice'
+    && syncPillView(mk116({ bindableRetry: 44 })).tone === 'pending'
+    && syncPillView(mk116({ bindableRetry: 44 })).details.includes('等待绑定 44 条')
+    && syncPillView(mk116({ localOnly: 2, expiredUnconfirmed: 3 })).details.includes('仅本机 2 条')
+    && syncPillView(mk116({ localOnly: 2, expiredUnconfirmed: 3 })).details.includes('过期未确认 3 条'));
+  checkNew('(t116-x1h) 仅终态 failed：文案「同步失败」、tone=error，不得回落成账户名或「后端已同步」',
+    syncPillLabel(mk116({ failed: 2 })) === '同步失败'
+    && syncPillView(mk116({ failed: 2 })).tone === 'error'
+    && !syncPillView(mk116({ failed: 2 })).title.includes('后端已同步'));
+  checkNew('(t116-x1i) 成功短窗口显示「同步完成」（绿色），窗口结束后恢复账户名',
+    syncPillLabel(mk116({ succeededAt: now116 - SYNC_SUCCESS_LABEL_MS + 1, now: now116 })) === '同步完成'
+    && syncPillView(mk116({ succeededAt: now116, now: now116 })).tone === 'success'
+    && syncPillLabel(mk116({ succeededAt: now116 - SYNC_SUCCESS_LABEL_MS, now: now116 })) === 'alice');
 
-  /* ---------- X3：无队列无失败不劣化（既有语义逐字保留，不新增噪音） ---------- */
-  checkNew('(t116-x3a) X3 不劣化：无队列无失败时与既有语义逐字一致（后端已同步 / 本地模式 · 直连抓取），不出现等待/失败段',
-    syncPillLabel(mk116({})) === '后端已同步'
-    && syncPillLabel(mk116({ syncConnected: false })) === '本地模式 · 直连抓取'
-    && !syncPillLabel(mk116({})).includes('等待')
-    && !syncPillLabel(mk116({})).includes('部分失败'));
+  /* ---------- X3：无队列无失败不劣化 ---------- */
+  checkNew('(t116-x3a) 无队列无失败：已连接显示账户名（绿色），无账户显示本地模式（灰色）',
+    syncPillLabel(mk116({})) === 'alice'
+    && syncPillView(mk116({})).tone === 'success'
+    && syncPillLabel(mk116({ syncConnected: false, account: null })) === '本地模式'
+    && syncPillView(mk116({ syncConnected: false, account: null })).tone === 'local'
+    && !syncPillLabel(mk116({})).includes('等待'));
+  checkNew('(t116-x1j) 订阅 outbox 接入：pending 使 tone 橙色；失败使文案/颜色进入失败态',
+    syncPillLabel(mk116({ subscription: { pending: 2, failed: 0, local_only: 0, last_error: null } })) === 'alice'
+    && syncPillView(mk116({ subscription: { pending: 2, failed: 0, local_only: 0, last_error: null } })).tone === 'pending'
+    && syncPillView(mk116({ subscription: { pending: 2, failed: 0, local_only: 0, last_error: null } })).details.includes('订阅变更待推送 2 项')
+    && syncPillLabel(mk116({ subscription: { pending: 1, failed: 1, local_only: 0, last_error: 'HTTP 500' } })) === '同步失败');
 
   /* ---------- 接线：store→pill（SSR 取证）+ 源级防回退 ---------- */
   const sidebarSrc116 = src116('../../src/components/Sidebar.tsx');
   const apiSrc116 = src116('../../src/lib/api.ts');
   const bootstrapSrc116 = src116('../../src/store/slices/bootstrap.ts');
   const syncTabSrc116 = src116('../../src/components/settings/SyncTab.tsx');
-  checkNew('(t116-x1e) Sidebar 接线（源级）：文案收口到 syncPillLabel 单点（store 字段逐参入函），旧内联四分支文案清零（优先级回退必须重写文案单点才能复绿）',
-    sidebarSrc116.includes('syncPillLabel({')
+  checkNew('(t116-x1e) Sidebar 接线（源级）：灯/文字状态收口到 syncPillView，账户/协议/outbox 逐参入函；重复刷新入口清零',
+    sidebarSrc116.includes('syncPillView({')
+    && sidebarSrc116.includes('account: syncAccount,')
+    && sidebarSrc116.includes('protocol: syncProtocol,')
+    && sidebarSrc116.includes('subscription: subOutboxStats,')
     && sidebarSrc116.includes('waiting: syncWaiting,') && sidebarSrc116.includes('failed: syncFailed,')
-    && !sidebarSrc116.includes("'同步失败'") && !sidebarSrc116.includes("'同步中…'")
-    && !sidebarSrc116.includes("'等待同步") && !sidebarSrc116.includes("'后端已同步'"));
-  checkNew('(t116-api) api 形态：syncQueueStats() 调 sync_queue_stats 命令，返回 SyncQueueStats（waiting/failed/last_error）',
+    && sidebarSrc116.includes('localOnly: syncLocalOnly,')
+    && sidebarSrc116.includes('bindableRetry: syncBindableRetry,')
+    && sidebarSrc116.includes('expiredUnconfirmed: syncExpiredUnconfirmed,')
+    && !sidebarSrc116.includes("'同步失败'") && !sidebarSrc116.includes("'同步中'")
+    && !sidebarSrc116.includes("'等待同步") && !sidebarSrc116.includes("'后端已同步'")
+    && !sidebarSrc116.includes('sync-refresh-btn')
+    && !sidebarSrc116.includes('sidebar-refresh-all'));
+  checkNew('(t116-api) api 形态：syncQueueStats() 调 sync_queue_stats 命令，返回生命周期分类（waiting/failed/local-only/匹配/过期）',
     apiSrc116.includes("await inv('sync_queue_stats')")
     && apiSrc116.includes('interface SyncQueueStats')
     && apiSrc116.includes('waiting: number') && apiSrc116.includes('failed: number')
+    && apiSrc116.includes('local_only?: number') && apiSrc116.includes('bindable_retry?: number')
+    && apiSrc116.includes('expired_unconfirmed?: number')
     && apiSrc116.includes('last_error: string | null'));
-  checkNew('(t116-refresh) 刷新时机（源级）：启动装载 reload 顺带拉 syncQueueStats 写入 store（挂载与手动同步完成后的末次 reload 共用此点）',
-    bootstrapSrc116.includes('api.syncQueueStats()')
-    && bootstrapSrc116.includes('syncWaiting: q.waiting') && bootstrapSrc116.includes('syncFailed: q.failed'));
+  checkNew('(t116-refresh) 刷新时机（源级）：启动装载 reload 经 store 唯一动作刷新 sync_status 与完整队列分类',
+    bootstrapSrc116.includes('refreshSyncStatus()')
+    && bootstrapSrc116.includes('refreshSyncQueueStats()')
+    && src116('../../src/store/slices/sync.ts').includes('syncTerminalFailed: stats.failed')
+    && src116('../../src/store/slices/sync.ts').includes('syncExpiredUnconfirmed: stats.expired_unconfirmed ?? 0'));
 
   /* store→pill 接线（SSR 烟测）。证据边界（如实说明）：zustand v5 的
      useSyncExternalStore server snapshot 恒读 getInitialState()（模块创建时的
@@ -1977,28 +1938,54 @@ export async function run(ctx) {
   const { createElement: ce116 } = await import('react');
   const { Sidebar: Sidebar116 } = await import('../../src/components/Sidebar.tsx');
   const pillBase116 = rsm116(ce116(Sidebar116));
-  checkNew('(t116-x1f) SSR 烟测：Sidebar 组件树可执行，初始态（未连接 · 空队列）pill 渲染出 X3 基线文案「本地模式 · 直连抓取」',
-    pillBase116.includes('本地模式 · 直连抓取')
-    && pillBase116.includes('sync-status-pill'));
+  checkNew('(t116-x1f) SSR 烟测：WebDAV尚未读取时初始态明确未知，保留独立灯按钮与状态 live region',
+    pillBase116.includes('>同步状态未确认<')
+    && pillBase116.includes('sync-dot--pending')
+    && !pillBase116.includes('sync-dot--success')
+    && pillBase116.includes('sync-indicator-button')
+    && pillBase116.includes('role="status"')
+    && pillBase116.includes('sync-status-pill')
+    && !pillBase116.includes('sync-refresh-btn'));
 
   /* ---------- X2：SyncTab 四态摘要卡（纯函数真值表 + 源级接线 + SSR 烟测） ---------- */
   const { syncStateSummary } = await import('../../src/lib/syncPill.ts');
   const stat116 = (o) => ({ waiting: 0, failed: 0, last_error: null, ...o });
-  checkNew('(t116-x2a) 摘要口径（纯函数）：等待 N / 部分失败 N（最新错误 ≤1 行摘要）/ 上次同步时间，三段齐备',
-    syncStateSummary(stat116({ waiting: 3 }), 0) === '等待同步 3 条；上次同步 从未；状态变更已保存，连接后自动补推'
+  checkNew('(t116-x2a) 摘要口径（纯函数）：状态待推送 N / 失败 N（最新错误 ≤1 行摘要）/ 上次同步时间，三段齐备',
+    syncStateSummary(stat116({ waiting: 3 }), 0) === '状态待推送 3 条；上次同步 从未；状态变更已保存，连接后自动补推'
     && syncStateSummary(stat116({ waiting: 3 }), 1760000000).includes('上次同步 ')
     && syncStateSummary(stat116({ waiting: 2, failed: 1, last_error: '状态推送失败: HTTP 500' }), 0)
-      === '等待同步 2 条；部分失败 1（状态推送失败: HTTP 500）；上次同步 从未；状态变更已保存，连接后自动补推');
+      === '状态待推送 2 条；失败 1（状态推送失败: HTTP 500）；上次同步 从未；状态变更已保存；终态失败项不会自动重试');
   checkNew('(t116-x2b) 摘要口径（纯函数）：最新错误按码点截断 60 字符+…（不劈代理对）；无队列无失败仅时间行+说明句（X3 无噪音）；不虚构「已确认累计」',
-    syncStateSummary(stat116({ failed: 1, last_error: '错'.repeat(80) }), 0).includes(`部分失败 1（${'错'.repeat(60)}…）`)
+    syncStateSummary(stat116({ failed: 1, last_error: '错'.repeat(80) }), 0).includes(`失败 1（${'错'.repeat(60)}…）`)
     && syncStateSummary(stat116({}), 0) === '上次同步 从未；状态变更已保存，连接后自动补推'
     && !syncStateSummary(stat116({}), 0).includes('已确认'));
+  checkNew('(t116-x2e) 摘要口径（纯函数）：local-only/等待身份/过期逐类显示；仍有未同步意图时不得承诺「连接后自动补推」',
+    syncStateSummary(stat116({ bindable_retry: 44 }), 0)
+      === '等待绑定 44 条；上次同步 从未；状态变更已保存；未同步项保留在本机'
+    && syncStateSummary(stat116({ local_only: 2, expired_unconfirmed: 3 }), 0)
+      === '仅本机 2 条；过期未确认 3 条；上次同步 从未；状态变更已保存；未同步项保留在本机'
+    && !syncStateSummary(stat116({ bindable_retry: 44 }), 0).includes('连接后自动补推'));
+  const terminalFailedSummary116 = syncStateSummary(
+    stat116({ failed: 2, last_error: '远端目标不存在' }),
+    0,
+  );
+  const mixedFailureSummary116 = syncStateSummary(
+    stat116({ failed: 1, local_only: 2, last_error: '远端目标不存在' }),
+    0,
+  );
+  checkNew('(t116-x2f) 终态 failed 的摘要不得承诺「连接后自动补推」：明确失败项不会自动重试，并与未同步意图共存',
+    terminalFailedSummary116.includes('失败 2（远端目标不存在）')
+    && terminalFailedSummary116.includes('终态失败项不会自动重试')
+    && !terminalFailedSummary116.includes('连接后自动补推')
+    && mixedFailureSummary116.includes('终态失败项不会自动重试')
+    && mixedFailureSummary116.includes('未同步项保留在本机')
+    && !mixedFailureSummary116.includes('连接后自动补推'));
   checkNew('(t116-x2c) SyncTab 摘要卡接线（源级）：「同步状态」卡 desc 走 syncStateSummary 单点，挂载与保存并同步链尾都刷新统计；说明句在卡 desc 收尾（不新增常驻 hint，TASK-101/102 既有断言锁定）',
     syncTabSrc116.includes('title="同步状态"')
     && syncTabSrc116.includes('syncStateSummary(')
-    && syncTabSrc116.includes('api.syncQueueStats()')
-    && syncTabSrc116.includes('refreshQueueStats(setQueueStats)')
-    && (syncTabSrc116.match(/mini-dialog-hint/g) || []).length === 1);
+    && syncTabSrc116.includes('refreshSyncQueueStats')
+    && syncTabSrc116.includes('subOutboxStats')
+    && (syncTabSrc116.match(/mini-dialog-hint/g) || []).length === 0);
   const { SyncTab: SyncTab116 } = await import('../../src/components/settings/SyncTab.tsx');
   const syncTabHtml116 = rsm116(ce116(SyncTab116));
   checkNew('(t116-x2d) SSR 烟测：摘要卡改动后 SyncTab 组件树仍可执行（初始 mock 态渲染「演示模式」卡，证据边界同 x1f 注）',
@@ -2010,11 +1997,11 @@ export async function run(ctx) {
    同步状态变化事件 sync-queue-changed——四态展示接入真实链路。
    Rust 侧：本地入队事务提交（set_read/set_starred/set_read_bulk/mark_all_read）、
    即时推送与 states 推送段确认·失败、认证/网络阻塞（build_client 失败，此前
-   attempts/last_error 不记录）后发 sync-queue-changed，payload={waiting,failed,
-   last_error}；未配置同步静默不发。
-   前端侧：App.tsx 监听 → applySyncQueueChanged 写 store 三字段
-   （syncWaiting/syncFailed/syncQueueLastError，与 reloadFromBackend 顺带刷新
-   同一状态源）→ pill / SyncTab 摘要卡自动跟随。
+   attempts/last_error 不记录）后发 sync-queue-changed，payload=队列生命周期
+   分类；未配置同步静默不发。
+   前端侧：App.tsx 监听 → applySyncQueueChanged 写 store 分类字段
+   （waiting/failed/local-only/...，与 reloadFromBackend 顺带刷新同一状态源）
+   → pill / SyncTab 摘要卡自动跟随。
    证据边界（如实说明，p3b 先例）：无浏览器装置挂不了 App.tsx 的 Tauri 事件
    监听（test-loader 仅 mock @tauri-apps/api/core，本卡不改 loader），故事件→
    监听腿用源码形态断言钉住；行为腿驱动 store 真实动作（toggleCurrentReadStatus
@@ -2032,7 +2019,7 @@ export async function run(ctx) {
 {
   const fs124 = await import('node:fs');
   const src124 = (p) => fs124.readFileSync(new URL(p, import.meta.url), 'utf8');
-  const { syncPillLabel, syncStateSummary } = await import('../../src/lib/syncPill.ts');
+  const { syncPillLabel, syncPillView, syncStateSummary } = await import('../../src/lib/syncPill.ts');
 
   /* ---------- (t124-1) 探针 P8 本体：本地标读入队 → pill 即时「等待同步 1 条」 ---------- */
   const mkEntry124 = (id, feedId) => ({
@@ -2046,44 +2033,96 @@ export async function run(ctx) {
   await nTick(30); /* 隔离 bootstrap 顺带的 void syncStatus/syncQueueStats 承诺（迟到落地会覆写 syncConnected） */
   store.setState({
     dataMode: 'tauri', syncStatus: 'synced', backgroundSyncing: false,
-    syncConnected: true, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null,
+    syncConnected: true, syncAccount: 'alice', syncProtocol: 'greader',
+    syncSucceededAt: null,
+    syncWaiting: 0, syncFailed: 0, syncQueueLastError: null,
+    subOutboxStats: { pending: 0, failed: 0, local_only: 0, last_error: null },
     entries: [mkEntry124('9001', '10')], feedCounts: new Map(), toasts: [],
     activeArticleId: '9001', activeViewFilter: 'all', openedReadIds: {},
   });
   const pillOf124 = (st) => syncPillLabel({
     syncStatus: st.syncStatus, backgroundSyncing: st.backgroundSyncing,
-    syncConnected: st.syncConnected, waiting: st.syncWaiting, failed: st.syncFailed,
+    syncConnected: st.syncConnected, account: st.syncAccount,
+    protocol: st.syncProtocol, lastSync: st.syncLastSync,
+    waiting: st.syncWaiting, failed: st.syncFailed,
+    localOnly: st.syncLocalOnly, bindableRetry: st.syncBindableRetry,
+    expiredUnconfirmed: st.syncExpiredUnconfirmed,
+    subscription: st.subOutboxStats, succeededAt: st.syncSucceededAt,
   });
   const st124a = store.getState();
-  checkNew('(t124-1) 前置（探针场景基线）：已连接 · 队列空 → pill「后端已同步」',
+  checkNew('(t124-1) 前置（探针场景基线）：已连接 · 队列空 → 账户名 + 绿色',
     st124a.syncConnected === true && st124a.syncWaiting === 0
-    && pillOf124(st124a) === '后端已同步');
+    && pillOf124(st124a) === 'alice'
+    && syncPillView({
+      syncStatus: st124a.syncStatus, backgroundSyncing: false,
+      syncConnected: true, account: 'alice', waiting: 0, failed: 0,
+      subscription: st124a.subOutboxStats,
+    }).tone === 'success');
   /* 真实标读腿：store 动作触发 set_read IPC（Rust 侧在事务提交后发事件） */
+  const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+  await awaitLocalFlagWriteFrontier();
+  S.invokeCalls.length = 0; // 单用例调用基线：前一块已确认完成后再计数。
   store.getState().toggleCurrentReadStatus();
-  await nTick(20);
+  await awaitLocalFlagWriteFrontier();
   const setRead124 = S.invokeCalls.filter((c) => c.cmd === 'set_read');
-  checkNew('(t124-1) 真实行为（探针 P8 本体）：set_read 入队 IPC 已发出（store 动作腿），随后 Rust 事务提交事件 {waiting:1,failed:0,last_error:null} 落 store（applySyncQueueChanged＝监听器同一落点）→ pill 即时「等待同步 1 条」（修前统计只随 reload 刷新，pill 停留「后端已同步」）',
+  checkNew('(t124-1) 真实行为（探针 P8 本体）：set_read 入队 IPC 已发出，事件落 store 后账户名保持、tone 立即转橙，数量只进详情',
     setRead124.length === 1 && setRead124[0].args.id === 9001 && setRead124[0].args.read === true
     && (() => { store.getState().applySyncQueueChanged({ waiting: 1, failed: 0, last_error: null }); return true; })()
     && store.getState().syncWaiting === 1 && store.getState().syncFailed === 0
     && store.getState().syncQueueLastError === null
-    && pillOf124(store.getState()) === '等待同步 1 条');
+    && pillOf124(store.getState()) === 'alice'
+    && syncPillView({
+      syncStatus: store.getState().syncStatus, backgroundSyncing: false,
+      syncConnected: true, account: 'alice', waiting: 1, failed: 0,
+      subscription: store.getState().subOutboxStats,
+    }).tone === 'pending'
+    && syncPillView({
+      syncStatus: store.getState().syncStatus, backgroundSyncing: false,
+      syncConnected: true, account: 'alice', waiting: 1, failed: 0,
+      subscription: store.getState().subOutboxStats,
+    }).details.includes('状态待推送 1 条'));
 
   /* ---------- (t124-2) 推送成功出队 → 恢复「后端已同步」 ---------- */
   store.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
-  checkNew('(t124-2) 出队恢复：推送确认事件 {waiting:0,failed:0} → pill 回「后端已同步」、无「部分失败」残留（成功 prune 后 last_error 清失）',
+  checkNew('(t124-2) 出队恢复：推送确认事件 {waiting:0,failed:0} → 账户名回绿、无失败残留（成功 prune 后 last_error 清失）',
     store.getState().syncWaiting === 0 && store.getState().syncFailed === 0
     && store.getState().syncQueueLastError === null
-    && pillOf124(store.getState()) === '后端已同步');
+    && pillOf124(store.getState()) === 'alice');
+
+  /* ---------- 生命周期分类：local-only/过期不混入 waiting ---------- */
+  store.getState().applySyncQueueChanged({
+    waiting: 0, failed: 1, retry_wait: 2, local_only: 44,
+    bindable_retry: 3, bound_pending: 0, expired_unconfirmed: 7, last_error: 'x',
+  });
+  checkNew('(t124-lifecycle) 分类落 store：waiting 只含可推送项；local-only/过期可区分，syncFailed 合并 retry_wait 进入失败态',
+    store.getState().syncWaiting === 0
+    && store.getState().syncLocalOnly === 44
+    && store.getState().syncBindableRetry === 3
+    && store.getState().syncExpiredUnconfirmed === 7
+    && store.getState().syncRetryWait === 2
+    && store.getState().syncTerminalFailed === 1
+    && store.getState().syncFailed === 3
+    && pillOf124(store.getState()) === '同步失败'
+    && syncStateSummary({
+      waiting: store.getState().syncWaiting,
+      failed: store.getState().syncTerminalFailed,
+      retry_wait: store.getState().syncRetryWait,
+      local_only: store.getState().syncLocalOnly,
+      bindable_retry: store.getState().syncBindableRetry,
+      expired_unconfirmed: store.getState().syncExpiredUnconfirmed,
+      last_error: store.getState().syncQueueLastError,
+    }, 0).includes('等待绑定 3 条')
+    && !pillOf124(store.getState()).includes('后端已同步'));
+  store.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
 
   /* ---------- (t124-3) 推送失败 → 「· 部分失败」+ last_error 摘要 ---------- */
   store.getState().applySyncQueueChanged({ waiting: 2, failed: 1, last_error: '状态推送失败: HTTP 503' });
-  checkNew('(t124-3) 失败呈现：推送失败事件 → pill「等待同步 2 条 · 部分失败」、摘要卡错误行携带 last_error 摘要（≤60 字截断口径复用 t116-x2b）',
+  checkNew('(t124-3) 失败呈现：推送失败事件 → 文案「同步失败」、摘要卡错误行携带 last_error 摘要（≤60 字截断口径复用 t116-x2b）',
     store.getState().syncWaiting === 2 && store.getState().syncFailed === 1
     && store.getState().syncQueueLastError === '状态推送失败: HTTP 503'
-    && pillOf124(store.getState()) === '等待同步 2 条 · 部分失败'
+    && pillOf124(store.getState()) === '同步失败'
     && syncStateSummary({ waiting: store.getState().syncWaiting, failed: store.getState().syncFailed, last_error: store.getState().syncQueueLastError }, 0)
-      .includes('部分失败 1（状态推送失败: HTTP 503）'));
+      .includes('失败 1（状态推送失败: HTTP 503）'));
 
   /* ---------- (t124-4) 认证失败区分呈现（审计：区分未配置/认证失败/网络失败） ---------- */
   store.getState().applySyncQueueChanged({
@@ -2093,7 +2132,7 @@ export async function run(ctx) {
   const st124d = store.getState();
   const netSummary124 = syncStateSummary({ waiting: 1, failed: 1, last_error: '推送被阻塞（网络/端点失败）：error sending request ← dns error: lookup failed' }, 0);
   checkNew('(t124-4) 认证失败区分：事件 last_error 带「认证失败」文案 → 摘要卡如实透传（含「认证失败」）；对照网络失败摘要透传实际错误且不含「认证失败」（Rust 侧分类由 CI t124-r2 锁；前端不篡改不吞）',
-    st124d.syncFailed === 1 && pillOf124(st124d) === '等待同步 1 条 · 部分失败'
+    st124d.syncFailed === 1 && pillOf124(st124d) === '同步失败'
     && syncStateSummary({ waiting: st124d.syncWaiting, failed: st124d.syncFailed, last_error: st124d.syncQueueLastError }, 0).includes('认证失败：ClientLogin → 401')
     && netSummary124.includes('推送被阻塞（网络/端点失败）')
     && netSummary124.includes('dns error')
@@ -2102,10 +2141,16 @@ export async function run(ctx) {
   /* ---------- (t124-5) 未配置静默：不发事件不刷状态，本地模式 pill 不误报 ---------- */
   store.setState({
     syncConnected: false, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null,
-    syncStatus: 'synced', backgroundSyncing: false,
+    syncStatus: 'synced', backgroundSyncing: false, syncAccount: null,
+    syncProtocol: null, syncSucceededAt: null,
   });
-  checkNew('(t124-5) 未配置静默（半边：事件缺失）：未连接且无事件时 pill 保持「本地模式 · 直连抓取」（不误报不刷状态）；越权防护：applySyncQueueChanged 写队列三字段并仅补远端确认，不写 syncConnected 或整轮终态',
-    pillOf124(store.getState()) === '本地模式 · 直连抓取'
+  checkNew('(t124-5) 未配置静默（半边：事件缺失）：未连接且无事件时显示「本地模式」（不误报）；越权防护：applySyncQueueChanged 不写 syncConnected 或整轮终态',
+    pillOf124(store.getState()) === '本地模式'
+    && syncPillView({
+      syncStatus: 'synced', backgroundSyncing: false, syncConnected: false,
+      account: null, waiting: 0, failed: 0,
+      subscription: store.getState().subOutboxStats,
+    }).tone === 'local'
     && (() => {
       const before = store.getState().syncConnected;
       store.getState().applySyncQueueChanged({ waiting: 3, failed: 1, last_error: 'x' });
@@ -2117,26 +2162,35 @@ export async function run(ctx) {
   const appSrc124 = src124('../../src/App.tsx');
   const syncSliceSrc124 = src124('../../src/store/slices/sync.ts');
   const typesSrc124 = src124('../../src/store/types.ts');
-  /* 【2026-11-01 W4 改写理由】App.tsx 六处 Tauri 监听统一改经 useTauriEvent hook
+  /* 【2026-11-01 W4 改写理由】App.tsx Tauri 监听统一改经 useTauriEvent hook
      （disposed 自摘除修竞态），listen 调用随 hook 移出 App.tsx——断言锁定新
      wire 形态（hook + 事件名 + payload 直收）。 */
-  checkNew('(t124-6) 接线（源级）：App.tsx 经 useTauriEvent 监听 sync-queue-changed 且回调唯一落点 applySyncQueueChanged(e)（删掉监听/改 payload 键名必红）；store 声明 applySyncQueueChanged + syncQueueLastError（事件与 reload 同一状态源）',
-    appSrc124.includes("useTauriEvent<{ waiting: number; failed: number; last_error: string | null }>('sync-queue-changed'")
+  checkNew('(t124-6) 接线（源级）：App.tsx 经 useTauriEvent 监听 sync-queue-changed 且回调唯一落点 applySyncQueueChanged(e)（payload 为生命周期分类）；store 声明 applySyncQueueChanged + syncQueueLastError（事件与 reload 同一状态源）',
+    appSrc124.includes("useTauriEvent<SyncQueueStats>('sync-queue-changed'")
     && appSrc124.includes("'sync-queue-changed'")
     && appSrc124.includes('applySyncQueueChanged(e)')
+    && appSrc124.includes("useTauriEvent<{ message: string }>('sync-error'")
+    && appSrc124.includes("key: 'sync:instant-push'")
     && typesSrc124.includes('applySyncQueueChanged:')
     && typesSrc124.includes('syncQueueLastError: string | null')
     && syncSliceSrc124.includes('syncQueueLastError: stats.last_error ?? null'));
 
   /* ---------- (t124-7) SyncTab 摘要卡自动跟随（源级） ---------- */
   const syncTabSrc124 = src124('../../src/components/settings/SyncTab.tsx');
-  checkNew('(t124-7) SyncTab 跟随（源级）：订阅 store 把队列三字段镜像进摘要卡（subscribe 回调，事件驱动），refreshQueueStats 主动拉取保留（t116-x2c 单点不变）',
-    syncTabSrc124.includes('useAppStore.subscribe((s) => {')
-    && syncTabSrc124.includes('waiting: s.syncWaiting, failed: s.syncFailed, last_error: s.syncQueueLastError')
-    && syncTabSrc124.includes('refreshQueueStats(setQueueStats)'));
+  checkNew('(t124-7) SyncTab 跟随（源级）：直接订阅 store 完整生命周期字段与订阅 outbox，主动刷新仍走 store 单点动作',
+    syncTabSrc124.includes('const syncWaiting = useAppStore((s) => s.syncWaiting);')
+    && syncTabSrc124.includes('const syncTerminalFailed = useAppStore((s) => s.syncTerminalFailed);')
+    && syncTabSrc124.includes('const syncRetryWait = useAppStore((s) => s.syncRetryWait);')
+    && syncTabSrc124.includes('const subOutboxStats = useAppStore((s) => s.subOutboxStats);')
+    && syncTabSrc124.includes('refreshSyncQueueStats()'));
 
   /* 恢复基线（不污染后续块/汇总） */
-  store.setState({ syncConnected: false, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null, entries: [], activeArticleId: null, toasts: [] });
+  store.setState({
+    syncConnected: false, syncWaiting: 0, syncFailed: 0,
+    syncLocalOnly: 0, syncBindableRetry: 0, syncBoundPending: 0,
+    syncRetryWait: 0, syncTerminalFailed: 0, syncExpiredUnconfirmed: 0,
+    syncQueueLastError: null, entries: [], activeArticleId: null, toasts: [],
+  });
 }
 
 /* ============================================================
@@ -2148,9 +2202,12 @@ export async function run(ctx) {
      承担，本块用 react-dom/server 的**真实 SSR 输出**取证——不用「源码含
      isRawRenderMode」之类 token 断言代替输出；修前对照见
      tmp/optimization-20261008/OPT-012/probe-before.mjs（复刻旧分支 = 三类标签真实出现）。
-   - 值传递（显示 RSS 原文/提取全文/译文、代理 base64 只进渲染态）无 DOM harness，
-     且 zustand v5 server snapshot 恒读 getInitialState（t116 注），故由 Reader.tsx
-     参数级接线断言钉住（cov-wire/t111-6 先例），行为面由上面 SSR 输出互补。
+   - 2026-11-11 门禁适配：生产图片代理已改为 ReaderProse 内的可见节点租约，
+     Reader 不再拼整篇 proxiedContent。下面 AST 检查实际值传递与唯一 HTML 入口；
+     reader-prose.test.mjs 真实挂载 Reader 验证源码/渲染/流式切换，
+     image-resources.test.mjs 验证 Blob/原 URL、稳定节点与源码零新请求。
+     本块 SSR 不执行 effect，保留原 data URI 呈现兼容断言，但不把它当作租约证据。
+     后端净化仍由读取边界与提取/翻译写入路径承担，图片准备器本身不是净化器。
    ============================================================ */
 {
   const fsOpt12 = await import('node:fs');
@@ -2215,13 +2272,105 @@ export async function run(ctx) {
     && streamSourceOut.includes('&lt;script&gt;') && !streamSourceOut.includes('<script>')
     && !streamSourceOut.includes('<p>') && !streamSourceOut.includes('<img'));
 
-  /* ---- D：值传递接线（源级；SSR 读不到 store 真值——t116 注边界） ---- */
+  /* ---- D：值传递接线（源级；SSR 读不到 store 真值——t116 注边界） ----
+     原 opt012-d1 只因已退役的 proxiedContent 表达式而失败。更新到当前真实链，
+     用 TypeScript 语法树定位实际声明/分支/JSX，注释或无关位置同名字符串不能充数。
+     保留 RSS/全文选择、已净化译文选择、源码原文、流式文本和唯一 HTML sink；
+     后面的反例只变异内存源码，不写产品文件，也不重造一份呈现算法当期望。 */
   const readerSrcOpt12 = fsOpt12.readFileSync(new URL('../../src/components/Reader.tsx', import.meta.url), 'utf8');
-  checkNew('(opt012-d1) Reader 接线：渲染态 HTML = 消毒译文 / 代理命中产物 ?? baseHtml；源码文本 = 译文 / 未经代理的 baseHtml；Reader.tsx 不再有第二处 HTML 创建路径',
-    readerSrcOpt12.includes('const renderHtml = isShowingTranslatedProse')
-    && readerSrcOpt12.includes('proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml')
-    && readerSrcOpt12.includes('const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml')
-    && !/dangerouslySetInnerHTML\s*=\s*\{\{/.test(readerSrcOpt12));
+  const proseSrcOpt12 = fsOpt12.readFileSync(new URL('../../src/components/ReaderProse.tsx', import.meta.url), 'utf8');
+  const imagesSrcOpt12 = fsOpt12.readFileSync(new URL('../../src/components/useProseImages.ts', import.meta.url), 'utf8');
+  const { default: tsOpt12 } = await import('typescript');
+  const printerOpt12 = tsOpt12.createPrinter({ removeComments: true });
+  const proseWiring = (readerText, proseText, imagesText) => {
+    const ts = tsOpt12;
+    const parse = (name, text) => ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const readerFile = parse('Reader.tsx', readerText);
+    const proseFile = parse('ReaderProse.tsx', proseText);
+    const imagesFile = parse('useProseImages.ts', imagesText);
+    if ([readerFile, proseFile, imagesFile].some((file) => file.parseDiagnostics.length)) return false;
+    const code = (node) => node ? printerOpt12.printNode(ts.EmitHint.Unspecified, node, node.getSourceFile()).replace(/\s+/g, '') : '';
+    const fn = (file, name) => file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    const declarations = (fun) => fun?.body?.statements.flatMap((node) => ts.isVariableStatement(node) ? [...node.declarationList.declarations] : []) ?? [];
+    const variable = (fun, name) => declarations(fun).find((node) => ts.isIdentifier(node.name) && node.name.text === name)?.initializer;
+    const nodes = (root, predicate) => {
+      const found = [];
+      const visit = (node) => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
+      if (root) visit(root);
+      return found;
+    };
+    const unwrap = (node) => { while (node && ts.isParenthesizedExpression(node)) node = node.expression; return node; };
+    const returns = (block) => block?.statements?.filter(ts.isReturnStatement) ?? [];
+    const attr = (opening, name) => opening?.attributes.properties.find((node) => ts.isJsxAttribute(node) && node.name.text === name);
+    const attrCode = (opening, name) => { const value = attr(opening, name)?.initializer; return value && ts.isJsxExpression(value) ? code(value.expression) : ''; };
+    const htmlSinks = (root) => nodes(root, (node) => ts.isJsxAttribute(node) && node.name.text === 'dangerouslySetInnerHTML');
+    const textOnly = (element, expression) => {
+      if (!element || !ts.isJsxElement(element)) return false;
+      const content = element.children.filter((node) => !ts.isJsxText(node) || node.text.trim());
+      return content.length === 1 && ts.isJsxExpression(content[0]) && code(content[0].expression) === expression;
+    };
+    const imports = (file, from, name) => file.statements.some((node) => ts.isImportDeclaration(node)
+      && node.moduleSpecifier.text === from && node.importClause?.namedBindings
+      && ts.isNamedImports(node.importClause.namedBindings)
+      && node.importClause.namedBindings.elements.some((item) => item.name.text === name && !item.propertyName));
+    const reader = fn(readerFile, 'Reader');
+    const prose = fn(proseFile, 'ReaderProse');
+    const images = fn(imagesFile, 'useProseImages');
+    const readers = nodes(reader, (node) => ts.isJsxSelfClosingElement(node) && code(node.tagName) === 'ReaderProse');
+    const hook = declarations(prose).find((node) => node.initializer && ts.isCallExpression(node.initializer)
+      && code(node.initializer.expression) === 'useProseImages');
+    const hookArgs = hook?.initializer.arguments ?? [];
+    const imageInput = hookArgs[0];
+    const sourceIf = prose?.body?.statements.find((node) => ts.isIfStatement(node) && code(node.expression) === 'isSourceMode');
+    const streamIf = prose?.body?.statements.find((node) => ts.isIfStatement(node) && code(node.expression) === 'isStreamingTranslation');
+    const sourceReturn = unwrap(returns(sourceIf?.thenStatement)[0]?.expression);
+    const streamReturn = unwrap(returns(streamIf?.thenStatement)[0]?.expression);
+    const sourcePre = nodes(sourceReturn, (node) => ts.isJsxElement(node) && code(node.openingElement.tagName) === 'pre');
+    const rendered = unwrap(returns(prose?.body).at(-1)?.expression);
+    const opening = rendered && ts.isJsxSelfClosingElement(rendered) ? rendered : undefined;
+    const imageMarkup = variable(images, 'markup');
+    const markupFactory = imageMarkup && ts.isCallExpression(imageMarkup) ? imageMarkup.arguments[0] : undefined;
+    const markupObject = markupFactory && ts.isArrowFunction(markupFactory) ? unwrap(markupFactory.body) : undefined;
+    const htmlProperty = markupObject && ts.isObjectLiteralExpression(markupObject)
+      ? markupObject.properties.find((node) => ts.isPropertyAssignment(node) && code(node.name) === '__html') : undefined;
+    return imports(readerFile, './ReaderProse', 'ReaderProse')
+      && imports(proseFile, './useProseImages', 'useProseImages')
+      && code(variable(reader, 'baseHtml')) === 'showFulltext||!body.rawContent?body.content:body.rawContent'
+      && code(variable(reader, 'renderHtml')) === 'isShowingTranslatedProse?body.translatedContent:baseHtml'
+      && code(variable(reader, 'sourceText')) === 'isShowingTranslatedProse?body.translatedContent:baseHtml'
+      && readers.length === 1 && attrCode(readers[0], 'renderHtml') === 'renderHtml'
+      && attrCode(readers[0], 'sourceText') === 'sourceText'
+      && attrCode(readers[0], 'isSourceMode') === 'isRawRenderMode'
+      && attrCode(readers[0], 'isStreamingTranslation') === 'isShowingTranslatedProse&&!!rawStream'
+      && attrCode(readers[0], 'imagePageUrl') === 'art.url'
+      && attrCode(readers[0], 'imagesEnabled') === '!libraryRestoreBusy'
+      && htmlSinks(reader).length === 0
+      && code(hook?.name) === '{ref:imagesRef,markup}'
+      && hookArgs.length === 4 && imageInput && ts.isConditionalExpression(imageInput)
+      && code(imageInput.condition) === 'isSourceMode||isStreamingTranslation'
+      && ts.isStringLiteral(imageInput.whenTrue) && imageInput.whenTrue.text === ''
+      && code(imageInput.whenFalse) === 'renderHtml'
+      && hookArgs.slice(1).map(code).join('|') === 'imagePageUrl|imageOwner|imagesEnabled&&!isSourceMode&&!isStreamingTranslation'
+      && sourcePre.length === 1 && textOnly(sourcePre[0], 'sourceText')
+      && textOnly(streamReturn, 'renderHtml') && htmlSinks(prose).length === 1
+      && rendered && sourceIf.pos < streamIf.pos && streamIf.pos < rendered.pos
+      && attrCode(opening, 'ref') === 'imagesRef' && attrCode(opening, 'dangerouslySetInnerHTML') === 'markup'
+      && code(variable(images, 'prepared')) === 'useMemo(()=>prepare(html),[html])'
+      && imageMarkup && ts.isCallExpression(imageMarkup) && code(imageMarkup.expression) === 'useMemo'
+      && code(htmlProperty?.initializer) === 'prepared.__html'
+      && code(unwrap(returns(images?.body).at(-1)?.expression)) === '{ref,markup}';
+  };
+  checkNew('(opt012-d1) Reader→ReaderProse→图片节点：原文/净化译文选择、源码原文与流式纯文本分离，只有渲染分支消费准备后的 HTML',
+    proseWiring(readerSrcOpt12, proseSrcOpt12, imagesSrcOpt12));
+  const wrongSourceOpt12 = readerSrcOpt12.replace('const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml', 'const sourceText = body.content');
+  checkNew('(opt012-d1-source-negative) 接线负控：源码绕过 RSS/译文选择必须失败',
+    wrongSourceOpt12 !== readerSrcOpt12 && !proseWiring(wrongSourceOpt12, proseSrcOpt12, imagesSrcOpt12));
+  const unsafeStreamOpt12 = proseSrcOpt12.replace('if (isStreamingTranslation)', 'if (false)');
+  checkNew('(opt012-d1-stream-negative) 接线负控：取消流式文本分支、使其落入 HTML 必须失败',
+    unsafeStreamOpt12 !== proseSrcOpt12 && !proseWiring(readerSrcOpt12, unsafeStreamOpt12, imagesSrcOpt12));
+  const unsafeSinkOpt12 = proseSrcOpt12.replace('dangerouslySetInnerHTML={markup}', 'dangerouslySetInnerHTML={{ __html: sourceText }}');
+  checkNew('(opt012-d1-sink-negative) 接线负控：HTML 入口绕过图片节点准备链必须失败',
+    unsafeSinkOpt12 !== proseSrcOpt12 && !proseWiring(readerSrcOpt12, unsafeSinkOpt12, imagesSrcOpt12));
   checkNew('(opt012-d2) Reader 接线：三个模式开关与内容按名传入 ReaderProse（isSourceMode=isRawRenderMode；isStreamingTranslation=译文+rawStream；renderHtml/sourceText/onClick）',
     readerSrcOpt12.includes('isSourceMode={isRawRenderMode}')
     && readerSrcOpt12.includes('isStreamingTranslation={isShowingTranslatedProse && !!rawStream}')
@@ -2257,6 +2406,23 @@ export async function run(ctx) {
     /\.gallery-card img\s*\{[^}]*aspect-ratio:\s*auto\s+4\s*\/\s*3/s.test(cssB3)
     && /\.gallery-card img\s*\{[^}]*width:\s*100%/s.test(cssB3)
     && !/\.gallery-card img\s*\{[^}]*object-fit/s.test(cssB3));
+}
+
+/* ============================================================
+   2026-11-03：列表底栏被纵向 flex 压缩的 CSS 形态契约。
+   jsdom 无布局引擎，真实几何由 tools/ui-layout-regression.mjs 的 Edge/CDP
+   量测承担；这里只防两个虚拟容器回退到默认可收缩（删任一声明即红）。
+   ============================================================ */
+{
+  const fsLayout = await import('node:fs');
+  const cssLayout = fsLayout.readFileSync(new URL('../../src/styles/base.css', import.meta.url), 'utf8');
+  checkNew('(ui-layout1) 五布局虚拟容器拒绝纵向 flex 压缩：.timeline-virtual-wrap 与 .gallery-masonry-grid 均 flex-shrink:0',
+    /\.timeline-virtual-wrap\s*\{[^}]*flex-shrink:\s*0/s.test(cssLayout)
+    && /\.gallery-masonry-grid\s*\{[^}]*flex-shrink:\s*0/s.test(cssLayout));
+  checkNew('(ui-layout2) 社交正文固定高度裁切：.social-text.collapsed 同时有 max-height:150px 与 overflow:hidden（图片也受上限），按钮槽位固定 26px',
+    /\.social-text\.collapsed\s*\{[^}]*max-height:\s*150px/s.test(cssLayout)
+    && /\.social-text\.collapsed\s*\{[^}]*overflow:\s*hidden/s.test(cssLayout)
+    && /\.social-expand-slot\s*\{[^}]*height:\s*26px/s.test(cssLayout));
 }
 
 /* ============================================================
@@ -2372,14 +2538,11 @@ export async function run(ctx) {
     const appW4 = rdW4('../../src/App.tsx');
     const boundaryW4 = rdW4('../../src/components/ErrorBoundary.tsx');
     const hookW4 = rdW4('../../src/components/useTauriEvent.ts');
-    const trapW4 = rdW4('../../src/components/useFocusTrap.ts');
     const primitivesW4 = rdW4('../../src/components/primitives.tsx');
     const playerW4 = rdW4('../../src/components/PlayerBar.tsx');
     const overlaysW4 = rdW4('../../src/components/Overlays.tsx');
     const errorCenterW4 = rdW4('../../src/components/ErrorCenter.tsx');
     const settingsW4 = rdW4('../../src/components/SettingsModal.tsx');
-    const aiTabW4 = rdW4('../../src/components/settings/AiTab.tsx');
-    const aiConfigW4 = rdW4('../../src/components/settings/aiConfig.ts');
     const bootstrapW4 = rdW4('../../src/store/slices/bootstrap.ts');
     const tokensW4 = rdW4('../../src/styles/tokens.css');
 
@@ -2395,10 +2558,10 @@ export async function run(ctx) {
       && boundaryW4.includes('info.componentStack')
       && boundaryW4.includes('getDerivedStateFromError'));
 
-    /* (w4-2) Tauri 监听竞态：七处（七事件，sync-running/sync-idle 各一处）全走 useTauriEvent；hook 有 disposed 自摘除 */
-    checkNew('(w4-2) App.tsx 七处（七事件）Tauri 监听统一经 useTauriEvent（旧 let unlisten 内联模式清零）；hook 对「cleanup 先于注册完成」自摘除',
+    /* (w4-2) Tauri 监听竞态：带ID活动替代running/idle后七事件全走共享hook。 */
+    checkNew('(w4-2) App.tsx 七事件统一经 useTauriEvent；活动ID替代布尔running/idle，cleanup先于注册完成仍自摘除',
       appW4.includes("from './components/useTauriEvent'")
-      && ['feeds-updated', 'sync-running', 'sync-idle', 'sync-queue-changed', 'subscription-outbox-changed', 'player-media', 'close-ask']
+      && ['feeds-updated', 'sync-activity', 'sync-queue-changed', 'sync-error', 'subscription-outbox-changed', 'player-media', 'close-ask']
         .every((ev) => appW4.includes(`'${ev}'`))
       && !appW4.includes('let unlisten')
       && hookW4.includes('if (disposed) {')
@@ -2421,13 +2584,8 @@ export async function run(ctx) {
       && primitivesW4.includes('useFocusTrap(open, dialogRef)')
       && primitivesW4.includes('aria-label={title}'));
 
-    /* (w4-4) AiTab 卡内写链：三入口串行化、执行时读最新表单态、整包快照落库清零 */
-    checkNew('(w4-4) AiTab 三入口经 enqueueAiConfigWrite 串行化，写入执行时读最新表单态（cfgRef），JSON.stringify(cfg) 整包快照清零',
-      aiConfigW4.includes('let aiConfigWriteChain')
-      && aiConfigW4.includes('export function enqueueAiConfigWrite')
-      && (aiTabW4.match(/await enqueueAiConfigWrite/g) || []).length === 3
-      && aiTabW4.includes('cfgRef.current')
-      && !aiTabW4.includes('JSON.stringify(cfg)'));
+    /* (w4-4) 已由 component-tests/ai-config-race.test.mjs 的真实保存/迟到响应
+       与提示词合并承接；不锁队列实现，也不再要求把未测试的新草稿当成功配置落库。 */
 
     /* (w4-5) mockData 动态 import：无顶层静态 import，仅 mock 分支动态拉取；
        chunk 加载失败与后端分支同契约（复核 P3-2：bootstrapError + 重试，不永卡骨架） */
@@ -2443,60 +2601,46 @@ export async function run(ctx) {
       && !tokensW4.includes('#7a8494')
       && !tokensW4.includes('#828c9c'));
 
-    /* (w4-7) 焦点陷阱契约形态：Tab 循环 + 无焦点面板钉容器 + portal 焦点不拦截 */
-    checkNew('(w4-7) useFocusTrap 契约形态：边界回绕拦截、面板内无可聚焦元素时焦点钉回容器、焦点在面板 DOM 之外（portal）不拦截',
-      trapW4.includes('export function trapModalTab')
-      && trapW4.includes('panel.focus({ preventScroll: true })')
-      && trapW4.includes('!panel.contains(active)'));
+    /* (w4-7) Tab 回绕、空面板、portal 的真实事件与焦点结果由
+       component-tests/modal-focus.test.mjs 承接，不要求具体函数名或分支文本。 */
 
     /* 审计卡2（前端交互正确性与感知体验）源码契约钉 */
     {
       const appK2 = rdW4('../../src/App.tsx');
-      const readerK2 = rdW4('../../src/components/Reader.tsx');
       const timelineK2 = rdW4('../../src/components/Timeline.tsx');
       const overlaysK2 = rdW4('../../src/components/Overlays.tsx');
-      const ctxMenuK2 = rdW4('../../src/components/ContextMenu.tsx');
-      const bootstrapK2 = rdW4('../../src/store/slices/bootstrap.ts');
 
-      /* (k2-1) IME Escape 守卫：全局 Escape 分支内先判 isComposing / keyCode 229
-         （App 监听为原生事件，无 nativeEvent 前缀），守卫先于浮层关闭链 */
-      const escIdxK2 = appK2.indexOf("if (e.key === 'Escape')");
-      const guardIdxK2 = appK2.indexOf('e.isComposing || e.keyCode === 229');
-      checkNew('(k2-1) App 全局 Escape 分支补 IME 守卫（isComposing / keyCode 229 直接 return，先于浮层关闭链）',
-        escIdxK2 >= 0 && guardIdxK2 > escIdxK2
-        && appK2.slice(guardIdxK2, guardIdxK2 + 80).includes('return'));
-
-      /* (k2-2) Reader 正文三态：failed/missing/loading·unrequested 分支先于
-         ReaderProse（译文视图不走分支），failed 走 retryHydration */
-      checkNew('(k2-2) Reader 正文三态与卡片同构：loading/unrequested 占位、failed 走 .hydrate-retry + retryHydration、missing 出文案',
-        readerK2.includes("body.state === 'failed'")
-        && readerK2.includes("body.state === 'missing'")
-        && readerK2.includes("body.state === 'unrequested'")
-        && readerK2.includes('retryHydration(art.id)')
-        && readerK2.indexOf('hydrate-retry') >= 0
-        && readerK2.indexOf('hydrate-retry') < readerK2.indexOf('<ReaderProse'));
+      /* (k2-1/2) component-tests/ime-escape.test.mjs 真实派发两种合成期 Escape
+         并保留正常 Escape 对照；reader-body-states.test.mjs 驱动在途、失败、
+         点击重试与缺行，核对实际正文 DOM。源码分支顺序不再是产品契约。 */
 
       /* (k2-3) 行虚拟化对齐：两实例（行 + 画廊）均显式 useFlushSync:false */
       checkNew('(k2-3) Timeline 两个虚拟化实例均 useFlushSync:false（行实例与画廊实例同口径）',
         (timelineK2.match(/useFlushSync: false/g) || []).length === 2);
 
-      /* (k2-4) 空态/加载态分流 + 哨兵让位 */
-      /* 2026-11-02：判据并入后端 reload 在途计数（启动抢占期假空态），
-         articlesLoading 之外的第三形态见 .agents/notes/implemented/bug-fix/
-         2026-11-02-启动抢占期假空态.md */
-      checkNew('(k2-4) Timeline 空态分流：在途渲染加载形态（隐藏空态文案），哨兵在空+在途窗口让位',
-        timelineK2.includes('useAppStore((s) => s.backendReloadsInFlight)')
-        && timelineK2.includes('articlesLoading || backendReloadsInFlight > 0 ? (')
-        && timelineK2.includes('aria-label="加载中"')
-        && timelineK2.includes('!(items.length === 0 && (articlesLoading || backendReloadsInFlight > 0))'));
+      /* (k2-4) component-tests/timeline-empty-loading.test.mjs 分别驱动分页加载
+         与后端重载在途：真实 DOM 的加载/空态、可访问名、哨兵互斥与终态恢复。 */
 
       /* (k2-5) bootstrap 并行装载：App 串行 .then 清零；bootstrapFromBackend
          内并行发起设置恢复 + 一次性落库门；两处静默早退兜底 dataLoading */
-      checkNew('(k2-5) bootstrap 启动并行装载（首读并行/落库有序）：设置恢复随数据装载同时发起、一次性落库门、两处静默早退兜底（空快照另落 bootstrapError）',
-        !appK2.includes('.bootstrapSettings().then(')
-        && bootstrapK2.includes('pendingStartupLandGate = settingsTask')
-        && bootstrapK2.includes('if (get().dataLoading) set({ dataLoading: false });')
-        && bootstrapK2.includes("bootstrapError: '后端返回空快照，装载中止'"));
+      await ctx.resetStore({ dataLoading: true });
+      let releaseK2;
+      const gateK2 = new Promise((resolve) => { releaseK2 = resolve; });
+      const invocationK2 = globalThis.__INVOKE__;
+      const restoreK2 = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) =>
+        cmd === 'get_setting' && args.key === 'app_settings' ? gateK2 : invocationK2(cmd, args));
+      try {
+        const startupK2 = store.getState().bootstrapFromBackend();
+        await ctx.waitUntil(() => S.invokeCalls.some((c) => c.cmd === 'list_article_sources'));
+        const parallelK2 = S.invokeCalls.some((c) => c.cmd === 'list_feeds')
+          && S.invokeCalls.some((c) => c.cmd === 'counts_snapshot')
+          && !S.invokeCalls.some((c) => c.cmd === 'list_article_member_ids') && store.getState().dataLoading;
+        releaseK2(null);
+        await startupK2;
+        checkNew('(k2-5) 启动设置未回应时元数据并行、成员等待；回应后成员落地并退出骨架',
+          parallelK2 && store.getState().readingSession?.ready && !store.getState().dataLoading
+          && store.getState().bootstrapError === null && S.invokeCalls.some((c) => c.cmd === 'list_article_member_ids'));
+      } finally { releaseK2(null); restoreK2(); }
 
       /* (k2-6) 搜索防抖单段 250ms：180ms 首段清零、搜索 effect 内第二段
          setTimeout 清零（全文件仅防抖 effect 一处 }, 250);）；命令/订阅源
@@ -2508,13 +2652,8 @@ export async function run(ctx) {
         && (overlaysK2.match(/\}, 250\);/g) || []).length === 1
         && overlaysK2.includes('const query = q.trim().toLowerCase();'));
 
-      /* (k2-7) ContextMenu 方向键：↑↓ 循环 + Home/End + 打开即焦点入首项 */
-      checkNew('(k2-7) ContextMenu 键盘导航：ArrowUp/ArrowDown 循环 + Home/End + 打开即焦点入首项',
-        ctxMenuK2.includes("e.key === 'ArrowDown'")
-        && ctxMenuK2.includes("e.key === 'ArrowUp'")
-        && ctxMenuK2.includes("e.key === 'Home'")
-        && ctxMenuK2.includes("e.key === 'End'")
-        && ctxMenuK2.includes('enabledItems()[0]?.focus({ preventScroll: true })'));
+      /* (k2-7) component-tests/context-menu.test.mjs 真实右键打开与逐键派发，
+         检查焦点顺序/回绕、Home/End、Enter 动作与 Esc 关闭，覆盖实际消费链。 */
 
       /* (k2-8) splash 可达性：role=status + aria-label 同元素 */
       checkNew('(k2-8) 启动 splash 容器 role="status" + aria-label（读屏可达）',
@@ -2527,3 +2666,5 @@ export async function run(ctx) {
   const { run: runManualSyncStatus } = await import('./manual-sync-status.mjs');
   await runManualSyncStatus(ctx);
 }
+
+

@@ -7,13 +7,24 @@
 export const id = 'reader-and-ai';
 
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, resetStore, bootFixture, overrideGlobal, mkRow, BASE_ROWS, nSel, bodyOf, bodyOfT122, getBodyEntryT122, markBodyLoadingT122, dropBodyEntryT122 } = ctx;
+  const { S, store, checkNew, nTick, resetStore, entityFixture, overrideGlobal, mkRow, BASE_ROWS, nSel, bodyOf, bodyOfT122, getBodyEntryT122, markBodyLoadingT122, dropBodyEntryT122 } = ctx;
   await ctx.useMainBackend();
+  // 正文缓存域所有基线条目明确属于社交源，避免旧跨分区8行假列表。
+  const BODY_ROWS = BASE_ROWS.map(row => ({ ...row, feed_id: 11 }));
+  const socialFixture = async () => {
+    await resetStore({ activeContentLayout: 'social' });
+    S.backendRows = BODY_ROWS.map(row => ({ ...row }));
+    await store.getState().reloadFromBackend();
+  };
+  const reopenBodyScope = async () => {
+    store.setState({ readingSession: null }); // 夹具新增加成员前显式重入，后续属性刷新仍保会话。
+    await store.getState().reloadFromBackend();
+  };
 
   /* ============================================================
      (l) AI per-id 流式写入与失败标记
      ============================================================ */
-  await bootFixture();
+  await entityFixture();
   S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [104] };
   store.getState().summarizeEntry('104');
   checkNew('(l) summarizeEntry 生成态按 id 置位、流未结束时保持（不误报完成）',
@@ -53,7 +64,7 @@ export async function run(ctx) {
   checkNew('(l) 重试按钮真正重新发起该 id 的摘要请求（并先清掉上次错误）',
     S.invokeCalls.filter((c) => c.cmd === 'ai_summarize').length === 1 && lRetryCleared);
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [] });
   S.aiSum = { deltas: [], error: null, reject: { message: '网络不可达' }, finish: true, holdIds: [] };
   store.getState().summarizeEntry('105', { silent: true });
@@ -63,7 +74,7 @@ export async function run(ctx) {
     lRej.summaryErrors['105'] === 'AI 服务未配置或不可达' && lRej.summarizingIds['105'] === undefined);
   checkNew('(l) silent 模式失败不弹 toast（源级自动摘要不打扰用户）', lRej.toasts.length === 0);
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [] });
   S.aiSum = {
     deltas: [],
@@ -79,7 +90,7 @@ export async function run(ctx) {
     lTypedRej.summaryErrors['105'] === '文章正文 90000 字节，超过单次摘要预算 60000 字节：未生成摘要（不截断、不假称完整）'
     && lTypedRej.toasts[0]?.text.startsWith('摘要失败：文章正文 90000 字节'));
 
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   S.invokeCalls.length = 0;
@@ -108,7 +119,7 @@ export async function run(ctx) {
     S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 0);
 
   /* ---------- (l2) TASK-065 N11：rawTranslatedIds 消毒时序（渲染契约 store 侧锚点） ---------- */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   store.getState().translateEntry('201');
@@ -125,7 +136,7 @@ export async function run(ctx) {
     store.getState().rawTranslatedIds['201'] === undefined
     && bodyOf(store.getState(), '201').translatedContent === '<p>已消毒译文</p>');
 
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = () => { throw { message: 'ipc down' }; };
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   store.getState().translateEntry('201');
@@ -140,7 +151,7 @@ export async function run(ctx) {
     && store.getState().translateErrors['201'] === '译文回读失败'
     && store.getState().toasts.some((t) => t.text === '译文回读失败'));
 
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   store.getState().translateEntry('201');
@@ -155,7 +166,7 @@ export async function run(ctx) {
   /* 与上一条成对：失败时**无任何 delta**（未消毒产物为空）⇒ 标记必须清除。
      留着会让后续水合写回的 DB 消毒译文走纯文本分支（卡片字面显示 <p>…</p>，
      即 P2-9 的标记粘连）；两条一起才锁定「标记只在有未消毒产物时才保留」。 */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
   S.aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
   store.getState().translateEntry('201');
@@ -165,7 +176,7 @@ export async function run(ctx) {
     && bodyOf(store.getState(), '201').translatedContent === ''
     && store.getState().translateErrors['201'] === 'AI 服务未配置或不可达');
 
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
   S.aiTr = { deltas: [], error: null, reject: { code: 'aiNotConfigured', message: '请先在设置中配置 AI 服务' }, finish: true, holdIds: [] };
   store.getState().translateEntry('201');
@@ -174,7 +185,7 @@ export async function run(ctx) {
     store.getState().translateErrors['201'] === '请先在设置中配置 AI 服务');
 
   /* ---------- (n7) TASK-065：锚定打开复位阅读视图标志（与 selectArticle 同口径） ---------- */
-  await bootFixture();
+  await entityFixture();
   store.setState({ isShowingTranslatedProse: true, isRawRenderMode: true, showFulltext: true, activeArticleId: null });
   await store.getState().anchorToArticle('101');
   await nTick(20);
@@ -185,7 +196,7 @@ export async function run(ctx) {
     && store.getState().activeArticleId === '101');
 
   /* ---------- D1a：摘要「先出半截文本再报错」后，重试必须真的重发 ---------- */
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [] });
   S.aiSum = { deltas: ['半截摘要'], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
   store.getState().summarizeEntry('105');
@@ -202,7 +213,7 @@ export async function run(ctx) {
     d1aCleared === true && store.getState().summaryErrors['105'] === 'AI 限流');
 
   /* ---------- D1b：卡片翻译「先出半截译文再报错」后，重试必须真的重发 ---------- */
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [] });
   S.aiTr = { deltas: ['半截译文'], error: '限流', reject: null, finish: true, holdIds: [] };
   store.getState().translateEntry('201');
@@ -221,7 +232,7 @@ export async function run(ctx) {
   await nTick(20);
 
   /* ---------- D1c：Reader 翻译同源路径（error 后译文残留半截） ---------- */
-  await bootFixture();
+  await entityFixture();
   /* 先把正文置成与 detailImpl 相同的内容：selectArticle 会异步水合详情，
      若 content 为空则会被回填成 translated_content='' —— 那会把流式半截译文冲掉，
      掩盖本用例要观察的状态。
@@ -255,7 +266,7 @@ export async function run(ctx) {
   /* ============================================================
      OPT-020 P1-C1：Reader 全文 / 翻译重试必须捕获失败文章 id
      ============================================================ */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,
     content_html: `<p>正文 ${id}</p>`,
@@ -275,7 +286,7 @@ export async function run(ctx) {
   const opt020FulltextError = store.getState().errors.find(
     (e) => e.key === 'reader:fulltext:101',
   );
-  S.extractResult = { html: '<p>文章 101 全文</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>文章 101 全文</p>', degraded: false, reason: null, contentId: 50101, contentRevision: 1 };
   store.setState({ activeArticleId: '104', showFulltext: false });
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020FulltextError?.id);
@@ -304,7 +315,7 @@ export async function run(ctx) {
     showFulltext: false,
     entries: s.entries.filter((e) => e.id !== '101'),
   }));
-  S.extractResult = { html: '<p>A 仍存在，后端执行</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>A 仍存在，后端执行</p>', degraded: false, reason: null, contentId: 50101, contentRevision: 2 };
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020FulltextGoneError?.id);
   await nTick(20);
@@ -314,7 +325,7 @@ export async function run(ctx) {
       .some((c) => c.args.articleId === 101));
 
   /* 自动全文入口（打开文章时命中摘要判据）失败后的重试同样按文章 101 重放。 */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,
     content_html: '<p>这里只有摘要，查看全文</p>',
@@ -335,7 +346,7 @@ export async function run(ctx) {
   const opt020AutoFulltextError = store.getState().errors.find(
     (e) => e.key === 'reader:fulltext:101',
   );
-  S.extractResult = { html: '<p>自动全文 101</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>自动全文 101</p>', degraded: false, reason: null, contentId: 50101, contentRevision: 1 };
   store.setState({ activeArticleId: '104', showFulltext: false });
   S.invokeCalls.length = 0;
   store.getState().retryError?.(opt020AutoFulltextError?.id);
@@ -346,7 +357,7 @@ export async function run(ctx) {
     && store.getState().showFulltext === false);
 
   /* reader:content 重试同样只认失败文章 id：跨视图后仍走 get_article -> bodyById。 */
-  await bootFixture();
+  await entityFixture();
   store.getState().selectFeed('10');
   await nTick(40);
   let opt020ContentRejects = 0;
@@ -406,7 +417,7 @@ export async function run(ctx) {
     && !!opt020ContentMissingRetry?.action?.run
     && store.getState().activeFeedFilter === '12');
 
-  await bootFixture();
+  await entityFixture();
   S.aiTr = { deltas: [], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
   store.setState({
     activeArticleId: '101',
@@ -453,7 +464,7 @@ export async function run(ctx) {
       .some((c) => c.args.articleId === 101));
 
   /* 连续重试必须脱离当前 entries：首次重试失败后的新入口仍可直接重发。 */
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [], errors: [], activeArticleId: null });
   S.aiSum = { deltas: [], error: '摘要首次失败', reject: null, finish: true, holdIds: [] };
   store.getState().summarizeEntry('105');
@@ -472,7 +483,7 @@ export async function run(ctx) {
     S.invokeCalls.filter((c) => c.cmd === 'ai_summarize').length === 2
     && !!store.getState().errors.find((e) => e.key === 'ai:summary:105')?.action?.run);
 
-  await bootFixture();
+  await entityFixture();
   store.setState({ toasts: [], errors: [], activeArticleId: null });
   S.aiTr = { deltas: [], error: '卡片翻译首次失败', reject: null, finish: true, holdIds: [] };
   store.getState().translateEntry('105');
@@ -491,7 +502,7 @@ export async function run(ctx) {
     S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 2
     && !!store.getState().errors.find((e) => e.key === 'ai:translate:105')?.action?.run);
 
-  await bootFixture();
+  await entityFixture();
   store.setState({
     toasts: [],
     errors: [],
@@ -519,7 +530,7 @@ export async function run(ctx) {
     && !!store.getState().errors.find((e) => e.key === 'ai:translate:105')?.action?.run);
 
   /* 当前文章上的连续 retry 必须继续走 Reader 展示链，成功后保持译文展示。 */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,
     content_html: '<p>当前文章正文</p>',
@@ -554,7 +565,7 @@ export async function run(ctx) {
 
   /* A/B 并发：全局 translating 是单布尔，终态复位无条件执行（修前被 ownsView
      门控 → 发起后切走即卡死）；B 的按 id 在途真值在 translatingIds，展示态不受影响。 */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,
     content_html: '<p>并发正文</p>',
@@ -594,7 +605,7 @@ export async function run(ctx) {
     && bodyOf(store.getState(), '104').translatedContent === '<p>B 并发译文</p>');
 
   /* A 的迟到 transport reject 与流错误同口径。 */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,
     content_html: '<p>并发正文</p>',
@@ -637,7 +648,7 @@ export async function run(ctx) {
   }
 
   /* A 的迟到 done 同样执行全局布尔终态复位（B 的按 id 在途态不受影响）。 */
-  await bootFixture();
+  await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,
     content_html: '<p>并发正文</p>',
@@ -692,7 +703,7 @@ export async function run(ctx) {
      TASK-076（DEC-req104-p2-10b-fulltext-degraded-20260920）把判据由「返回内容 ==
      当前正文」的字符串比对改为后端结构化 degraded 标志；本段随之改为直接驱动该标志
      （mock 现按 { html, degraded, reason } 返回）。保护意图不变。 */
-  await bootFixture();
+  await entityFixture();
   /* 【TASK-122 改动理由】提取真值源迁移 bodyById：先经详情链路建立记录（旧用例
      直接在条目上摆 content/rawContent/fulltextExtracted——该字段组已不再是真值）；
      degraded/正常两分支的保护意图（不假报成功 / 置标志+进全文视图）逐字保留，
@@ -714,7 +725,7 @@ export async function run(ctx) {
   checkNew('(P2-10/TASK-076) 且如实提示降级原因（后端 reason 原文），而不是报成功',
     p210.toasts.some((t) => t.text.includes('未采用全文提取') && t.text.includes('已保留原正文'))
     && !p210.toasts.some((t) => t.text === '全文提取完成'));
-  S.extractResult = { html: '<p>真正的全文正文，明显更长的一段内容。</p>', degraded: false, reason: null };
+  S.extractResult = { html: '<p>真正的全文正文，明显更长的一段内容。</p>', degraded: false, reason: null, contentId: 50104, contentRevision: 1 };
   store.getState().extractCurrentArticle();
   await nTick(20);
   const p210ok = store.getState();
@@ -757,7 +768,7 @@ export async function run(ctx) {
        的通道）。保护意图（刷新不丢已加载正文、无「无请求死区」）原样保留，改由
        bodyById 断言承载：水合建立记录 → reloadFromBackend 替换快照 → 记录不动、
        正文照常可读、零补拉；视图行不再携带正文（字段已瘦身）。 */
-    await bootFixture({ activeContentLayout: 'social' });
+    await socialFixture();
     // 经真实水合链路建立记录：101 有正文+url；102 空正文终态；103 全量（译文/摘要/全文标记）
     S.getArticlesPlan = { rows: [
       socialRow({ id: 101, content_html: '<p>101 正文</p>', url: 'https://example.com/101' }),
@@ -769,7 +780,7 @@ export async function run(ctx) {
     S.getArticlesPlan = null;
     /* 列表行与水合行同源（同一 DB 真值）：103 的 AI 列在两处一致——不一致时
        reconcile 以**更新的行真值**对齐（清理失效语义），那由 t122 专属用例覆盖 */
-    S.backendRows = BASE_ROWS.map((r) => (r.id === 103
+    S.backendRows = BODY_ROWS.map((r) => (r.id === 103
       ? { ...r, translated_content: '<p>103 译文</p>', ai_summary: '103 摘要', fulltext_extracted: true }
       : r));
     const t103BaseCalls = t103GetArticlesCount();
@@ -782,7 +793,8 @@ export async function run(ctx) {
       t103b101.content === '<p>101 正文</p>' && t103b101.rawContent === '<p>101 正文</p>'
       && t103AfterReload.entries.find((a) => a.id === '101')?.url === 'https://example.com/101'
       && t103b102.content === '' && getBodyEntryT122('102')?.state === 'ready'
-      && t103b103.content === '<p>103 正文</p>' && t103b103.rawContent === '<p>103 正文</p>'
+      // NF2：首次详情已是全文，没有独立 RSS 字节；仍保留唯一正文与全部 AI 产物。
+      && t103b103.content === '<p>103 正文</p>' && t103b103.rawContent === ''
       && t103b103.translatedContent === '<p>103 译文</p>'
       && t103b103.aiSummary === '103 摘要'
       && t103b103.fulltextExtracted === true
@@ -795,14 +807,14 @@ export async function run(ctx) {
        false），列表行从不携带正文，视图行也已瘦身不存 content——「行 vs 行」的
        正文优先级问题在结构上消失。改为锁定等价保护：快照行即使带 content_html
        也不写 bodyById/视图行（正文只经水合链路进入记录），url 轻字段照常取行。 */
-    S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, content_html: '<p>新104</p>', url: 'https://example.com/104' } : r));
+    S.backendRows = BODY_ROWS.map((r) => (r.id === 104 ? { ...r, content_html: '<p>新104</p>', url: 'https://example.com/104' } : r));
     await store.getState().reloadFromBackend();
     checkNew('(t103-snapshot-preserves-hydration) 快照行携带的 content_html 不再进视图行/记录（正文只经水合链路落 bodyById），url 轻字段照常取行',
       t103State().entries.find((a) => a.id === '104')?.url === 'https://example.com/104'
       && !('content' in (t103State().entries.find((a) => a.id === '104') || {}))
       && getBodyEntryT122('104') === undefined
       && NEED(t103State(), '104') === true);
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
     // 收口契约的另一侧：范围切换（缓存恢复 + 后台刷新）不触碰记录，正文不丢
     S.getArticlesPlan = { rows: [mkRow({ id: 201, feed_id: 11, content_html: '<p>201 正文</p>' })] };
     store.getState().hydrateArticleContent(['201']);
@@ -815,7 +827,7 @@ export async function run(ctx) {
       bodyOfT122(t103State(), '201').content === '<p>201 正文</p>');
 
     /* ---------- t103-stale-card-rehydrates：审计探针场景（同 ID 刷新）---------- */
-    await bootFixture({ activeContentLayout: 'social' });
+    await socialFixture();
     S.getArticlesPlan = { rows: [socialRow({ id: 101, content_html: '<p>101 正文</p>' })] };
     store.getState().hydrateArticleContent(['101']);
     await nTick(20);
@@ -996,8 +1008,8 @@ export async function run(ctx) {
     });
 
     /* ---------- (t122-1) 清理 AI 缓存 → UI 空/已清空而非旧值（探针 P3 本体） ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = BASE_ROWS.map((r) => (r.id === 103
+    await socialFixture();
+    S.backendRows = BODY_ROWS.map((r) => (r.id === 103
       ? { ...r, ai_summary: '旧摘要', translated_content: '<p>旧译文</p>' }
       : r));
     await store.getState().reloadFromBackend(); // 行带旧产物（与 DB 一致的起点）
@@ -1011,7 +1023,7 @@ export async function run(ctx) {
       && bodyOfT122(store.getState(), '103').aiSummary === '旧摘要'
       && bodyOfT122(store.getState(), '103').translatedContent === '<p>旧译文</p>');
     /* 清理 AI 缓存链路：后端置 NULL → 清理动作完成后的 reload 带回 NULL 行 */
-    S.backendRows = BASE_ROWS.map((r) => (r.id === 103 ? { ...r, ai_summary: null, translated_content: null } : r));
+    S.backendRows = BODY_ROWS.map((r) => (r.id === 103 ? { ...r, ai_summary: null, translated_content: null } : r));
     await store.getState().reloadFromBackend();
     const t122c1 = store.getState();
     checkNew('(t122-1) 清理 AI 缓存 → 记录置 cleared + bump contentRevision（正文保留），AI 产物呈现空而非旧值（探针 P3 修复本体）',
@@ -1026,23 +1038,25 @@ export async function run(ctx) {
     await store.getState().reloadFromBackend();
     checkNew('(t122-1) cleared 态不被后续 reload 复活（行 NULL → 保持 cleared）',
       REC('103')?.state === 'cleared' && bodyOfT122(store.getState(), '103').aiSummary === '');
-    S.backendRows = BASE_ROWS.map((r) => (r.id === 103
+    S.backendRows = BODY_ROWS.map((r) => (r.id === 103
       ? { ...r, ai_summary: '旧摘要', translated_content: '<p>旧译文</p>' }
       : r));
     await store.getState().reloadFromBackend(); // 模拟「清理前抓取的在途 reload」迟到落地
     checkNew('(t122-1) 清理前的旧行迟到落地也不复活 cleared（显式态只能被再次生成解除）',
       REC('103')?.state === 'cleared' && bodyOfT122(store.getState(), '103').aiSummary === '');
-    /* 再次生成（AI slice 落账路径）是唯一解除路径 */
-    S.aiSum = { deltas: ['新'], error: null, reject: null, finish: true, holdIds: [] };
-    store.getState().summarizeEntry('103');
+    /* 再次生成（AI slice 落账路径）是唯一解除路径；社交只支持翻译。 */
+    S.detailImpl = () => socialRow122({ id: 103, content_html: '<p>103 正文</p>', translated_content: '<p>新</p>' });
+    S.aiTr = { deltas: ['新'], error: null, reject: null, finish: true, holdIds: [] };
+    store.getState().translateEntry('103');
     await nTick(20);
-    checkNew('(t122-1) cleared 后重新生成摘要 → applyAiProduct 解除 cleared 回 ready（唯一解除路径）',
-      REC('103')?.state === 'ready' && bodyOfT122(store.getState(), '103').aiSummary === '新');
-    S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
-    S.backendRows = BASE_ROWS;
+    checkNew('(t122-1) cleared 后重新生成译文 → applyAiProduct 解除 cleared 回 ready（唯一解除路径）',
+      REC('103')?.state === 'ready' && bodyOfT122(store.getState(), '103').translatedContent === '<p>新</p>');
+    S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+    S.detailImpl = null;
+    S.backendRows = BODY_ROWS;
 
     /* ---------- (t122-2) snippet 更新 → 正文重取（探针 P4 本体） ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
+    await socialFixture();
     S.getArticlesPlan = { rows: [socialRow122({ id: 104, content_html: '<p>旧正文</p>', snippet: '旧摘要行' })] };
     store.getState().hydrateArticleContent(['104']);
     await nTick(20);
@@ -1051,10 +1065,10 @@ export async function run(ctx) {
       REC('104')?.state === 'ready' && bodyOfT122(store.getState(), '104').content === '<p>旧正文</p>'
       && NEED122(store.getState(), '104') === false);
     /* 源站重新同步了该文章：正文变 → 列表行 snippet 随之更新 → reload 带回新行 */
-    S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, snippet: '新摘要行' } : r));
+    S.backendRows = BODY_ROWS.map((r) => (r.id === 104 ? { ...r, snippet: '新摘要行' } : r));
     await store.getState().reloadFromBackend();
-    checkNew('(t122-2) 行 snippet 变化 → 记录失效（回未请求态），懒水合判定重新成立（探针 P4：正文不再陈旧）',
-      REC('104') === undefined && NEED122(store.getState(), '104') === true
+    checkNew('(t122-2) 行 snippet 变化 → cleared保留戳且清空正文，懒水合判定重新成立（探针 P4：正文不再陈旧）',
+      REC('104')?.state === 'cleared' && REC('104')?.content === '' && NEED122(store.getState(), '104') === true
       && store.getState().entries.find((a) => a.id === '104')?.snippet === '新摘要行');
     S.getArticlesPlan = { rows: [socialRow122({ id: 104, content_html: '<p>新正文</p>', snippet: '新摘要行' })] };
     store.getState().hydrateArticleContent(['104']);
@@ -1062,14 +1076,14 @@ export async function run(ctx) {
     S.getArticlesPlan = null;
     checkNew('(t122-2) 重取落新正文（失效后可重取，新行真值进记录）',
       REC('104')?.state === 'ready' && bodyOfT122(store.getState(), '104').content === '<p>新正文</p>');
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
 
     /* ---------- (t122-3) '' vs cleared 语义区分 ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS,
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS,
       mkRow({ id: 111, feed_id: 11, ai_summary: '待清理摘要' }),
       mkRow({ id: 112, feed_id: 11 })];
-    await store.getState().reloadFromBackend(); // 111/112 进当前视图（水合前提：条目在册）
+    await reopenBodyScope(); // 111/112 进当前视图（水合前提：条目在册）
     S.getArticlesPlan = { rows: [
       socialRow122({ id: 111, content_html: '<p>111 正文</p>', ai_summary: '待清理摘要' }),
       socialRow122({ id: 112, content_html: '<p>112 正文</p>' }),
@@ -1077,10 +1091,10 @@ export async function run(ctx) {
     store.getState().hydrateArticleContent(['111', '112']);
     await nTick(20);
     S.getArticlesPlan = null;
-    S.backendRows = [...BASE_ROWS,
+    S.backendRows = [...BODY_ROWS,
       mkRow({ id: 111, feed_id: 11, ai_summary: null }),
       mkRow({ id: 112, feed_id: 11 })];
-    await store.getState().reloadFromBackend(); // 111 的摘要被清理；112 本就没有摘要
+    await reopenBodyScope(); // 111 的摘要被清理；112 本就没有摘要
     const t122b111 = bodyOfT122(store.getState(), '111');
     const t122b112 = bodyOfT122(store.getState(), '112');
     checkNew('(t122-3) 「已清空」（had → cleared，可呈现已清空提示）与「从未生成」（ready 且 AI 空）是两个可区分状态',
@@ -1092,7 +1106,7 @@ export async function run(ctx) {
     checkNew('(t122-3) 无记录（未请求）= 第三种形态：state unrequested、AI 列回退视图行 DB 真值',
       t122bUnreq.state === 'unrequested'
       && t122bUnreq.aiSummary === (store.getState().entries.find((a) => a.id === '113')?.aiSummary ?? ''));
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
 
     /* ---------- (t122-4) 内存预算：LRU 淘汰 → 回未请求态可重取 ---------- */
     await resetStore({ activeContentLayout: 'social' });
@@ -1103,13 +1117,13 @@ export async function run(ctx) {
     const t122evBase = 900000;
     for (let i = 0; i < BODY_CACHE_MAX; i += 1) {
       const eid = String(t122evBase + i);
-      markLoading122(eid);
-      applyRow122(eid, t122evictRow, 0, { aiSummary: '', translatedContent: '' });
+      const stamp = markLoading122(eid);
+      applyRow122(eid, t122evictRow, stamp, { aiSummary: '', translatedContent: '' });
     }
     /* 插入第 2001 条 → 最久未使用（id 900000）被淘汰；期间不做任何读取
        （getBodyEntry 命中会刷新 LRU 新鲜度，影响淘汰序） */
-    markLoading122(String(t122evBase + BODY_CACHE_MAX));
-    applyRow122(String(t122evBase + BODY_CACHE_MAX), t122evictRow, 0, { aiSummary: '', translatedContent: '' });
+    const overflowStamp = markLoading122(String(t122evBase + BODY_CACHE_MAX));
+    applyRow122(String(t122evBase + BODY_CACHE_MAX), t122evictRow, overflowStamp, { aiSummary: '', translatedContent: '' });
     checkNew('(t122-4) 超限插入 → 最久未使用条目被淘汰（LRU；上限恰 2000 条）',
       REC(String(t122evBase)) === undefined
       && REC(String(t122evBase + 1))?.state === 'ready'
@@ -1128,9 +1142,9 @@ export async function run(ctx) {
     resetBodyCacheForTests();
 
     /* ---------- (t122-5) 快照替换 bodyById 引用稳定（正文随实体，不随快照行） ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 121, feed_id: 11, ai_summary: '121 摘要' })];
-    await store.getState().reloadFromBackend(); // 121 进当前视图
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 121, feed_id: 11, ai_summary: '121 摘要' })];
+    await reopenBodyScope(); // 121 进当前视图
     S.getArticlesPlan = { rows: [socialRow122({ id: 121, content_html: '<p>121 正文</p>', ai_summary: '121 摘要' })] };
     store.getState().hydrateArticleContent(['121']);
     await nTick(20);
@@ -1146,9 +1160,9 @@ export async function run(ctx) {
       && bodyOfT122(store.getState(), '121').aiSummary === '121 摘要');
 
     /* ---------- (t122-6) 水合死区回归（审计探针场景）：不存在「正文缺失 + 无记录 + 无请求」组合 ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 131, feed_id: 11 })];
-    await store.getState().reloadFromBackend(); // 131 进当前视图
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 131, feed_id: 11 })];
+    await reopenBodyScope(); // 131 进当前视图
     S.getArticlesPlan = { mode: 'defer' };
     store.getState().hydrateArticleContent(['131']);
     await nTick(0);
@@ -1168,9 +1182,9 @@ export async function run(ctx) {
       && S.invokeCalls.filter((c) => c.cmd === 'get_articles').length === t122deadCalls);
 
     /* ---------- (t122-7) 失效戳守卫：显式写入后，携带旧戳的响应整体丢弃 ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 141, feed_id: 11, ai_summary: 'DB 旧摘要' })];
-    await store.getState().reloadFromBackend(); // 141 进当前视图
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 141, feed_id: 11, ai_summary: 'DB 旧摘要' })];
+    await reopenBodyScope(); // 141 进当前视图
     S.getArticlesPlan = { rows: [socialRow122({ id: 141, content_html: '<p>141 正文</p>', ai_summary: 'DB 旧摘要' })] };
     store.getState().hydrateArticleContent(['141']);
     await nTick(20);
@@ -1184,12 +1198,12 @@ export async function run(ctx) {
       && bodyOfT122(store.getState(), '141').aiSummary === '新生成摘要'
       && (REC('141')?.contentRevision ?? 0) >= 1);
     /* 清理失效（cleared，revision bump）后，旧戳响应同样丢弃 */
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 141, feed_id: 11, ai_summary: null })];
-    await store.getState().reloadFromBackend(); // cleared + bump
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 141, feed_id: 11, ai_summary: null })];
+    await reopenBodyScope(); // cleared + bump
     applyRow122('141', { content_html: '<p>141 正文</p>', ai_summary: 'DB 旧摘要' }, 0, { aiSummary: '', translatedContent: '' });
     checkNew('(t122-7) cleared 后旧戳响应丢弃：cleared 不被在途响应复活（清理后并发水合的复活窗口被 stamp 比对关死）',
       REC('141')?.state === 'cleared' && bodyOfT122(store.getState(), '141').aiSummary === '');
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
 
     /* ---------- (t122-8) 清理链路接线（源级）：CacheCleanupSection 清空动作完成后必 reload ---------- */
     const fs122 = await import('node:fs');
@@ -1310,9 +1324,9 @@ export async function run(ctx) {
     const row008 = (o) => mkRow({ feed_id: 11, ...o });
 
     /* ---------- (t008b-1) 同 contentId、revision 推进（snippet 未变）→ 失效重取 ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 151, feed_id: 11, content_id: 9001, content_revision: 1 })];
-    await store.getState().reloadFromBackend();
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 151, feed_id: 11, content_id: 9001, content_revision: 1 })];
+    await reopenBodyScope();
     S.getArticlesPlan = { rows: [row008({ id: 151, content_id: 9001, content_revision: 1, content_html: '<p>151 v1</p>' })] };
     store.getState().hydrateArticleContent(['151']);
     await nTick(20);
@@ -1321,8 +1335,8 @@ export async function run(ctx) {
       REC008('151')?.state === 'ready' && REC008('151')?.contentId === 9001
       && REC008('151')?.contentRev === 1 && body008('151').content === '<p>151 v1</p>');
     /* 正文后半段更新：snippet 不变、revision 推进 → 行修订变化必须失效 */
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 151, feed_id: 11, content_id: 9001, content_revision: 2 })];
-    await store.getState().reloadFromBackend();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 151, feed_id: 11, content_id: 9001, content_revision: 2 })];
+    await reopenBodyScope();
     checkNew('(t008b-1) snippet 未变但 revision 推进 → 记录 cleared（正文清空），懒水合判定重新成立（后半段变更不再留旧正文）',
       REC008('151')?.state === 'cleared' && REC008('151')?.contentRev === 2
       && body008('151').content === '' && NEED008(store.getState(), '151') === true);
@@ -1333,17 +1347,17 @@ export async function run(ctx) {
     checkNew('(t008b-1) 失效后重取：新正文与新修订落记录（cleared 不是死态，按需重取闭环）',
       REC008('151')?.state === 'ready' && body008('151').content === '<p>151 v2 后半段</p>'
       && REC008('151')?.contentRev === 2);
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
 
     /* ---------- (t008b-2) 共享兄弟内容变更：同一 contentId 的修订对每个引用条目都失效 ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS,
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS,
       mkRow({ id: 152, feed_id: 11, content_id: 9100, content_revision: 1 }),
-      mkRow({ id: 153, feed_id: 12, content_id: 9100, content_revision: 1 })];
-    await store.getState().reloadFromBackend();
+      mkRow({ id: 153, feed_id: 20, content_id: 9100, content_revision: 1 })];
+    await reopenBodyScope();
     S.getArticlesPlan = { rows: [
       row008({ id: 152, content_id: 9100, content_revision: 1, content_html: '<p>共享 v1</p>' }),
-      row008({ id: 153, feed_id: 12, content_id: 9100, content_revision: 1, content_html: '<p>共享 v1</p>' }),
+      row008({ id: 153, feed_id: 20, content_id: 9100, content_revision: 1, content_html: '<p>共享 v1</p>' }),
     ] };
     store.getState().hydrateArticleContent(['152', '153']);
     await nTick(20);
@@ -1351,27 +1365,27 @@ export async function run(ctx) {
     checkNew('(t008b-2) 前置：两个条目各自水合到同一 contentId（共享正文）',
       REC008('152')?.contentId === 9100 && REC008('153')?.contentId === 9100
       && body008('152').content === '<p>共享 v1</p>' && body008('153').content === '<p>共享 v1</p>');
-    S.backendRows = [...BASE_ROWS,
+    S.backendRows = [...BODY_ROWS,
       mkRow({ id: 152, feed_id: 11, content_id: 9100, content_revision: 2 }),
-      mkRow({ id: 153, feed_id: 12, content_id: 9100, content_revision: 2 })];
-    await store.getState().reloadFromBackend();
+      mkRow({ id: 153, feed_id: 20, content_id: 9100, content_revision: 2 })];
+    await reopenBodyScope();
     checkNew('(t008b-2) 共享兄弟内容变更（同一 contentId 新 revision）→ 每个引用条目的记录都失效，不只代表行',
       REC008('152')?.state === 'cleared' && REC008('153')?.state === 'cleared'
       && body008('152').content === '' && body008('153').content === '');
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
 
     /* ---------- (t008b-3) 修订失效后，在途旧戳水合响应被丢弃（时序守卫不退化） ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 154, feed_id: 11, content_id: 9200, content_revision: 1 })];
-    await store.getState().reloadFromBackend();
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 154, feed_id: 11, content_id: 9200, content_revision: 1 })];
+    await reopenBodyScope();
     S.getArticlesPlan = { rows: [row008({ id: 154, content_id: 9200, content_revision: 1, content_html: '<p>154 v1</p>' })] };
     store.getState().hydrateArticleContent(['154']);
     await nTick(20);
     S.getArticlesPlan = { mode: 'defer' };
     store.getState().retryHydration('154'); // 记录删档 → loading，请求挂起（在途）
     await nTick(0);
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 154, feed_id: 11, content_id: 9200, content_revision: 2 })];
-    await store.getState().reloadFromBackend(); // 在途期间修订推进 → 失效（bump 显式失效计数）
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 154, feed_id: 11, content_id: 9200, content_revision: 2 })];
+    await reopenBodyScope(); // 在途期间修订推进 → 失效（bump 显式失效计数）
     checkNew('(t008b-3) 在途水合期间修订推进 → 记录置 cleared 并 bump（旧响应戳已过期）',
       REC008('154')?.state === 'cleared' && NEED008(store.getState(), '154') === true);
     S.pendingGetArticles.at(-1)?.resolve([row008({ id: 154, content_id: 9200, content_revision: 1, content_html: '<p>154 v1 迟到</p>' })]);
@@ -1380,9 +1394,9 @@ export async function run(ctx) {
     checkNew('(t008b-3) 携带旧戳的在途响应被整体丢弃：cleared 不被旧正文复活（请求代次保护不退化）',
       REC008('154')?.state === 'cleared' && body008('154').content === '');
     /* ---------- (t008b-4) 提取成功回写提交身份：下一次 reload 不再清空重取 ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 155, feed_id: 11, content_id: 9400, content_revision: 1, url: 'https://example.com/155' })];
-    await store.getState().reloadFromBackend();
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 155, feed_id: 11, content_id: 9400, content_revision: 1, url: 'https://example.com/155' })];
+    await reopenBodyScope();
     S.getArticlesPlan = { rows: [row008({ id: 155, content_id: 9400, content_revision: 1, content_html: '<p>155 RSS 摘要</p>', url: 'https://example.com/155' })] };
     store.getState().hydrateArticleContent(['155']);
     await nTick(20);
@@ -1397,17 +1411,17 @@ export async function run(ctx) {
       && body008('155').content === '<p>155 提取全文</p>');
     /* DB 行已重指 readability 行（9401,1）——下一次 reload 对值相等：不得清空/重取 */
     const t008b4Calls = S.invokeCalls.filter((c) => c.cmd === 'get_articles' || c.cmd === 'get_article').length;
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 155, feed_id: 11, content_id: 9401, content_revision: 1, url: 'https://example.com/155' })];
-    await store.getState().reloadFromBackend();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 155, feed_id: 11, content_id: 9401, content_revision: 1, url: 'https://example.com/155' })];
+    await reopenBodyScope();
     checkNew('(t008b-4) 提取成功后的下一次 reload 不把刚提取的正文按“修订变化”清空重取（记录仍 ready/正文保留/无新详情请求）',
       REC008('155')?.state === 'ready' && body008('155').content === '<p>155 提取全文</p>'
       && S.invokeCalls.filter((c) => c.cmd === 'get_articles' || c.cmd === 'get_article').length === t008b4Calls);
     S.extractResult = null;
 
     /* ---------- (t008b-5) 条目快照缺失后以同 id 重新出现：对值巧合必须失效（锚守卫） ---------- */
-    await bootFixture({ activeContentLayout: 'social' });
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 156, feed_id: 11, title: '旧文章 156', content_id: 9500, content_revision: 1 })];
-    await store.getState().reloadFromBackend();
+    await socialFixture();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 156, feed_id: 11, title: '旧文章 156', content_id: 9500, content_revision: 1 })];
+    await reopenBodyScope();
     S.getArticlesPlan = { rows: [row008({ id: 156, title: '旧文章 156', content_id: 9500, content_revision: 1, content_html: '<p>156 旧正文</p>' })] };
     store.getState().hydrateArticleContent(['156']);
     await nTick(20);
@@ -1415,29 +1429,30 @@ export async function run(ctx) {
     checkNew('(t008b-5) 前置：156 水合就绪并携带 (9500,1) 身份',
       REC008('156')?.state === 'ready' && REC008('156')?.contentId === 9500);
     /* 条目从快照消失（删除）：记录仍在（实体缓存），快照不再含该 id */
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
     await store.getState().reloadFromBackend();
     /* 同 id 重新出现，但已是另一条目；content_id/revision 巧合相等 */
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 156, feed_id: 11, title: '重建的另一篇文章 156', content_id: 9500, content_revision: 1 })];
-    await store.getState().reloadFromBackend();
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 156, feed_id: 11, title: '重建的另一篇文章 156', content_id: 9500, content_revision: 1 })];
+    await reopenBodyScope();
     checkNew('(t008b-5) 快照缺失后同 id 重现（对值巧合相等但锚不符 = 另一条目）→ 记录失效清空，不继续旧正文（文章删除重建复用 id 的缓存边界）',
       REC008('156')?.state === 'cleared' && body008('156').content === '');
     /* 对照组：同锚重入（同 feedId+title 的正常返回窗口）不因对值相等被误失效 */
-    S.backendRows = [...BASE_ROWS,
+    S.backendRows = [...BODY_ROWS,
       mkRow({ id: 156, feed_id: 11, title: '重建的另一篇文章 156', content_id: 9500, content_revision: 1 }),
       mkRow({ id: 157, feed_id: 11, title: '157 文章', content_id: 9600, content_revision: 1 })];
-    await store.getState().reloadFromBackend();
+    await reopenBodyScope();
     S.getArticlesPlan = { rows: [row008({ id: 157, title: '157 文章', content_id: 9600, content_revision: 1, content_html: '<p>157 正文</p>' })] };
     store.getState().hydrateArticleContent(['157']);
     await nTick(20);
     S.getArticlesPlan = null;
-    S.backendRows = BASE_ROWS;
-    await store.getState().reloadFromBackend(); // 157 从快照消失
-    S.backendRows = [...BASE_ROWS, mkRow({ id: 157, feed_id: 11, title: '157 文章', content_id: 9600, content_revision: 1 })];
-    await store.getState().reloadFromBackend(); // 同锚同对重入
+    store.getState().selectFeed('10');
+    await ctx.waitUntil(() => store.getState().backendReloadsInFlight === 0); // 正常离开窗口，未删除实体。
+    S.backendRows = [...BODY_ROWS, mkRow({ id: 157, feed_id: 11, title: '157 文章', content_id: 9600, content_revision: 1 })];
+    store.setState({ activeFeedFilter: 'all' });
+    await reopenBodyScope(); // 同锚同对重入
     checkNew('(t008b-5) 对照：同一锚（同 feedId+title）重入窗口 + 对值相等 → 记录保持 ready、正文不丢（锚守卫不误伤正常重现）',
       REC008('157')?.state === 'ready' && body008('157').content === '<p>157 正文</p>');
-    S.backendRows = BASE_ROWS;
+    S.backendRows = BODY_ROWS;
     resetBodyCacheForTests();
   }
 }

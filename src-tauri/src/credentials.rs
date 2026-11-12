@@ -4,7 +4,7 @@
 //! - `miniflux_token`（历史遗留：旧 Miniflux API token，已停用但保留加密）
 //! - `greader_password`（Google Reader 集成密码）
 //! - `ai_config`（AI 服务配置，含 api key）
-//! - `config_sync_credentials`（Gist PAT / WebDAV 密码）
+//! - `local_sync_password`（本地资料库的 WebDAV 密码）
 //!
 //! 方案（OPT-014 / F22 **失败关闭**）：Windows 上用 DPAPI（`CryptProtectData`，
 //! 绑定当前用户，无需自管密钥），密文以 `dpapi:` 前缀 base64 存 SQLite。
@@ -28,7 +28,7 @@ pub const SENSITIVE_KEYS: &[&str] = &[
     "miniflux_token",
     "greader_password",
     "ai_config",
-    "config_sync_credentials",
+    "local_sync_password",
 ];
 
 /// 判断某 settings 键是否需要加解密。
@@ -38,7 +38,7 @@ pub fn is_sensitive_key(key: &str) -> bool {
 
 /// 启动迁移：把历史明文敏感值升级为 DPAPI 密文（SEC-2）。
 ///
-/// 旧版本把 miniflux_token/ai_config/config_sync_credentials 明文存 SQLite。
+/// 敏感设置若被旧测试或导入路径写成明文，启动时统一升级。
 /// 成功路径见 [`migrate_legacy_plaintext_with`]；失败必须整体 Err——调用方
 /// （`db::open`）以 `?` 传播：宁可启动时可见地失败，也不悄悄把明文留在库里。
 ///
@@ -69,6 +69,7 @@ fn migrate_legacy_plaintext_with(
     conn: &rusqlite::Connection,
     encrypt: fn(&str) -> AppResult<String>,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     use rusqlite::OptionalExtension;
     let mut upgraded = 0usize;
     for key in SENSITIVE_KEYS {
@@ -95,11 +96,13 @@ fn migrate_legacy_plaintext_with(
 }
 
 /// 加密一段敏感值。
-/// - 空串与已密文值幂等返回；
+/// 输入始终是明文（包括恰好以 `dpapi:` 开头的密码）；存储 envelope 只由读取和
+/// 历史迁移识别，setter 不依据用户输入前缀猜测其是否已经加密。
+/// - 空串原样返回；
 /// - Windows：DPAPI 加密失败 → Err（失败关闭，**不回退明文**）；
 /// - 非 Windows：无 DPAPI，显式开发降级为明文（+ 日志警示）。
 pub fn encrypt_secret(plain: &str) -> AppResult<String> {
-    if plain.is_empty() || plain.starts_with(DPAPI_PREFIX) {
+    if plain.is_empty() {
         return Ok(plain.to_string());
     }
     #[cfg(windows)]
@@ -122,7 +125,7 @@ fn encrypt_secret_with(
     plain: &str,
     encrypt: fn(&[u8]) -> Result<Vec<u8>, String>,
 ) -> AppResult<String> {
-    if plain.is_empty() || plain.starts_with(DPAPI_PREFIX) {
+    if plain.is_empty() {
         return Ok(plain.to_string());
     }
     let cipher = encrypt(plain.as_bytes())
@@ -287,10 +290,17 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_on_already_encrypted() {
-        let enc = encrypt_secret("abc").unwrap();
-        let enc2 = encrypt_secret(&enc).unwrap();
-        assert_eq!(enc, enc2, "已密文值再加密应幂等");
+    fn plaintext_that_looks_like_an_envelope_roundtrips() {
+        for plain in ["dpapi:", "dpapi:literal-password", "dpapi:@@bad@@"] {
+            let stored = encrypt_secret(plain).unwrap();
+            #[cfg(windows)]
+            {
+                assert_ne!(stored, plain);
+                assert_eq!(decrypt_secret(&stored).unwrap(), plain);
+            }
+            #[cfg(not(windows))]
+            assert_eq!(stored, plain);
+        }
     }
 
     /// OPT-014 / F22：DPAPI 加密失败必须失败关闭——Err 且不回退明文，

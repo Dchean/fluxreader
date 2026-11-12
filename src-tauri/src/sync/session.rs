@@ -50,14 +50,10 @@ impl SyncSession {
         )
     }
 
-    /// 同一次持锁内复核代际是否仍匹配（调用方须已持 DB 锁）。
-    pub(super) fn is_current(&self, conn: &Connection) -> AppResult<bool> {
-        Ok(db::sync_generation(conn)? == self.generation)
-    }
-
-    /// 同上，失配即 `Err(staleSession)`。
-    pub(super) fn ensure_current(&self, conn: &Connection) -> AppResult<()> {
-        if self.is_current(conn)? {
+    /// The original HTTP generation can cross the blocking boundary by value;
+    /// never reacquire a new session to authorize a late result.
+    pub(super) fn ensure_generation(conn: &Connection, generation: i64) -> AppResult<()> {
+        if db::sync_generation(conn)? == generation {
             Ok(())
         } else {
             Err(Self::stale_error())
@@ -67,8 +63,12 @@ impl SyncSession {
 
 /// 便捷复核（自持短锁）：HTTP 批次之间调用，返回 false = 会话已失效。
 pub(super) async fn session_is_current(db: &Arc<Mutex<Connection>>, session: &SyncSession) -> bool {
-    let conn = db.lock().await;
-    session.is_current(&conn).unwrap_or(false)
+    let generation = session.generation;
+    crate::state::database_work(db.clone(), move |conn| {
+        SyncSession::ensure_generation(conn, generation)
+    })
+    .await
+    .is_ok()
 }
 
 /* ============================================================
@@ -195,26 +195,29 @@ pub(super) async fn acquire_session(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> Result<SessionLease, ClientBuildFailure> {
-    let snapshot = {
-        let conn = db.lock().await;
-        let credentials = match read_credentials(&conn) {
-            Ok(Some(c)) => c,
-            Ok(None) => return Err(ClientBuildFailure::NotConfigured),
-            // 读取/解密失败：失败会话身份无从得知，快照置空（同 build_session）。
-            Err(e) => {
-                return Err(ClientBuildFailure::Failed {
-                    err: e,
-                    endpoint: String::new(),
-                    username: String::new(),
-                })
-            }
-        };
-        let generation = match db::sync_generation(&conn) {
-            Ok(g) => g,
-            Err(e) => return Err(ClientBuildFailure::CorruptGeneration(e)),
-        };
-        (credentials, generation)
-    };
+    let snapshot = crate::state::database_work(db.clone(), |conn| {
+        Ok((|| {
+            let credentials = match read_credentials(conn) {
+                Ok(Some(c)) => c,
+                Ok(None) => return Err(ClientBuildFailure::NotConfigured),
+                // 读取/解密失败：失败会话身份无从得知，快照置空（同 build_session）。
+                Err(e) => {
+                    return Err(ClientBuildFailure::Failed {
+                        err: e,
+                        endpoint: String::new(),
+                        username: String::new(),
+                    })
+                }
+            };
+            let generation = match db::sync_generation(conn) {
+                Ok(g) => g,
+                Err(e) => return Err(ClientBuildFailure::CorruptGeneration(e)),
+            };
+            Ok((credentials, generation))
+        })())
+    })
+    .await
+    .map_err(ClientBuildFailure::CorruptGeneration)??;
     let ((protocol, endpoint, username, _password), generation) = snapshot;
     let identity = super::account_key(&protocol, &endpoint, &username);
     if let Some(session) = cache_lookup(&identity, generation) {
@@ -229,17 +232,21 @@ pub(super) async fn acquire_session(
     // 构建后重读身份/代际：与 session.generation 一致才写缓存。期间换号
     // （代际已推进）时本租约返回但缓存不落——调用方的 ensure_current 会以
     // staleSession 丢弃本轮，下次 acquire 按新账号重建。
-    let (lease_identity, lease_generation, cacheable) = {
-        let conn = db.lock().await;
-        match (read_credentials(&conn), db::sync_generation(&conn)) {
-            (Ok(Some(c)), Ok(g)) => (
-                super::account_key(&c.0, &c.1, &c.2),
-                g,
-                g == session.generation,
-            ),
-            _ => (identity.clone(), generation, false),
-        }
-    };
+    let fallback_identity = identity.clone();
+    let built_generation = session.generation;
+    let (lease_identity, lease_generation, cacheable) =
+        crate::state::database_work(db.clone(), move |conn| {
+            Ok(match (read_credentials(conn), db::sync_generation(conn)) {
+                (Ok(Some(c)), Ok(g)) => (
+                    super::account_key(&c.0, &c.1, &c.2),
+                    g,
+                    g == built_generation,
+                ),
+                _ => (fallback_identity, generation, false),
+            })
+        })
+        .await
+        .map_err(ClientBuildFailure::CorruptGeneration)?;
     if cacheable {
         cache_store(lease_identity.clone(), lease_generation, &session);
     }
@@ -307,52 +314,77 @@ pub(super) async fn build_session(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> Result<SyncSession, ClientBuildFailure> {
-    let (protocol, endpoint, username, password, generation) = {
-        let conn = db.lock().await;
-        // OPT-014 R1：读取/解密失败不是「未配置」——按可重试失败上报。
-        let credentials = match read_credentials(&conn) {
-            Ok(Some(c)) => c,
-            Ok(None) => return Err(ClientBuildFailure::NotConfigured),
-            // 解密失败：失败会话的身份（端点/用户名）无从得知，如实留空
-            Err(e) => {
-                return Err(ClientBuildFailure::Failed {
-                    err: e,
-                    endpoint: String::new(),
-                    username: String::new(),
-                })
-            }
-        };
-        // 同一次持锁内捕获代际（与凭据同源快照）。R1：现存非法代际是**可见的
-        // 协议错误**（不按 0 与会话假匹配），单列 CorruptGeneration 交给调用方。
-        let generation = match db::sync_generation(&conn) {
-            Ok(g) => g,
-            Err(e) => return Err(ClientBuildFailure::CorruptGeneration(e)),
-        };
-        (
-            credentials.0,
-            credentials.1,
-            credentials.2,
-            credentials.3,
-            generation,
-        )
-    };
-    let cached = {
-        let conn = db.lock().await;
-        crate::endpoint_resolve::cached_base(&conn, &protocol, &endpoint)
-    };
+    let (protocol, endpoint, username, password, generation) =
+        crate::state::database_work(db.clone(), |conn| {
+            Ok((|| {
+                // OPT-014 R1：读取/解密失败不是「未配置」——按可重试失败上报。
+                let credentials = match read_credentials(conn) {
+                    Ok(Some(c)) => c,
+                    Ok(None) => return Err(ClientBuildFailure::NotConfigured),
+                    // 解密失败：失败会话的身份（端点/用户名）无从得知，如实留空
+                    Err(e) => {
+                        return Err(ClientBuildFailure::Failed {
+                            err: e,
+                            endpoint: String::new(),
+                            username: String::new(),
+                        })
+                    }
+                };
+                // 同一次持锁内捕获代际（与凭据同源快照）。R1：现存非法代际是**可见的
+                // 协议错误**（不按 0 与会话假匹配），单列 CorruptGeneration 交给调用方。
+                let generation = match db::sync_generation(conn) {
+                    Ok(g) => g,
+                    Err(e) => return Err(ClientBuildFailure::CorruptGeneration(e)),
+                };
+                Ok((
+                    credentials.0,
+                    credentials.1,
+                    credentials.2,
+                    credentials.3,
+                    generation,
+                ))
+            })())
+        })
+        .await
+        .map_err(ClientBuildFailure::CorruptGeneration)??;
+    let cache_protocol = protocol.clone();
+    let cache_endpoint = endpoint.clone();
+    let cached = crate::state::database_work(db.clone(), move |conn| {
+        Ok(crate::endpoint_resolve::cached_base(
+            conn,
+            &cache_protocol,
+            &cache_endpoint,
+        ))
+    })
+    .await
+    .map_err(ClientBuildFailure::CorruptGeneration)?;
 
     // 两条路径都产出「已认证 + 端点已确定」的客户端：
     // 命中缓存 ⇒ 候选收敛为唯一地址，这一次请求只做认证（不探测）；
     // 未命中 ⇒ 客户端自己探测，探测成功即已认证，无需再登录一次。
     let (backend, resolved) = match protocol.as_str() {
         "fever" => {
+            let weak_db = Arc::downgrade(db);
             let probe =
-                crate::fever::FeverClient::new(&endpoint, &username, &password, http.clone());
+                crate::fever::FeverClient::new(&endpoint, &username, &password, http.clone())
+                    .with_request_guard(Arc::new(move || {
+                        let weak_db = weak_db.clone();
+                        Box::pin(async move {
+                            let db = weak_db.upgrade().ok_or_else(SyncSession::stale_error)?;
+                            crate::state::database_work(db, move |conn| {
+                                SyncSession::ensure_generation(conn, generation)
+                            })
+                            .await
+                        })
+                    }));
             let client = match &cached {
                 Some(base) => {
                     let client = probe.at_resolved(base);
                     match client.verify().await {
                         Ok(()) => client,
+                        Err(e) if e.code == "staleSession" => {
+                            return Err(ClientBuildFailure::Stale)
+                        }
                         Err(e) => {
                             log::warn!("sync: Fever 认证失败: {e}");
                             return Err(ClientBuildFailure::Failed {
@@ -365,6 +397,7 @@ pub(super) async fn build_session(
                 }
                 None => match probe.resolve().await {
                     Ok(client) => client,
+                    Err(e) if e.code == "staleSession" => return Err(ClientBuildFailure::Stale),
                     Err(e) => {
                         log::warn!("sync: Fever 端点解析/认证失败: {e}");
                         return Err(ClientBuildFailure::Failed {
@@ -402,6 +435,17 @@ pub(super) async fn build_session(
             match logged_in {
                 Ok(client) => {
                     let base = client.resolved_base().to_string();
+                    let weak_db = Arc::downgrade(db);
+                    let client = client.with_request_guard(Arc::new(move || {
+                        let weak_db = weak_db.clone();
+                        Box::pin(async move {
+                            let db = weak_db.upgrade().ok_or_else(SyncSession::stale_error)?;
+                            crate::state::database_work(db, move |conn| {
+                                SyncSession::ensure_generation(conn, generation)
+                            })
+                            .await
+                        })
+                    }));
                     (Backend::GReader(client), base)
                 }
                 Err(e) => {
@@ -417,27 +461,33 @@ pub(super) async fn build_session(
     };
 
     // 登录/探测期间账号可能已被切换：只有代际仍匹配才允许落缓存与返回会话。
-    {
-        let conn = db.lock().await;
-        let current = match db::sync_generation(&conn) {
-            Ok(g) => g,
-            Err(e) => return Err(ClientBuildFailure::CorruptGeneration(e)),
-        };
+    crate::state::database_work(db.clone(), move |conn| {
+        let _writer = db::writer_guard(conn)?;
+        let current = db::sync_generation(conn)?;
         if current != generation {
             log::warn!(
                 "sync: 构建客户端期间账号配置已变更（代际 {generation} → {current}），丢弃本次会话"
             );
-            return Err(ClientBuildFailure::Stale);
+            return Err(SyncSession::stale_error());
         }
         // 只有「这一轮真的探测过」才落库；命中缓存时无需重复写。
         if cached.is_none() {
             if let Err(e) =
-                crate::endpoint_resolve::remember_base(&conn, &protocol, &endpoint, &resolved)
+                crate::endpoint_resolve::remember_base(conn, &protocol, &endpoint, &resolved)
             {
                 log::warn!("sync: 端点解析结果落库失败（不影响本次同步）: {e}");
             }
         }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|error| {
+        if error.code == "staleSession" {
+            ClientBuildFailure::Stale
+        } else {
+            ClientBuildFailure::CorruptGeneration(error)
+        }
+    })?;
     Ok(SyncSession {
         generation,
         client: backend,
@@ -470,19 +520,16 @@ mod tests {
                 reqwest::Client::new(),
             )),
         };
-        assert!(session.is_current(&conn_a).unwrap());
-        session.ensure_current(&conn_a).unwrap();
+        SyncSession::ensure_generation(&conn_a, session.generation).unwrap();
 
         // 另一个库推进代际不影响本库
         db::bump_sync_generation(&conn_b).unwrap();
-        assert!(session.is_current(&conn_a).unwrap(), "每库代际独立");
+        SyncSession::ensure_generation(&conn_a, session.generation).expect("每库代际独立");
         assert_eq!(db::sync_generation(&conn_b).unwrap(), 1);
 
         // 本库推进 → 旧会话失效，错误码明确
         db::bump_sync_generation(&conn_a).unwrap();
-        assert!(!session.is_current(&conn_a).unwrap());
-        let err = session
-            .ensure_current(&conn_a)
+        let err = SyncSession::ensure_generation(&conn_a, session.generation)
             .expect_err("代际变化必须失效");
         assert_eq!(err.code, "staleSession");
     }

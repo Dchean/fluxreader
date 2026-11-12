@@ -48,6 +48,7 @@ struct Entry {
     /// 条目发布时间（unix 秒）。ot 窗口过滤列（严格大于），对齐真实 Miniflux
     /// AfterPublishedDate（`e.published_at > $N`）——2026-10-31 审计对齐。
     published: i64,
+    content: String,
 }
 
 struct Sub {
@@ -104,6 +105,7 @@ struct StrictServer {
     subscription_late_add: Mutex<Option<Sub>>,
     /// >0 时强制 item ids 单页大小（测试 continuation 分页用）。
     forced_ids_page_size: std::sync::atomic::AtomicUsize,
+    contents_status: std::sync::atomic::AtomicU16,
 }
 
 impl StrictServer {
@@ -138,6 +140,7 @@ impl StrictServer {
             unread_ids_override: Mutex::new(None),
             subscription_late_add: Mutex::new(None),
             forced_ids_page_size: std::sync::atomic::AtomicUsize::new(0),
+            contents_status: std::sync::atomic::AtomicU16::new(200),
         });
         let srv = server.clone();
         tokio::spawn(async move {
@@ -173,6 +176,7 @@ impl StrictServer {
             read: false,
             starred: false,
             published,
+            content: "fixture".into(),
         });
     }
 
@@ -624,6 +628,12 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
 
     /* ---------- 条目端点 ---------- */
     if method == "POST" && path.ends_with("/reader/api/0/stream/items/contents") {
+        let status = srv
+            .contents_status
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if status != 200 {
+            return (status, "injected contents error".into());
+        }
         let ids: Vec<i64> = hit
             .form
             .iter()
@@ -648,8 +658,8 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
                     "title": e.title,
                     "published": e.published,
                     "alternate": [{"href": format!("http://example.com/e/{}", e.id), "type": "text/html"}],
-                    "summary": {"content": "fixture"},
-                    "content": {"content": "fixture"},
+                    "summary": {"content": e.content},
+                    "content": {"content": e.content},
                     "origin": {"streamId": format!("feed/{}", e.feed_id)},
                 })
             })
@@ -925,8 +935,10 @@ fn seed_local_article(conn: &rusqlite::Connection) -> i64 {
 }
 
 fn feed_count(conn: &rusqlite::Connection) -> i64 {
-    conn.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
 }
 
 fn article_count(conn: &rusqlite::Connection) -> i64 {
@@ -1402,6 +1414,9 @@ async fn write_2xx_non_ok_body_fails_and_queue_survives() {
             .unwrap()
             .0;
         db::set_article_remote_id(&conn, id, 1).unwrap();
+        // Prior Content supplied feed/10; this case exercises the write body,
+        // not the cold-identity admission path.
+        assert!(db::confirm_article_remote_origin(&conn, id, 1, 10).unwrap());
         db::enqueue_sync(&conn, Some(id), None, "read", None).unwrap();
         id
     };
@@ -1743,7 +1758,7 @@ async fn greader_light_sync_without_remote_feed_binding_skips_pull_entirely() {
         db::set_last_sync_ts(&conn, 345_678).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("no remote feed binding is a benign skip");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -1761,16 +1776,20 @@ async fn greader_light_sync_without_remote_feed_binding_skips_pull_entirely() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// 窗口语义判别（2026-10-31 对齐真实 Miniflux）：StrictServer 的 ot 过滤是
-/// published_at > ot（严格大于）。published 早于游标的条目不进 light 增量窗口
-/// （不入库、状态不对齐）；手动全量（ot=0）拉入合并。两种服务端形态都判别。
+/// StrictServer 两种认证形态共用 Miniflux 的 published_at > ot 过滤模型，
+/// 不代表 FreshRSS 的实际时间过滤。已读且未收藏的旧条目不在回补集合，
+/// 因而可独立验证 ot 窗口与 full 的边界。
 async fn published_before_cursor_window_semantic(mode: Mode, tag: &str) {
     let srv = StrictServer::start(mode).await;
     srv.add_entry_published(2, 10, "published-before-cursor", 100_000);
+    srv.entries.lock().unwrap()[0].read = true;
     let (db, tmp) = seed_sync_db(tag, &srv);
     {
         let conn = db.lock().await;
-        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        // Historical local identity was previously observed as feed/10; the
+        // test targets the new entry 2's publication window, not cold proof.
+        assert!(db::confirm_article_remote_origin(&conn, aid, 1, 10).unwrap());
         db::set_last_sync_ts(&conn, 123_456).unwrap();
     }
 
@@ -1801,12 +1820,12 @@ async fn published_before_cursor_window_semantic(mode: Mode, tag: &str) {
 }
 
 #[tokio::test]
-async fn miniflux_ot_window_excludes_entry_published_before_cursor() {
+async fn miniflux_time_filter_excludes_old_read_entry() {
     published_before_cursor_window_semantic(Mode::Miniflux, "gr_strict_win_miniflux").await;
 }
 
 #[tokio::test]
-async fn freshrss_ot_window_excludes_entry_published_before_cursor() {
+async fn freshrss_auth_fixture_with_miniflux_time_filter_excludes_old_read_entry() {
     published_before_cursor_window_semantic(Mode::FreshRss, "gr_strict_win_freshrss").await;
 }
 
@@ -1852,7 +1871,7 @@ async fn greader_light_sync_with_bound_feed_still_pulls() {
         db::set_last_sync_ts(&conn, 456_789).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("bound feed should pull normally");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -1884,7 +1903,7 @@ async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscrip
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let first = sync::sync_light(&db, &reqwest::Client::new())
+    let first = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("first discovery round");
     assert!(first.errors.is_empty(), "{:?}", first.errors);
@@ -1898,7 +1917,7 @@ async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscrip
         assert_eq!(db::last_sync_ts(&conn).unwrap(), 0);
     }
 
-    let second = sync::sync_light(&db, &reqwest::Client::new())
+    let second = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("throttled discovery round");
     assert!(second.errors.is_empty(), "{:?}", second.errors);
@@ -1920,7 +1939,7 @@ async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscrip
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let third = sync::sync_light(&db, &reqwest::Client::new())
+    let third = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("automatic discovery and pull");
     assert!(third.errors.is_empty(), "{:?}", third.errors);
@@ -1971,7 +1990,7 @@ async fn greader_partial_remote_feed_binding_keeps_cursor() {
         db::set_last_sync_ts(&conn, 567_890).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("partial binding is reported without aborting the phase");
     assert!(
@@ -2004,7 +2023,7 @@ async fn greader_entry_feed_without_local_binding_keeps_cursor() {
         db::set_last_sync_ts(&conn, 579_013).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("unknown entry feed is reported");
     assert!(
@@ -2205,6 +2224,354 @@ async fn invalid_item_ref_id_is_protocol_and_keeps_cursor() {
     drop(conn);
     drop(db);
     let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn authority_backfill_imports_late_old_unread_and_binds_only_same_feed() {
+    let server = StrictServer::start(Mode::Miniflux).await;
+    for remote_id in [201, 202, 203] {
+        server.add_entry_published(remote_id, 10, "late old unread", 100);
+    }
+    let (database, path) = seed_sync_db("authority_late_old", &server);
+    let _cleanup = common::TempDbGuard::new(path);
+    let (own, foreign, bodyless) = {
+        let connection = database.lock().await;
+        let (feed, stub) =
+            seed_remote_article(&connection, "http://example.com/own.xml", 10, 90_001);
+        db::set_read(&connection, stub, true).unwrap();
+        connection.execute("INSERT INTO articles (feed_id, guid, url, url_norm, title, is_read) VALUES (?1, 'direct-own', 'http://example.com/e/201', 'http://example.com/e/201', 'late old unread', 1)", [feed]).unwrap();
+        let own = connection.last_insert_rowid();
+        db::backfill_article_content(&connection, own, "fixture", "fixture", None, None, None)
+            .unwrap();
+        connection.execute("INSERT INTO articles (feed_id, guid, url, url_norm, title, remote_id) VALUES (?1, 'bound-empty', 'http://example.com/e/203', 'http://example.com/e/203', 'empty', 203)", [feed]).unwrap();
+        let bodyless = connection.last_insert_rowid();
+        let (_, foreign) =
+            seed_remote_article(&connection, "http://example.com/other.xml", 20, 90_002);
+        connection.execute("UPDATE articles SET remote_id = NULL, url = 'http://example.com/e/202', url_norm = 'http://example.com/e/202', is_read = 1 WHERE id = ?1", [foreign]).unwrap();
+        db::set_last_sync_ts(&connection, 1_000).unwrap();
+        (own, foreign, bodyless)
+    };
+    let report = sync::states_phase(&database, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let connection = database.lock().await;
+    let own_state: (Option<i64>, bool) = connection
+        .query_row(
+            "SELECT remote_id, is_read FROM articles WHERE id = ?1",
+            [own],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        own_state,
+        (Some(201), false),
+        "内容证明首绑后接收远端未读，无本地 pending 时双向收敛"
+    );
+    let foreign_identity: Option<i64> = connection
+        .query_row(
+            "SELECT remote_id FROM articles WHERE id = ?1",
+            [foreign],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(foreign_identity, None, "不能借同 URL 跨 feed 身份");
+    let imported_feed: i64 = connection.query_row("SELECT f.remote_id FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.remote_id = 202", [], |row| row.get(0)).unwrap();
+    assert_eq!(imported_feed, 10);
+    assert!(
+        db::remote_ids_with_body(&connection, &[201, 202, 203])
+            .unwrap()
+            .len()
+            == 3
+    );
+    assert_eq!(
+        db::article_by_remote_id(&connection, 203).unwrap().unwrap(),
+        bodyless
+    );
+    assert!(
+        server
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|hit| hit.path.ends_with("stream/items/ids")
+                && !hit.query.contains("xt=")
+                && hit.query.contains("reading-list"))
+            .all(|hit| hit.query.contains("ot=1000")),
+        "正文在增量窗口之外，仅经未读全集回补"
+    );
+}
+
+#[tokio::test]
+async fn authority_backfill_budget_resumes_after_restart_and_empty_bodies_do_not_starve_tail() {
+    let server = StrictServer::start(Mode::Miniflux).await;
+    for remote_id in 1..=2_001 {
+        server.add_entry_published(remote_id, 10, "budget", 100);
+    }
+    for entry in server.entries.lock().unwrap().iter_mut().take(2_000) {
+        entry.content.clear();
+    }
+    let (database, path) = seed_sync_db("authority_budget", &server);
+    let _cleanup = common::TempDbGuard::new(path.clone());
+    {
+        let connection = database.lock().await;
+        let (_, stub) =
+            seed_remote_article(&connection, "http://example.com/budget.xml", 10, 90_001);
+        db::set_read(&connection, stub, true).unwrap();
+        db::set_last_sync_ts(&connection, 1_000).unwrap();
+    }
+    let first = sync::states_phase(&database, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(
+        first.errors.is_empty(),
+        "预算耗尽不是协议失败: {:?}",
+        first.errors
+    );
+    {
+        let connection = database.lock().await;
+        assert!(db::article_by_remote_id(&connection, 2_001)
+            .unwrap()
+            .is_none());
+        let progress: serde_json::Value = serde_json::from_str(
+            &db::get_setting(&connection, "greader_backfill_unread")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(progress["last_id"], 2_000);
+    }
+    let first_requests = server
+        .hits
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit.path.ends_with("stream/items/contents"))
+        .count();
+    assert_eq!(first_requests, 20, "每轮至多 2000 ID / 20 请求");
+    drop(database);
+    let reopened = Arc::new(tokio::sync::Mutex::new(db::open(&path).unwrap()));
+    let second = sync::states_phase(&reopened, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    let connection = reopened.lock().await;
+    assert!(
+        db::article_by_remote_id(&connection, 2_001)
+            .unwrap()
+            .is_some(),
+        "空正文前缀不能永久占预算"
+    );
+    assert_eq!(
+        db::remote_ids_with_body(&connection, &[2_001]).unwrap(),
+        vec![2_001]
+    );
+    let requests = server.hits.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|hit| hit.path.ends_with("stream/items/contents"))
+            .count(),
+        40
+    );
+    assert!(requests
+        .iter()
+        .filter(|hit| hit.path.ends_with("stream/items/contents"))
+        .all(|hit| hit.form.iter().filter(|(key, _)| key == "i").count() <= 100));
+}
+
+#[tokio::test]
+async fn authority_backfill_missing_feed_prefix_does_not_starve_known_feed_tail() {
+    let server = StrictServer::start(Mode::Miniflux).await;
+    for remote_id in 1..=2_000 {
+        server.add_entry_published(remote_id, 99, "missing feed", 100);
+    }
+    server.add_entry_published(2_001, 10, "known feed tail", 100);
+    let (database, path) = seed_sync_db("authority_missing_feed_budget", &server);
+    let _cleanup = common::TempDbGuard::new(path);
+    {
+        let connection = database.lock().await;
+        let (_, stub) = seed_remote_article(
+            &connection,
+            "http://example.com/missing-feed-budget.xml",
+            10,
+            90_001,
+        );
+        db::set_read(&connection, stub, true).unwrap();
+        db::set_last_sync_ts(&connection, 1_000).unwrap();
+    }
+    let first = sync::states_phase(&database, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(first
+        .errors
+        .iter()
+        .any(|error| error.contains("尚无本地绑定")));
+    {
+        let connection = database.lock().await;
+        assert!(db::article_by_remote_id(&connection, 2_001)
+            .unwrap()
+            .is_none());
+        assert!(
+            db::article_by_remote_id(&connection, 1).unwrap().is_none(),
+            "缺源不猜归属"
+        );
+    }
+    let second = sync::states_phase(&database, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(second
+        .errors
+        .iter()
+        .any(|error| error.contains("尚无本地绑定")));
+    let connection = database.lock().await;
+    assert!(
+        db::article_by_remote_id(&connection, 2_001)
+            .unwrap()
+            .is_some(),
+        "缺源前缀不能挡住后续可绑定条目"
+    );
+}
+
+#[tokio::test]
+async fn authority_backfill_http_short_duplicate_and_wrong_ids_keep_progress_and_local_state() {
+    for failure in ["http", "short", "duplicate", "wrong"] {
+        let server = StrictServer::start(Mode::Miniflux).await;
+        server.add_entry_published(101, 10, "old unread", 100);
+        server.add_entry_published(102, 10, "old unread", 100);
+        let (database, path) = seed_sync_db(&format!("authority_failure_{failure}"), &server);
+        let _cleanup = common::TempDbGuard::new(path);
+        let article_id = {
+            let connection = database.lock().await;
+            let (_, article_id) =
+                seed_remote_article(&connection, "http://example.com/failure.xml", 10, 101);
+            connection.execute("UPDATE articles SET content_id = NULL, is_read = 1, is_starred = 1 WHERE id = ?1", [article_id]).unwrap();
+            db::enqueue_sync(&connection, Some(article_id), None, "star", None).unwrap();
+            connection
+                .execute("UPDATE sync_queue SET status = 'expired_unconfirmed'", [])
+                .unwrap();
+            db::set_last_sync_ts(&connection, 1_000).unwrap();
+            db::set_setting(
+                &connection,
+                "greader_backfill_unread",
+                r#"{"generation":0,"last_id":99}"#,
+            )
+            .unwrap();
+            article_id
+        };
+        match failure {
+            "http" => server.contents_status.store(500, std::sync::atomic::Ordering::SeqCst),
+            "short" => server.set_read_override("stream/items/contents", r#"{"items":[]}"#),
+            "duplicate" => server.set_read_override("stream/items/contents", r#"{"items":[{"id":"101","title":"a","categories":[]},{"id":"101","title":"a","categories":[]}]}"#),
+            _ => server.set_read_override("stream/items/contents", r#"{"items":[{"id":"901","title":"x","categories":[]},{"id":"902","title":"y","categories":[]}]}"#),
+        }
+        let report = sync::states_phase(&database, &reqwest::Client::new(), false)
+            .await
+            .unwrap();
+        assert!(!report.errors.is_empty(), "{failure}: 回补失败必须可见");
+        {
+            let connection = database.lock().await;
+            assert_eq!(
+                db::last_sync_ts(&connection).unwrap(),
+                1_000,
+                "{failure}: 主游标保留"
+            );
+            let progress = db::get_setting(&connection, "greader_backfill_unread")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                progress, r#"{"generation":0,"last_id":99}"#,
+                "{failure}: 轮转进度保留"
+            );
+            assert!(db::article_by_remote_id(&connection, 102)
+                .unwrap()
+                .is_none());
+            let state: (bool, bool) = connection
+                .query_row(
+                    "SELECT is_read,is_starred FROM articles WHERE id=?1",
+                    [article_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, (true, true), "{failure}: 失败不可改状态");
+        }
+        server.read_overrides.lock().unwrap().clear();
+        server
+            .contents_status
+            .store(200, std::sync::atomic::Ordering::SeqCst);
+        let recovered = sync::states_phase(&database, &reqwest::Client::new(), false)
+            .await
+            .unwrap();
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        let connection = database.lock().await;
+        assert!(db::article_by_remote_id(&connection, 102)
+            .unwrap()
+            .is_some());
+    }
+}
+
+#[tokio::test]
+async fn ordinary_contents_require_requested_id_coverage_and_ignore_extra_ids() {
+    let server = StrictServer::start(Mode::FreshRss).await;
+    let client = GReaderClient::new(&server.url(), AUTH, reqwest::Client::new());
+    for body in [
+        r#"{"items":[{"id":"101","title":"a"},{"id":"101","title":"a"}]}"#,
+        r#"{"items":[{"id":"901","title":"x"},{"id":"902","title":"y"}]}"#,
+    ] {
+        server.set_read_override("stream/items/contents", body);
+        assert_eq!(
+            client.item_contents(&[101, 102]).await.unwrap_err().code,
+            "protocol"
+        );
+    }
+    server.set_read_override("stream/items/contents", r#"{"items":[{"id":"101","title":"a"},{"id":"102","title":"b"},{"id":"999","title":"unrelated"}]}"#);
+    let items = client.item_contents(&[101, 101, 102]).await.unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| app_lib::greader::parse_item_id(&item.id).unwrap())
+            .collect::<Vec<_>>(),
+        vec![101, 102]
+    );
+}
+
+#[tokio::test]
+async fn proven_state_remains_independent_of_failed_body_backfill() {
+    let server = StrictServer::start(Mode::Miniflux).await;
+    server.add_entry_published(101, 10, "old unread", 100);
+    let (database, path) = seed_sync_db("proven_state_body_failure", &server);
+    let _cleanup = common::TempDbGuard::new(path);
+    let aid = {
+        let conn = database.lock().await;
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/proven.xml", 10, 101);
+        // A prior complete Content response established feed/10; its body was
+        // subsequently reclaimed. Body presence is not the identity proof.
+        assert!(db::confirm_article_remote_origin(&conn, aid, 101, 10).unwrap());
+        conn.execute(
+            "UPDATE articles SET content_id=NULL,is_read=1 WHERE id=?1",
+            [aid],
+        )
+        .unwrap();
+        db::set_last_sync_ts(&conn, 1000).unwrap();
+        aid
+    };
+    server
+        .contents_status
+        .store(500, std::sync::atomic::Ordering::SeqCst);
+    let report = sync::states_phase(&database, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(!report.errors.is_empty());
+    let conn = database.lock().await;
+    assert!(
+        !conn
+            .query_row("SELECT is_read FROM articles WHERE id=?1", [aid], |r| r
+                .get::<_, bool>(0))
+            .unwrap(),
+        "successful unread State is independent once the origin is proven"
+    );
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 1000);
+    assert!(db::verified_remote_binding(&conn, aid).unwrap().is_some());
 }
 
 /// P2 返工：非法 continuation 必须 protocol 失败关闭且不推进游标。
@@ -2509,7 +2876,7 @@ async fn greader_unknown_feed_after_discovery_retries_once() {
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("unknown feed retry");
     assert!(
@@ -2571,7 +2938,7 @@ async fn greader_discovery_binding_write_failure_is_reported() {
         .unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("binding error is reported in SyncReport");
     assert!(
@@ -2697,7 +3064,10 @@ async fn greader_orphan_rollback_and_remote_cancel_recovers_states() {
     let (db, tmp) = seed_sync_db("opt019_gr_orphan_recovery", &srv);
     {
         let conn = db.lock().await;
-        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        // Existing source/entry was content-proven before the failed new-feed
+        // import. The unknown new source remains unproved and must roll back.
+        assert!(db::confirm_article_remote_origin(&conn, aid, 1, 10).unwrap());
         db::set_last_sync_ts(&conn, 690_009).unwrap();
         conn.execute_batch(
             "CREATE TRIGGER opt019_orphan_fail_bind
@@ -2758,7 +3128,7 @@ async fn greader_orphan_rollback_and_remote_cancel_recovers_states() {
         let conn = db.lock().await;
         let orphan_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://example.com/historical-orphan.xml'",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = 'http://example.com/historical-orphan.xml'",
                 [],
                 |r| r.get(0),
             )
@@ -2858,13 +3228,13 @@ async fn failed_subscription_discovery_is_throttled() {
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let first = sync::sync_light(&db, &reqwest::Client::new())
+    let first = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("discovery protocol failure is report-visible");
     assert!(!first.errors.is_empty(), "首次发现失败必须可见");
     assert_eq!(srv.subscription_list_requests(), 1);
 
-    let second = sync::sync_light(&db, &reqwest::Client::new())
+    let second = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("throttled retry");
     assert!(

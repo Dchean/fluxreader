@@ -148,6 +148,7 @@ pub fn remember_base(
 /// 显式清除覆盖「换回同一地址的另一个账号」与「断开后重连」两类残留，
 /// 让新账号的解析结果必须重新写入（写回前 build_session 会复核代际）。
 pub fn clear_cached_base(conn: &Connection) -> crate::error::AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key = ?1",
         rusqlite::params![CACHE_KEY],

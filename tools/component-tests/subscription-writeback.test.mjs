@@ -2,7 +2,7 @@
 // OPT-009 B3：订阅写回能力声明与持久回执的**真实挂载**回归。
 //
 // 卡片验收对应：
-// - 删除源确认文案不再含「同步服务端不受影响」且包含持久退订语义（挂载真实
+// - 删除源确认文案不再含「同步服务端不受影响」且包含账户退订/离线续推语义（挂载真实
 //   FeedsTab，经删除钮真实点击打开 ConfirmDialog，读 DOM 文案）；
 // - 分类删除说明成员逐源退订；空分类走 empty_folder_remote 的本地-only 边界
 //   （经真实 createCategory + reload 造出空分类）；
@@ -15,7 +15,7 @@
 // Rust 侧对文案本体的断言。
 import assert from 'node:assert/strict';
 import { componentTest, mount, unmount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
-import { installBackend, seedFromRows, mkRow, clearInvokeCalls, setPlan, resetPlan, FOLDERS } from './fixtures.mjs';
+import { installBackend, seedFromRows, mkRow, clearInvokeCalls, setPlan, resetPlan, FOLDERS, syncRunFixture } from './fixtures.mjs';
 
 const ROWS = [mkRow({ id: 101, feed_id: 10, title: 'A1 文章' })];
 
@@ -29,31 +29,31 @@ function capsFixture(protocol) {
     connected: true,
     protocol,
     overview: greader
-      ? 'GReader：新增/编辑/移动/退订会持久写回远端（失败自动重试、离线与重启不丢）；分类改名/删除按成员逐源表达（无分类级端点）。'
-      : 'Fever 协议不支持订阅写回：新增/编辑/退订及分类变更仅本地生效，不会同步到服务端（也不会重试或冒充成功）。',
+      ? 'GReader 会写回新增、编辑、移动、退订与分类变更；分类按成员逐源处理。'
+      : 'Fever 仅同步阅读状态；订阅与分类改动只保存在本机。',
     subscribe: cap(greader
-      ? '远端写回：新增订阅会持久保存并自动重试（离线或重启不丢）。'
-      : '仅本地：Fever 协议不支持远端新增，订阅不会出现在服务端。'),
+      ? '会添加到同步账户；发送失败会自动重试，离线或重启后仍会继续。'
+      : '仅本地：新订阅只保存在本机，同步服务不会改变。'),
     edit_title: cap(greader
-      ? '远端写回：标题变更持久保存并自动重试（离线或重启不丢）。'
-      : '仅本地：Fever 协议不支持远端编辑，标题变化不会同步到服务端。'),
+      ? '标题变更会写入同步账户；发送失败会自动重试，离线或重启后仍会继续。'
+      : '仅本地：编辑只保存在本机，同步服务不会改变。'),
     move_folder: cap(greader
-      ? '远端写回：按移动语义表达（加入目标分类、移除原分类），失败自动重试。'
-      : '仅本地：Fever 协议不支持远端移动，分类变化不会同步到服务端。'),
+      ? '会加入目标分类并移出原分类；发送失败会自动重试。'
+      : '仅本地：分类变化只保存在本机，同步服务不会改变。'),
     unsubscribe: cap(greader
-      ? '远端退订：删除会保存持久的退订意图，离线或重启后自动重试，直到服务端确认。'
-      : '仅本地：Fever 协议不支持远端退订，远端订阅保持不变（不回写、不重试）。'),
+      ? '删除会尝试从同步账户退订；离线或重启后仍会继续，直到账户确认。'
+      : '仅本地：删除只移除本机订阅，同步服务中的订阅保持不变。'),
     rename_folder: cap(greader
-      ? '远端表达：逐成员「加入新分类 + 移出旧分类」（无分类级端点）；空分类无可表达成员。'
-      : '仅本地：Fever 协议不支持远端写回，改名仅本地生效（墓碑防复活）。'),
+      ? '分类改名会按成员逐源处理：为每个订阅加入新分类并移出旧分类；空分类只在本机生效。'
+      : '仅本地：分类改名只在本机生效，同步服务不会改变。'),
     delete_folder: cap(greader
-      ? '远端退订：为每个已绑定的成员订阅保存持久退订意图（离线或重启后自动重试）；远端分类标签在成员全部移除后消失。'
-      : '仅本地：Fever 协议不支持远端退订，远端订阅与分类保持不变。'),
+      ? '删除分类会按成员逐源退订；同步服务中的分类在成员全部移除后消失。'
+      : '仅本地：分类删除只在本机生效，同步服务中的订阅与分类保持不变。'),
     empty_folder_remote: cap(greader
-      ? '远端无表达：空分类没有可逐源表达的成员，协议也没有分类级端点——删除/改名仅本地生效（墓碑防复活），不宣称远端已改。'
-      : '仅本地：Fever 没有写订阅端点，空分类也没有可表达成员——不宣称远端已改。'),
+      ? '空分类只在本机删除或改名；同步服务没有可对应的分类变更。'
+      : '仅本地：空分类只从本机删除或改名，同步服务没有对应变更。'),
     limitations: greader
-      ? [{ code: 'folder_member_wire', detail: '分类级改名/删除没有分类级端点，按成员逐源表达。' }]
+      ? [{ code: 'folder_member_wire', detail: '分类改名/删除会按成员逐源处理，不会一次改掉同步服务中的整个分类。' }]
       : [],
   };
 }
@@ -74,7 +74,7 @@ async function setInputValue(input, value) {
   });
 }
 
-componentTest('OPT-009 B3 FeedsTab：删除源确认弹窗如实呈现持久退订语义（GReader）', { timeout: 40000 }, async () => {
+componentTest('OPT-009 B3 FeedsTab：删除源确认弹窗如实呈现账户退订与离线续推语义（GReader）', { timeout: 40000 }, async () => {
   installBackend();
   clearInvokeCalls();
   resetStore();
@@ -95,8 +95,8 @@ componentTest('OPT-009 B3 FeedsTab：删除源确认弹窗如实呈现持久退�
     const msg = document.body.querySelector('.confirm-message')?.textContent ?? '';
     assert.ok(msg.includes('删除订阅源'), `确认弹窗已打开：${msg}`);
     assert.ok(!remoteLineOf(msg), `不得再写「同步服务端不受影响」：${msg}`);
-    assert.ok(msg.includes('持久') && msg.includes('退订'), `必须反映持久退订意图：${msg}`);
-    assert.ok(msg.includes('离线') && msg.includes('重启') && msg.includes('重试'), `必须说明离线/重启后可重试：${msg}`);
+    assert.ok(msg.includes('退订'), `必须反映账户退订动作：${msg}`);
+    assert.ok(msg.includes('离线') && msg.includes('重启') && msg.includes('继续'), `必须说明离线/重启后仍会继续：${msg}`);
   } finally {
     resetPlan();
   }
@@ -141,7 +141,7 @@ componentTest('OPT-009 B3 FeedsTab：分类删除弹窗覆盖成员逐源退订�
     await flush(2);
     const msg2 = document.body.querySelector('.confirm-message')?.textContent ?? '';
     assert.ok(msg2.includes('确定删除分类'), `空分类删除弹窗已打开：${msg2}`);
-    assert.ok(msg2.includes('空分类') && (msg2.includes('仅本地') || msg2.includes('不宣称远端')),
+    assert.ok(msg2.includes('空分类') && msg2.includes('本机'),
       `空分类必须如实说明无可表达的远端改动（本地-only 边界）：${msg2}`);
   } finally {
     resetPlan();
@@ -162,9 +162,13 @@ componentTest('OPT-009 B3 FeedsTab：Fever 连接下能力提示「仅本地」�
     assert.equal(useAppStore.getState().subscriptionCapabilities?.protocol, 'fever', '前置：Fever 能力矩阵已装入');
 
     const hint = entry.container.querySelector('.mini-dialog-hint');
-    assert.ok(hint, 'Fever 下必须常驻「仅本地」能力提示（不得让用户以为会同步）');
-    assert.ok(hint.textContent.includes('仅本地'), `提示必须含「仅本地」：${hint.textContent}`);
-    assert.ok(hint.textContent.includes('Fever'), `提示必须点名 Fever：${hint.textContent}`);
+    assert.ok(hint, 'Fever 下必须常驻本地边界提示（不得让用户以为会同步）');
+    assert.ok(hint.textContent.includes('仅同步阅读状态') && hint.textContent.includes('只保存在本机'),
+      `提示必须说明阅读状态与本地边界：${hint.textContent}`);
+    const addBtn = entry.container.querySelector('.group-mgr-controls .toggle-action-btn');
+    const feedEditBtn = entry.container.querySelector('.group-mgr-feed-controls .icon-btn');
+    assert.ok(addBtn?.getAttribute('title')?.includes('仅本地'), '新增操作附近必须写明仅本地');
+    assert.ok(feedEditBtn?.getAttribute('title')?.includes('仅本地'), '编辑操作附近必须写明仅本地');
 
     const delBtn = entry.container.querySelector('.group-mgr-feed-controls .btn-danger-text');
     await act(async () => { delBtn.click(); });
@@ -216,7 +220,7 @@ componentTest('OPT-009 B3：subscription-outbox-changed 事件链驱动 SyncTab 
     });
     await flush(3);
     assert.ok(listeners >= 1, 'subscription-outbox-changed 必须存在在册监听器（App.tsx 事件接线）');
-    assert.ok(cardDesc('同步状态').includes('订阅写回：等待 2 项，其中 1 项失败（订阅推送失败: HTTP 500）'),
+    assert.ok(cardDesc('同步状态').includes('订阅写回：订阅变更待推送 2 项，其中 1 项失败（订阅推送失败: HTTP 500）'),
       `事件必须驱动摘要卡显示等待/失败与最近错误：${cardDesc('同步状态')}`);
 
     /* Fever：local_only 项必须显式「仅本地」，不得写成成功也不得隐藏 */
@@ -226,9 +230,9 @@ componentTest('OPT-009 B3：subscription-outbox-changed 事件链驱动 SyncTab 
       });
     });
     await flush(3);
-    assert.ok(cardDesc('同步状态').includes('3 项仅本地生效（Fever 协议不支持远端写回）'),
+    assert.ok(cardDesc('同步状态').includes('3 项仅本地生效（Fever 不支持订阅写回）'),
       `local_only 必须如实呈现：${cardDesc('同步状态')}`);
-    assert.ok(cardDesc('订阅写回').includes('仅本地') || cardDesc('订阅写回').includes('不支持订阅写回'),
+    assert.ok(cardDesc('订阅写回').includes('只保存在本机'),
       `Fever 能力卡必须看出仅本地（不得出现「已同步」错觉）：${cardDesc('订阅写回')}`);
 
     /* 回空：噪音行随事件消失 */
@@ -262,10 +266,10 @@ componentTest('OPT-020 P1-C1：SyncTab 阶段失败只重跑同步阶段，不�
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => {
+    sync_run: syncRunFixture(() => {
       phaseCalls += 1;
       return Promise.reject({ message: `同步阶段失败 ${phaseCalls}` });
-    },
+    }),
   });
 
   try {
@@ -368,11 +372,18 @@ componentTest('OPT-020 P1-C1：save 失败重试仍保留入口，旧草稿成�
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => {
+    sync_status: () => Promise.resolve({
+      connected: saveCalls >= 3,
+      endpoint: saveCalls >= 3 ? 'https://b.example' : null,
+      account: saveCalls >= 4 ? 'bob' : (saveCalls >= 3 ? 'alice' : null),
+      last_sync: 0,
+      protocol: 'greader',
+    }),
+    sync_run: syncRunFixture(() => {
       phaseCalls += 1;
       if (phaseCalls === 1) return Promise.reject({ message: '同步阶段失败' });
       return Promise.resolve({ errors: [], removed_feeds: 0 });
-    },
+    }),
   });
 
   try {
@@ -437,7 +448,7 @@ componentTest('OPT-020 P1-C1：save 失败重试仍保留入口，旧草稿成�
     assert.equal(inputs[0].value, 'https://b.example', '旧草稿成功不得覆盖 B Endpoint');
     assert.equal(inputs[1].value, 'bob', '旧草稿成功不得覆盖 B 用户名');
     assert.equal(inputs[2].value, 'secret-b', '旧草稿成功不得清空 B 密码');
-    assert.equal(connectionTag(), '未连接', '旧草稿成功不得把 B 的连接状态改成已连接');
+    assert.equal(connectionTag(), 'alice', '连接状态以后端已落库的 A 账户为真值，不把 B 表单误标为已连接');
 
     const phaseError = useAppStore.getState().errors.find((e) => e.key.endsWith(':sync'));
     assert.ok(phaseError, '激活草稿 save 成功、phase 失败后必须保留 phase 入口');
@@ -452,6 +463,11 @@ componentTest('OPT-020 P1-C1：save 失败重试仍保留入口，旧草稿成�
       '激活成功后 phase 重试不得再次 sync_save（旧 activateVersion 已被消费）');
 
     await act(async () => { saveButton().click(); });
+    await waitFor(() => [...document.body.querySelectorAll('button')].some((button) => button.textContent.includes('更换并清理')),
+      { label: 'B 手动保存先确认换号后果', timeout: 8000 });
+    await act(async () => {
+      [...document.body.querySelectorAll('button')].find((button) => button.textContent.includes('更换并清理')).click();
+    });
     await waitFor(
       () => saveCalls === 4,
       { label: 'B 表单手动保存调用 sync_save', timeout: 8000 },
@@ -461,7 +477,7 @@ componentTest('OPT-020 P1-C1：save 失败重试仍保留入口，旧草稿成�
       `A 的失败/成功 phase 与 B 的 feeds+states 合计应为 5 次（实际 ${phaseCalls}）`);
     assert.equal(saves[3].activatePendingVersion, undefined,
       'A 已消费版本 77 后，B 后续保存不得再次携带旧激活令牌');
-    await waitFor(() => connectionTag() === '已连接' || connectionTag() === 'alice',
+    await waitFor(() => connectionTag() === 'bob',
       { label: 'B 保存成功后连接态更新', timeout: 8000 });
   } finally {
     resetPlan();
@@ -486,11 +502,11 @@ componentTest('OPT-020 P1-C1：最新提交代际使旧 save/phase action 跨重
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => {
+    sync_run: syncRunFixture(() => {
       phaseCalls += 1;
       if (phaseCalls === 1) return Promise.reject({ message: 'A2 阶段失败' });
       return Promise.resolve({ errors: [], removed_feeds: 0 });
-    },
+    }),
   });
 
   try {
@@ -571,10 +587,10 @@ componentTest('OPT-020 P1-C1：sync_save 在途编辑字段仍保持全局忙锁
       saveCalls += 1;
       return new Promise((resolve) => { resolveSave = resolve; });
     },
-    sync_phase: () => {
+    sync_run: syncRunFixture(() => {
       phaseCalls += 1;
       return Promise.reject({ message: '阶段失败' });
-    },
+    }),
   });
 
   try {
@@ -635,7 +651,7 @@ componentTest('OPT-020 P1-C1：stale draft 重试挂起时全局忙锁阻止 B �
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => Promise.resolve({ errors: [], removed_feeds: 0 }),
+    sync_run: syncRunFixture(),
   });
 
   try {
@@ -709,13 +725,13 @@ componentTest('OPT-020 P1-C1：A 在途卸载重挂仍持锁，A settle 后 B �
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => {
+    sync_run: syncRunFixture(() => {
       phaseCalls += 1;
       if (phaseCalls === 1) {
         return new Promise((resolve) => { resolveInFlightPhase = resolve; });
       }
       return Promise.resolve({ errors: [], removed_feeds: 0 });
-    },
+    }),
   });
 
   try {
@@ -791,7 +807,7 @@ componentTest('OPT-020 P3：全局忙锁拒绝 retry 时按原 key 重报可重�
       if (saveCalls === 1) return Promise.reject({ message: '首次失败' });
       return new Promise((resolve) => { resolveBlockingSave = resolve; });
     },
-    sync_phase: () => Promise.resolve({ errors: [], removed_feeds: 0 }),
+    sync_run: syncRunFixture(),
   });
 
   try {
@@ -859,7 +875,7 @@ componentTest('OPT-022 P1-1：SyncTab 保存后同步使用统一 generation，�
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => Promise.resolve({
+    sync_run: syncRunFixture(() => Promise.resolve({
       pushed_states: 0,
       pushed_feeds: 0,
       pulled_feeds: 0,
@@ -867,7 +883,7 @@ componentTest('OPT-022 P1-1：SyncTab 保存后同步使用统一 generation，�
       merged_states: 0,
       removed_feeds: 0,
       errors: [],
-    }),
+    })),
     refresh_all_feeds: () => Promise.resolve({ new_articles: 0, failed_feeds: 0 }),
   });
 
@@ -941,7 +957,7 @@ componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）�
         unboundLocalFeeds: 0,
       }));
     },
-    sync_phase: () => Promise.resolve({
+    sync_run: syncRunFixture(() => Promise.resolve({
       pushed_states: 0,
       pushed_feeds: 0,
       pulled_feeds: 0,
@@ -949,7 +965,7 @@ componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）�
       merged_states: 0,
       removed_feeds: 0,
       errors: [],
-    }),
+    })),
     refresh_all_feeds: () => {
       refreshCalls += 1;
       return Promise.reject(refreshReject);
@@ -982,7 +998,7 @@ componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）�
     );
 
     const final = useAppStore.getState();
-    assert.equal(folderReads, 3,
+    assert.equal(folderReads, 2,
       'refresh reject 后仍应完成最后一次本地回读再发布失败终态');
     assert.equal(final.syncStatus, 'error');
     assert.equal(final.syncFailure?.stage, 'refresh');
@@ -992,7 +1008,7 @@ componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）�
     assert.equal(final.saveAndSyncBusyOwner, null);
     assert.ok(final.toasts.some((t) => t.text.includes('后台同步失败：刷新源站失败')),
       '真实 refresh reject 必须给出失败与重试提示');
-    assert.ok(!final.toasts.some((t) => t.text.includes('后端同步完成')),
+    assert.ok(!final.toasts.some((t) => t.text.includes('账户同步完成')),
       'refresh reject 后不得发布成功 toast');
 
     refreshReject = new Error('');
@@ -1007,7 +1023,7 @@ componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）�
       { label: '空消息 refresh reject 保存链收尾并释放忙锁', timeout: 10000 },
     );
     const emptyMessageFinal = useAppStore.getState();
-    assert.equal(folderReads, 6,
+    assert.equal(folderReads, 4,
       '空消息 reject 同样应完成最后一次本地回读');
     assert.equal(emptyMessageFinal.syncStatus, 'error');
     assert.equal(emptyMessageFinal.syncFailure?.stage, 'refresh');
@@ -1018,14 +1034,14 @@ componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）�
     assert.ok(emptyMessageFinal.toasts.some(
       (t) => t.text.includes('后台同步失败：内容抓取失败（原因未提供）'),
     ), '空错误消息必须使用原因未提供兜底');
-    assert.ok(!emptyMessageFinal.toasts.some((t) => t.text.includes('后端同步完成')),
+    assert.ok(!emptyMessageFinal.toasts.some((t) => t.text.includes('账户同步完成')),
       '空消息 refresh reject 也不得发布成功 toast');
   } finally {
     resetPlan();
   }
 });
 
-componentTest('OPT-022 P1-2：deferred sync_phase pending 时跨挂载显示未返回，settle 后才释放忙锁', { timeout: 40000 }, async () => {
+componentTest('OPT-022 P1-2：deferred sync_run pending 时跨挂载显示未返回，settle 后才释放忙锁', { timeout: 40000 }, async () => {
   installBackend();
   clearInvokeCalls();
   resetStore({ dataMode: 'tauri' });
@@ -1035,7 +1051,7 @@ componentTest('OPT-022 P1-2：deferred sync_phase pending 时跨挂载显示未�
   let statesResolved = false;
   let refreshCalls = 0;
   setPlan({
-    sync_phase: (args) => {
+    sync_run: syncRunFixture((args) => {
       if (args?.which === 'feeds') {
         return Promise.resolve({
           pushed_states: 0,
@@ -1047,7 +1063,7 @@ componentTest('OPT-022 P1-2：deferred sync_phase pending 时跨挂载显示未�
         });
       }
       return new Promise((resolve) => { resolveStates = resolve; });
-    },
+    }),
     refresh_all_feeds: () => {
       refreshCalls += 1;
       return Promise.resolve({ new_articles: 0, failed_feeds: 0 });
@@ -1071,11 +1087,11 @@ componentTest('OPT-022 P1-2：deferred sync_phase pending 时跨挂载显示未�
     };
 
     await waitFor(
-      () => useAppStore.getState().syncStage === 'states'
-        && useAppStore.getState().syncActivityToken != null,
-      { label: 'deferred states IPC 已进入 pending', timeout: 8000 },
+      () => typeof resolveStates === 'function' && useAppStore.getState().syncActivityToken != null,
+      { label: 'deferred sync_run 已进入 states pending', timeout: 8000 },
     );
     token = useAppStore.getState().syncActivityToken;
+    useAppStore.getState().updateSyncActivity(token, { stage: 'states' });
     useAppStore.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
     await act(async () => {
       useAppStore.setState({ syncStartedAt: Date.now() - 65_000 });

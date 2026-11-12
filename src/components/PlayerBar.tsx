@@ -5,6 +5,11 @@ import { formatDuration } from '../lib/format';
 import { Icons } from './icons';
 import { CoverImage } from './CoverImage';
 import { useFocusTrap } from './useFocusTrap';
+import {
+  audioFailureKey,
+  shouldReportAudioFailure,
+  type AudioFailureSnapshot,
+} from '../lib/copyPolicy';
 
 /* ============================================================
    播客底部播放条 —— Mini Player
@@ -52,6 +57,28 @@ export function PlayerBar() {
   const pendingResumeRef = useRef<{ url: string; pos: number } | null>(null);
   /** 落库节流：记录上次写入的整秒 */
   const lastSaveRef = useRef(-1);
+  /** play reject 与 error 事件共用同一失败周期，避免同一次失败弹两条 toast。 */
+  const lastAudioFailureRef = useRef<AudioFailureSnapshot>(null);
+
+  const reportAudioFailure = (el: HTMLAudioElement, url: string) => {
+    const key = audioFailureKey(url);
+    const now = Date.now();
+    if (!shouldReportAudioFailure(lastAudioFailureRef.current, key, now)) return;
+    lastAudioFailureRef.current = { key, at: now };
+    showToast('无法播放音频，请检查网络或音频地址', {
+      label: '重试播放',
+      key,
+      run: () => {
+        const s = useAppStore.getState();
+        // 失败快照只属于这个元素；换集、关闭重开后不可操作另一次播放。
+        if (audioRef.current !== el || !s.player.isActive || s.player.audioUrl !== url) {
+          s.showToast('该次播放已结束，请在当前剧集上播放');
+          return;
+        }
+        s.applyMediaAction('play');
+      },
+    });
+  };
 
   /** 续播 seek：只有元数据就绪（readyState ≥ HAVE_METADATA = 1）后才能安全设
       currentTime。两个触发点共用：① loadedmetadata/durationchange 事件；
@@ -94,19 +121,30 @@ export function PlayerBar() {
 
   /* ---------- store → audio：播放/暂停/倍速/seek ---------- */
   useEffect(() => {
+    lastAudioFailureRef.current = null;
+  }, [player.audioUrl, player.isActive]);
+
+  useEffect(() => {
     const el = audioRef.current;
-    if (!el) return;
+    if (!el || !player.isActive) return;
+    let currentAttempt = true;
+    if (player.isPlaying) lastAudioFailureRef.current = null;
     if (player.isPlaying) void el.play().catch(() => {
-      /* 自动播放被拒或网络失败：回落暂停态并提示 */
-      useAppStore.getState().togglePlayerPlay();
-      useAppStore.getState().showToast('音频加载失败');
+      const s = useAppStore.getState();
+      // pause()/换源/关闭会拒绝旧 play Promise；旧尝试没有资格翻转新目标态。
+      if (!currentAttempt || audioRef.current !== el || !s.player.isActive
+        || !s.player.isPlaying || s.player.audioUrl !== player.audioUrl) return;
+      s.applyMediaAction('pause');
+      reportAudioFailure(el, player.audioUrl);
     });
     else el.pause();
-  }, [player.isPlaying, player.audioUrl]);
+    return () => { currentAttempt = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player.isPlaying, player.audioUrl, player.isActive]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = player.speed;
-  }, [player.speed, player.audioUrl]);
+  }, [player.speed, player.audioUrl, player.isActive]);
 
   /* seek 请求（seekToSec 非 null 时执行一次并清空） */
   useEffect(() => {
@@ -114,18 +152,28 @@ export function PlayerBar() {
     if (!el || player.seekToSec == null) return;
     el.currentTime = player.seekToSec;
     useAppStore.setState((s) => ({ player: { ...s.player, seekToSec: null } }));
-  }, [player.seekToSec]);
+  }, [player.seekToSec, player.audioUrl, player.isActive]);
 
   /* ---------- audio → store：进度/时长/结束 + 续播 seek/落库 ---------- */
   useEffect(() => {
     const el = audioRef.current;
-    if (!el) return;
+    if (!el || !player.isActive) return;
+    const currentElement = () => {
+      const p = useAppStore.getState().player;
+      return audioRef.current === el && p.isActive && p.audioUrl === player.audioUrl;
+    };
     const onMeta = () => {
+      if (!currentElement()) return;
       syncPlayerProgress(el.currentTime, el.duration || 0);
       // 续播：元数据就绪后再 seek（此时可安全设 currentTime）
       applyPendingResume(el, player.audioUrl);
     };
+    const onPlaying = () => {
+      if (!currentElement()) return;
+      lastAudioFailureRef.current = null;
+    };
     const onTime = () => {
+      if (!currentElement()) return;
       syncPlayerProgress(el.currentTime, el.duration || 0);
       // 节流落库（整秒变化才写，避免每帧写）
       const s = Math.floor(el.currentTime);
@@ -140,16 +188,23 @@ export function PlayerBar() {
       }
     };
     const onEnd = () => {
+      if (!currentElement()) return;
       playerEnded();
       clearPlayback();
     };
-    const onError = () => showToast('音频播放出错');
+    const onError = () => {
+      if (!currentElement()) return;
+      useAppStore.getState().applyMediaAction('pause');
+      reportAudioFailure(el, player.audioUrl);
+    };
+    el.addEventListener('playing', onPlaying);
     el.addEventListener('timeupdate', onTime);
     el.addEventListener('loadedmetadata', onMeta);
     el.addEventListener('durationchange', onMeta);
     el.addEventListener('ended', onEnd);
     el.addEventListener('error', onError);
     return () => {
+      el.removeEventListener('playing', onPlaying);
       el.removeEventListener('timeupdate', onTime);
       el.removeEventListener('loadedmetadata', onMeta);
       el.removeEventListener('durationchange', onMeta);
@@ -157,7 +212,7 @@ export function PlayerBar() {
       el.removeEventListener('error', onError);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player.audioUrl, player.title, player.showName, player.cover]);
+  }, [player.audioUrl, player.title, player.showName, player.cover, player.isActive]);
 
   /* ---------- SMTC 系统媒体控制同步（节流 1s，进度变化才推送） ---------- */
   const lastSentRef = useRef({ pos: -1, playing: null as boolean | null, title: '' });
@@ -210,11 +265,11 @@ export function PlayerBar() {
           元素被立即卸载，只有挂载键帧能播出现方向，消失仍是硬切。 */}
       <div className={`podcast-bottom-bar ${player.isActive ? 'active' : ''}`}>
         {/* 单例 audio：仍随 isActive 挂载/卸载（播放生命周期与原先一致），src 变更即换剧集。续播 seek 在 onMeta 做。 */}
-        {player.isActive && <audio ref={audioRef} src={player.audioUrl} preload="metadata" />}
+        {player.isActive && <audio key={player.audioUrl} ref={audioRef} src={player.audioUrl} preload="metadata" />}
 
         <div className="player-track-info">
           {/* 封面：共享 CoverImage（与卡片/全屏播放器共用同一缓存与上报去重） */}
-          <CoverImage src={player.cover} articleId={player.coverEntryId} className="player-cover" alt="cover" />
+          <CoverImage src={player.cover} articleId={player.coverEntryId} pageUrl={player.coverPageUrl} enabled={player.isActive} className="player-cover" alt="cover" />
           <div className="player-titles">
             <div className="player-title">{player.title}</div>
             <div className="player-subtitle">{player.showName}</div>
@@ -361,6 +416,8 @@ function PlayerFullOverlay({
           <CoverImage
             src={player.cover}
             articleId={player.coverEntryId}
+            pageUrl={player.coverPageUrl}
+            enabled={open}
             className="player-full-cover"
             alt=""
             fallbackClassName="player-full-cover player-full-cover-fallback cover-fallback"
@@ -422,3 +479,4 @@ function PlayerFullOverlay({
     </div>
   );
 }
+

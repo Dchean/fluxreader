@@ -97,6 +97,10 @@ async fn seed_bound_row(
         };
         let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
         db::set_article_remote_id(&conn, aid, eid).unwrap();
+        // The existence-probe tests start from a previously observed feed/10
+        // identity, including the case later deleted remotely. Cold proof has
+        // separate negative tests and must not replace this probe's semantics.
+        assert!(db::confirm_article_remote_origin(&conn, aid, eid, 10).unwrap());
         if local_read {
             db::set_read(&conn, aid, true).unwrap();
         }

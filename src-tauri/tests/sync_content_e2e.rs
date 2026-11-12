@@ -3,7 +3,7 @@
 //!    源，服务端源既不直连抓取、又从不补内容 → 文章数永久少于服务端）。
 //! ② upsert_miniflux_entry 的状态覆盖必须尊重本地待推变更（防乒乓）。
 //! ③ article_id_by_url 用规范化 URL 匹配，同文不同饰不重复入库。
-//! 运行：cargo test --test sync_content_e2e -- --ignored --nocapture
+//! 运行：cargo test --test sync_content_e2e -- --include-ignored --nocapture
 
 mod common;
 mod mock_greader;
@@ -61,7 +61,9 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     );
 
     // 后台轻量同步（full=false）——旧实现只拉 fetch_failed 源，会漏掉这条
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     {
         let conn = db.lock().await;
@@ -208,7 +210,9 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
         enclosures,
     );
 
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     let conn = db.lock().await;
     let (image_url, enclosure_url): (Option<String>, Option<String>) = conn
@@ -254,7 +258,9 @@ async fn miniflux_existing_entry_backfills_cover() {
     );
 
     // 首次 light 同步：new 分支入库，正文无图 → image_url 为 NULL
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
     {
         let conn = db.lock().await;
         let image: Option<String> = conn
@@ -286,7 +292,9 @@ async fn miniflux_existing_entry_backfills_cover() {
     }
 
     // 再次 light 同步：existing 分支（URL 匹配）必须回填封面
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     let conn = db.lock().await;
     let image_url: Option<String> = conn
@@ -344,16 +352,14 @@ fn normalized_url_match_maps_same_article() {
     };
     let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
 
-    // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇（规范化键同源同口径）
-    let maps = db::sync_match_maps(&conn).unwrap();
-    let matched = maps
-        .url_to_id
-        .get(&db::normalize_url("http://example.com/story"));
-    assert_eq!(
-        matched.copied(),
-        Some(aid),
-        "normalized URL must match the local article (https://example.com/story/ vs http://example.com/story)"
-    );
+    // 规范化URL仅缩小候选；本夹具标题、正文与附件全部相同，允许首绑。
+    let mut remote = a;
+    remote.guid = "remote-100".into();
+    remote.source = "miniflux".into();
+    remote.url = Some("http://example.com/story".into());
+    let bound = db::upsert_remote_article(&conn, feed, &remote, Some(100)).unwrap();
+    assert_eq!(bound.id, aid);
+    assert!(!bound.inserted, "内容确认后复用同源未绑定早到行");
 
     let _ = std::fs::remove_file(&tmp);
 }
@@ -396,7 +402,9 @@ async fn miniflux_entry_published_before_cursor_stays_out_of_light_window() {
     }
 
     // 后台轻量同步（full=false）：published 早于游标 → ot 窗口不含它 → 不入库。
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     {
         let conn = db.lock().await;
@@ -507,7 +515,9 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
 
     // light 同步（full=false）：changed_after 增量拉不到这条旧变更，但未读 id
     // 对账必须收敛——本地应从「未读」变为「已读」。
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     {
         let conn = db.lock().await;

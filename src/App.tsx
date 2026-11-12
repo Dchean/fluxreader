@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useAppStore, bootstrapGithubAuth, selectVisibleEntries } from './store';
+import { useAppStore, selectVisibleEntries, readBackAppliedAppSettings, runAppSettingsApplyBoundary } from './store';
 import { Sidebar } from './components/Sidebar';
 import { Timeline } from './components/Timeline';
 import { Reader } from './components/Reader';
@@ -10,8 +10,13 @@ import { ErrorCenterDialog } from './components/ErrorCenter';
 import { ContextMenuHost } from './components/ContextMenu';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useTauriEvent } from './components/useTauriEvent';
-import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
+import { ModalOverlay } from './components/primitives';
+import { extractError } from './lib/api';
+import { anyOverlayOpen, isInteractiveSpaceTarget, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
+import type { SyncQueueStats } from './lib/api';
+import type { BackendSyncActivityEvent } from './store/types';
+import { localDayBounds } from './store/readingSession';
 /* ============================================================
    Application Shell
 
@@ -58,6 +63,45 @@ export default function App() {
   const playerExpanded = useAppStore((s) => s.playerExpanded);
   const dataLoading = useAppStore((s) => s.dataLoading);
   const bootstrapError = useAppStore((s) => s.bootstrapError);
+  const libraryRestoreBusy = useAppStore((s) => s.libraryRestoreBusy);
+  const libraryGeneration = useAppStore((s) => s.libraryGeneration);
+  const portablePhase = useAppStore((s) => s.portableBackup.busy);
+
+  useEffect(() => {
+    // 在任何全局/浮层快捷键之前处理。Tab 仍交给恢复对话框的 focus trap。
+    const blockDuringRestore = (event: KeyboardEvent) => {
+      if (!useAppStore.getState().libraryRestoreBusy || event.key === 'Tab') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+    };
+    window.addEventListener('keydown', blockDuringRestore, true);
+    return () => window.removeEventListener('keydown', blockDuringRestore, true);
+  }, []);
+
+  // 日界刷新只更新当前会话属性/计数；下一次显式导航才捕获新的“今天”成员。
+  useEffect(() => {
+    let day = localDayBounds().dayStartMs;
+    let timer: ReturnType<typeof setTimeout>;
+    const checkDay = () => {
+      const next = localDayBounds();
+      if (next.dayStartMs !== day) {
+        day = next.dayStartMs;
+        const state = useAppStore.getState();
+        if (state.dataMode === 'tauri' && !state.dataLoading) {
+          void state.reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 刷新自身报告失败 */ });
+        }
+      }
+      clearTimeout(timer);
+      timer = setTimeout(checkDay, Math.max(1, next.dayEndMs - Date.now()));
+    };
+    checkDay();
+    window.addEventListener('focus', checkDay);
+    document.addEventListener('visibilitychange', checkDay);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', checkDay);
+      document.removeEventListener('visibilitychange', checkDay);
+    };
+  }, []);
 
   /* PlayerBar 活跃 → body 标记类（toast 层上移避让底栏） */
   useEffect(() => {
@@ -72,33 +116,27 @@ export default function App() {
 
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {
-    /* 启动装载并行化（审计卡2-5）：原「设置恢复 → 数据装载」串行链的首屏
-       等待是两者之和；现改为同时发起，等待缩为两者较慢者。写集核实：
-       bootstrapSettings 只写 settings 对象与 activeViewFilter/timelineFilter，
-       reloadFromBackend 发起时读的范围快照（activeFeedFilter/
-       activeContentLayout/timelineSort）都不在其写集内——首读无依赖。但
-       **落库有顺序依赖**：数据快照落地时读 settings.smartDedup（scopeCounts
-       快照）、完成时读 activeViewFilter（决定筛选视图补拉），且设置接受必须
-       先于首帧渲染（主题不闪默认值）。故按「首读并行、落库有序」实现：
-       设置恢复由 bootstrapFromBackend 在数据查询发起的同时并行启动，
-       reloadFromBackend 在落地前等待其接受完成（等待后复核查询代际，机制见
-       bootstrap.ts 的启动落库门）。splash 门控不变：仍由数据装载落地关闭
-       dataLoading，设置恢复不参与门控。 */
-    void useAppStore.getState().bootstrapFromBackend();
-    /* GitHub 登录态恢复（设备流 token 持久化在 SQLite，启动即还原账户显示） */
-    void bootstrapGithubAuth();
+    /* 设置恢复与来源/计数元数据并行；完整成员查询等待启动筛选接受，随后原子落地。 */    void useAppStore.getState().bootstrapFromBackend();
+    if ('__TAURI_INTERNALS__' in window) {
+      void useAppStore.getState().refreshLocalSyncStatus().catch((error) => {
+        useAppStore.getState().showToast(`WebDAV 状态读取失败：${extractError(error)}`);
+      });
+    }
   }, []);
 
   /* ---------- 后台刷新调度器事件：新文章到达即重载列表 + toast ---------- */
   useTauriEvent<{
-          new_articles: number;
-          failed_feeds: number;
+    new_articles?: number;
+    failed_feeds?: number;
+    source?: 'local-sync' | 'portable-restore';
     /* OPT-007（F11）：后台同步的数据变化事件按实际变更集驱动——纯读藏
        对账（merged_states>0、无新文章）也会到达本监听器；两字段仅为
        可诊断性随 payload 下发，落地动作与两条既有通道一致。 */
     pulled_entries?: number;
     merged_states?: number;
   }>('feeds-updated', (e) => {
+    // restore 的全量重建由提交调用者单独拥有；重复事件不能再次清空新会话。
+    if (e.source === 'portable-restore' || useAppStore.getState().libraryRestoreBusy) return;
     const { new_articles, failed_feeds } = e;
     /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
     /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
@@ -106,27 +144,51 @@ export default function App() {
        OPT-007：纯对账变化（new_articles=0）同样走这条保位 reload——
        列表/计数/Reader 跟随更新，锚点保留；空变化不在 Rust 侧发事件。 */
     void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
-    if (new_articles > 0) {
+    if ((new_articles ?? 0) > 0) {
       useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);
-    } else if (failed_feeds > 0) {
+    } else if ((failed_feeds ?? 0) > 0) {
       useAppStore.getState().showToast(`后台刷新：${failed_feeds} 个源抓取失败`);
     }
   });
 
-  /* ---------- 后台 Miniflux 自动同步进行中状态（侧栏 spinner 可见性） ---------- */
-  useTauriEvent('sync-running', () => useAppStore.setState({ backgroundSyncing: true }));
-  useTauriEvent('sync-idle', () => useAppStore.setState({ backgroundSyncing: false }));
+  useTauriEvent<{ kind: 'state' | 'body' | 'restore'; ok: boolean }>('local-sync-updated', (event) => {
+    if (useAppStore.getState().libraryRestoreBusy || event.kind === 'restore') return;
+    void useAppStore.getState().refreshLocalSyncStatus().catch(() => {});
+    if (event.kind === 'state' && event.ok) {
+      // 普通同步刷新设置基线，不把启动筛选应用到正在阅读的会话。
+      void runAppSettingsApplyBoundary(() => readBackAppliedAppSettings({ applyViewFilters: false })).catch((error) => {
+        useAppStore.getState().showToast(`状态同步已完成，但设置回读失败：${extractError(error)}`);
+      });
+    }
+  });
+
+  useTauriEvent<BackendSyncActivityEvent>('sync-activity', (event) => {
+    useAppStore.getState().applyBackendSyncActivity(event);
+  });
 
   /* ---------- TASK-124（审计 P2-6①）：同步队列变化事件——四态展示接入真实链路 ----------
      Rust 在本地入队事务提交（set_read/set_starred/set_read_bulk/mark_all_read）、
      即时推送与 states 推送段确认·失败、认证/网络阻塞后发 sync-queue-changed
-     （payload = {waiting, failed, last_error}）。此前队列统计只随 reloadFromBackend
+     （payload = 队列生命周期分类统计）。此前队列统计只随 reloadFromBackend
      刷新——本地标读入队后 pill 仍显示「后端已同步」（探针 P8 本体）。
-     监听器只调 applySyncQueueChanged（store 动作）：写队列三字段，并可在手动
-     同步 states 阶段补记远端写回确认；不触碰 syncConnected，也不以队列清空
-     结束整轮 syncing。未配置同步时 Rust 不发事件，pill 保持「本地模式」不误报。 */
-  useTauriEvent<{ waiting: number; failed: number; last_error: string | null }>('sync-queue-changed', (e) => {
+     监听器只调 applySyncQueueChanged（store 动作）：写队列分类字段，并按最新
+     统计设置或撤销手动同步 states 阶段的远端写回确认；不触碰 syncConnected，
+     也不以队列清空结束整轮 syncing。未配置同步时 Rust 不发事件，pill 保持
+     「本地模式」不误报。 */
+  useTauriEvent<SyncQueueStats>('sync-queue-changed', (e) => {
     useAppStore.getState().applySyncQueueChanged(e);
+  });
+
+  /* 即时状态推送的基础设施错误（计划构建/失败标记/出队写库失败）不能只进
+     Rust 日志：转换为带重试入口的可见错误，普通推送失败仍由队列 last_error
+     负责，不在这里重复刷屏。 */
+  useTauriEvent<{ message: string }>('sync-error', (e) => {
+    const message = e?.message?.trim() || '状态同步失败';
+    useAppStore.getState().showToast(message, {
+      label: '重试',
+      key: 'sync:instant-push',
+      run: () => { void useAppStore.getState().triggerManualSync(); },
+    });
   });
 
   /* ---------- OPT-009 B3：订阅 outbox 状态变化事件——持久回执接入真实链路 ----------
@@ -145,6 +207,7 @@ export default function App() {
 
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
   useTauriEvent<string>('player-media', (action) => {
+    if (useAppStore.getState().libraryRestoreBusy) return;
     /* OPT-015：媒体键语义（play/pause 目标态幂等、toggle 才切换、未激活
        不启动、stop 关闭）单点在 store.applyMediaAction；这里只收窄
        payload，不再内联播放判定——此前 play/pause/toggle 全部
@@ -180,16 +243,17 @@ export default function App() {
   /* ---------- 全局快捷键 ---------- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const s = useAppStore.getState();
       const target = e.target as HTMLElement;
       const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 
-      if (e.ctrlKey && e.key.toLowerCase() === 'k') {
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         if (s.searchOpen) s.closeSearch(); else s.openSearch();
         return;
       }
-      if (e.ctrlKey && e.key === ',') {
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === ',') {
         e.preventDefault();
         if (s.settingsOpen) s.closeSettings(); else s.openSettings();
         return;
@@ -201,13 +265,12 @@ export default function App() {
            inInput 判断之前，输入框内合成同样会到达这里，故不能依赖焦点守卫。 */
         // Note: 守卫口径与「为何不全局拦截」 — 见 .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md
         if (e.isComposing || e.keyCode === 229) return;
-        /* 浮层从最顶层开始依次关闭。
-           TASK-100 U7：补 closeAskVisible——此前 CloseAskDialog 是唯一 Esc 关不掉
-           的浮层。关序与视觉层级一致（视觉在上者先关）：确认框 3000（自带 Esc，
-           捕获级 stopPropagation）> 各弹窗 150 > 全屏播放器 140。
-           Esc 语义 = 本次按「最小化到托盘」应答且**不记住选择**（不替用户做出
-           「不再询问」的决定，下次关闭仍会询问；记住需显式勾选）。 */
-        if (s.closeAskVisible) s.answerCloseAsk('tray', false);
+        /* 浮层按既有 Esc 链依次关闭。CloseAskDialog 与其他 ModalOverlay 同为
+           z-index 150，本身不监听 Esc；本分支先取消关闭询问，再关闭搜索/迷你
+           弹窗/错误中心/设置，最后处理灯箱、全屏播放器与阅读器。
+           Esc 语义 = 仅取消本次关闭询问：不最小化、不退出、不写 remember；
+           只有显式按钮才提交关闭动作。 */
+        if (s.closeAskVisible) s.dismissCloseAsk();
         else if (s.searchOpen) s.closeSearch();
         else if (s.newCategoryModalOpen) s.closeMiniModal('newCategory');
         else if (s.addFeedModalOpen) s.closeMiniModal('addFeed');
@@ -220,7 +283,8 @@ export default function App() {
         else if (s.activeArticleId) s.clearReaderSelection();
         return;
       }
-      if (inInput) return;
+      // 已声明的组合键在上方消费；其它修饰组合不能降级为背后的单键动作。
+      if (inInput || e.ctrlKey || e.metaKey || e.altKey) return;
 
       /* P3[F2]（REQ-104）：任一浮层打开时，**单键快捷键**（S/M/J/K）一律让路。
          此前只有 Space 判断了 defaultPrevented，S/M/J/K 不看浮层状态——设置页、
@@ -235,6 +299,7 @@ export default function App() {
          （审查 TASK-081-F2 登记的遗留）。 */
       const overlayOpen = anyOverlayOpen({
         searchOpen: s.searchOpen,
+        contextMenuOpen: s.contextMenuOpen,
         settingsOpen: s.settingsOpen,
         newCategoryModalOpen: s.newCategoryModalOpen,
         addFeedModalOpen: s.addFeedModalOpen,
@@ -251,12 +316,12 @@ export default function App() {
       }
 
       /* Space：播放器激活时播放/暂停（快捷键表承诺）。
-         但若该按键已被更具体的控件消费（卡片/下拉/菜单等补了 role+tabIndex 后
-         可按 Space 激活自身，见 REQ-008），则让路——否则同一次 Space 会
-         既执行控件动作、又切换播放（双重动作）。
-         只在此分支判断 defaultPrevented，不动其它快捷键的既有语义。 */
+         原生交互控件（按钮/链接/表单/菜单项等）拥有自己的 Space 语义，必须
+         整体让路；卡片虽常带 role=button，但不在此清单内，仍交给播放器全局
+         切换。defaultPrevented 继续兜住更具体的自定义控件处理器。
+         只在此分支判断，不动其它快捷键的既有语义。 */
       if (e.key === ' ' && s.player.isActive) {
-        if (e.defaultPrevented) return;
+        if (e.defaultPrevented || isInteractiveSpaceTarget(target)) return;
         e.preventDefault();
         s.togglePlayerPlay();
         return;
@@ -270,14 +335,10 @@ export default function App() {
         s.toggleCurrentReadStatus();
         return;
       }
-      /* J/K 键盘流：选中即打开（已确认的产品决策）。
-         TASK-114 X3：布局门控从「仅 article」扩展为「image 之外全部放行」——
-         全部虚拟化布局复用 Timeline 的 moveCardFocus/focusIndex 基建（选中切换
-         后 focusIndex 经既有 effect 跟随，卡片 roving tabindex 同步）；画廊
-         （image）：不支持 J/K——产品判断（OPT-017C 起画廊为列模型虚拟化，
-         门控维持排除 image 不变）。门控与推进判定收口在纯函数
-         jkLayoutAllowed/jkNextIndex（src/lib/jkNavigation.ts，与 Timeline
-         虚拟化开关同一口径），回归网直接断言真值表与 store 层五布局模拟。 */
+      /* J/K 键盘流：五布局统一选中；文章分区同时打开正文。activeArticleId 变化后由
+         Timeline 负责目标卡入窗 + DOM focus + aria-current；门控与推进判定
+         仍收口在纯函数 jkLayoutAllowed/jkNextIndex，回归网直接断言真值表、
+         五布局 store 模拟与真实组件焦点。 */
       if (e.key === 'j' || e.key === 'k') {
         if (!jkLayoutAllowed(s.activeContentLayout)) return;
         const items = selectVisibleEntries(s);
@@ -292,16 +353,17 @@ export default function App() {
 
   const gridClass = activeContentLayout === 'article' ? 'layout-3col' : 'layout-2col';
 
-  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–560px），松手持久化。
+  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–420px），松手持久化。
+     视口过窄时 CSS 还会按 37vw 收缩，保证阅读列不被固定列宽挤没。
      TASK-067 N9：拖动期间只更新本地拖拽态——此前 onMove 每像素调一次
      updateSettings（整包序列化 + set_setting IPC + 全 App 重渲染），一次拖动
      几十上百次写库；松手才一次性持久化。 */
   const startDragListWidth = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startWidth = listWidth;
+    const startWidth = Math.min(420, listWidth);
     const onMove = (ev: MouseEvent) => {
-      setDragWidth(Math.min(560, Math.max(280, startWidth + (ev.clientX - startX))));
+      setDragWidth(Math.min(420, Math.max(280, startWidth + (ev.clientX - startX))));
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -321,13 +383,14 @@ export default function App() {
       <div className="immersive-win-controls">
         <button className="win-btn" title="最小化" onClick={minimizeWindow}>—</button>
         <button className="win-btn" title="最大化/还原" onClick={toggleMaximizeWindow}>□</button>
-        <button className="win-btn close" title="关闭" onClick={closeWindow}>✕</button>
+        <button className="win-btn close" title="关闭" disabled={libraryRestoreBusy} onClick={closeWindow}>✕</button>
       </div>
 
       {/* 产品树错误边界：主内容 + 浮层 + toast 崩溃时出全屏兜底态；
           窗口控制留在边界外——无边框窗口在崩溃态下仍必须能最小化/关闭。
           Note: 归因与分层取舍见 .agents/notes/implemented/architecture/2026-11-01-产品树错误边界放顶层.md */}
       <ErrorBoundary>
+        <div inert={libraryRestoreBusy} style={{ display: 'contents' }}>
         <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${effectiveListWidth}px` } as React.CSSProperties}>
           {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
           {dataLoading ? (
@@ -355,7 +418,7 @@ export default function App() {
               {activeContentLayout === 'article' && (
                 <div className="reader-resize-handle" onMouseDown={startDragListWidth} title="拖动调整列表宽度" />
               )}
-              <Reader />
+              {activeContentLayout === 'article' && <Reader />}
             </>
           )}
         </div>
@@ -363,8 +426,8 @@ export default function App() {
         <PlayerBar />
 
         {/* 浮层 */}
-        <SettingsModal />
-        <SearchModal />
+        <SettingsModal key={`settings:${libraryGeneration}`} />
+        <SearchModal key={`search:${libraryGeneration}`} />
         <Lightbox />
         <NewCategoryModal />
         <AddFeedModal />
@@ -375,6 +438,15 @@ export default function App() {
         <CloseAskDialog />
         {/* 全局右键菜单（替换 WebView2 默认菜单） */}
         <ContextMenuHost />
+        </div>
+        {libraryRestoreBusy && <div style={{ position: 'fixed', inset: 0, zIndex: 10000 }}>
+          <ModalOverlay open onClose={() => {}} ariaLabel="正在恢复资料库" contentWidth={420}>
+            <div className="mini-dialog" role="status" aria-live="polite" aria-busy="true">
+              <h3>{portablePhase === 'refresh' ? '恢复已完成，正在刷新界面…' : '正在恢复资料库…'}</h3>
+              <p>请稍候，完成前暂时不能编辑资料库。</p>
+            </div>
+          </ModalOverlay>
+        </div>}
 
         {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
             退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。

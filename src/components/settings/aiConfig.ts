@@ -43,10 +43,21 @@ export function mergePromptsOnly(persisted: string | null, prompts: PromptFields
    并发时不再发生「后完成者用旧快照整包覆盖先写者」。
    Note: 取舍与替代方案 — 见 .agents/notes/implemented/bug-fix/2026-11-01-AI配置读改写卡内串行化.md */
 let aiConfigWriteChain: Promise<void> = Promise.resolve();
+let aiConfigLibraryEpoch = 0;
+
+/** 恢复提交后废弃旧表单排队操作；不清空队列或让旧请求与新请求并发。 */
+export function invalidateAiConfigDraftsAfterRestore(): void {
+  aiConfigLibraryEpoch++;
+}
 
 /** 排入 AI 配置写链：返回 op 自身的 promise（失败向调用方透传，不阻断后续写入）。 */
 export function enqueueAiConfigWrite<T>(op: () => Promise<T>): Promise<T> {
-  const run = aiConfigWriteChain.then(op, op);
+  const epoch = aiConfigLibraryEpoch;
+  const current = () => {
+    if (epoch !== aiConfigLibraryEpoch) throw new Error('资料库已恢复，请重新输入 AI 配置');
+    return op();
+  };
+  const run = aiConfigWriteChain.then(current, current);
   aiConfigWriteChain = run.then(
     () => undefined,
     () => undefined,

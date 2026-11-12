@@ -53,10 +53,10 @@ pub struct SubscriptionOutboxItem {
     pub action: String,
     pub feed_url: String,
     pub remote_id: Option<i64>,
-    /// 恢复路径（`remote_id IS NULL` 的退订）经幂等 `quick_add` 解析出的已验证 id。
+    /// 恢复路径（`remote_id IS NULL` 的退订）经订阅列表解析出的已验证 id。
     /// 与 `remote_id` 分开：解析结果**不**等于「入队时已知的远端绑定」——恢复路径
-    /// 必须在解析之外继续做列表发现（防非幂等服务端的重复创建）。
-    /// 在列表/发送之前持久化：列表长期失败或重启后不重复 quick_add（B2-R2）。
+    /// 必须在同次列表发现中收集同 URL 其他目标，避免遗漏已有重复订阅。
+    /// 在发送之前持久化；重试仍复核列表，不通过 quick_add 创建目标。
     pub resolved_remote_id: Option<i64>,
     pub desired_title: Option<String>,
     pub desired_folder: Option<String>,
@@ -84,7 +84,7 @@ pub struct SubscriptionOutboxItem {
 ///
 /// **被替换的 pending 退订行携带的移除基准必须继承（B2-R2/R2-3）**：删除后快速
 /// 重加同一 URL 时，退订很可能尚未被服务端确认——远端订阅仍持有旧 label，而
-/// quick_add（幂等）会返回它的 id；若重加行不带 `prev_folder`，挂载只发 `a=` 会
+/// 新增碰到重复 URL 后会回查列表取得 id；若重加行不带 `prev_folder`，挂载只发 `a=` 会
 /// 永久残留旧 label。继承只读被替换行**已持久化**的基准，不猜测。
 pub fn enqueue_subscribe(
     conn: &Connection,
@@ -93,7 +93,8 @@ pub fn enqueue_subscribe(
     feed_url: &str,
     desired_title: Option<&str>,
     desired_folder: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<i64> {
+    let _writer = crate::db::writer_guard(conn)?;
     let inherited_prev: Option<String> = conn
         .query_row(
             "SELECT prev_folder FROM subscription_outbox
@@ -127,7 +128,7 @@ pub fn enqueue_subscribe(
             inherited_prev
         ],
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 /// 退订入队（本地删除 feed 的同一事务内调用）。
@@ -139,10 +140,10 @@ pub fn enqueue_subscribe(
 /// **未知远端目标也必须落可恢复意图（B2-R1 复审 P2）**：删除发生在同账号同 URL
 /// 仍有 pending 队项时（典型：`quick_add` 已发出、响应在途/丢失/进程重启），远端
 /// 可能已经存在这次创建——此刻无从得知 id，但意图必须持久化：写入 `remote_id`
-/// 为 NULL 的 unsubscribe 行，由执行器在发送前用**幂等 quick_add-by-URL**解析出
+/// 为 NULL 的 unsubscribe 行，由执行器在发送前查询订阅列表取得
 /// 已验证 id 再退订（见 `exec_unsubscribe_item`）。没有创建证据（同账号同 URL 无
-/// pending 队项）时不写行——从未推送过，远端不可能有它，写了只会让执行器对不存在
-/// 的订阅做一次创建+删除。**删除先于 quick_add 发出**的普通场景正落在这一分支：
+/// pending 队项）时不写行；恢复不会调用 quick_add 创建目标。
+/// **删除先于 quick_add 发出**且尚无队项的普通场景正落在这一分支：
 /// 无队项可删、无在途请求，本地墓碑已足够。
 /// 返回 true = 已写入退订队项（`remote_id` 可能待解析）；false = 无创建证据、未写入。
 ///
@@ -164,6 +165,7 @@ pub fn enqueue_unsubscribe(
     remote_id: Option<i64>,
     prev_folder: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let inherited: Option<i64> = conn
         .query_row(
             "SELECT remote_id FROM subscription_outbox
@@ -251,6 +253,7 @@ pub fn enqueue_edit(
     desired_folder: Option<&str>,
     prev_folder: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     // 合并基线：同账号同 URL 的既有 pending 队项（若有）。
     let previous: Option<OutboxMergeBaseline> = conn
         .query_row(
@@ -330,6 +333,7 @@ pub fn update_pending_subscribe_desired(
     folder: Option<&str>,
     prev_folder: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET desired_title = COALESCE(?1, desired_title),
@@ -347,7 +351,7 @@ pub fn update_pending_subscribe_desired(
 /// remote_id 补给**同账号同代际**的替代 pending 行，避免远端孤儿：
 /// - 替代行是 unsubscribe（本地已删）→ 填入远端 id，下一轮退订收敛；
 /// - 替代行是 subscribe（合并/重新添加）→ 填入远端 id 并推进 remote_created，
-///   下一轮直接绑定（quick_add 幂等，本可不填；填上避免重复请求）。
+///   下一轮直接绑定，避免重复创建请求及远端副作用。
 ///
 /// 只在行还处于「无 remote_id」时补——已有目标的行使旧响应彻底落空（不覆盖）。
 pub fn adopt_remote_id_for_pending(
@@ -357,6 +361,7 @@ pub fn adopt_remote_id_for_pending(
     feed_url: &str,
     remote_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET remote_id = ?1,
@@ -415,11 +420,34 @@ pub fn rebind_outbox_generation(
     account_key: &str,
     account_generation: i64,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox SET account_generation = ?1, updated_at = datetime('now')
           WHERE account_key = ?2 AND account_generation <> ?1 AND status = 'pending'",
         params![account_generation, account_key],
     )?;
+    Ok(n)
+}
+
+/// 只把调用方明确选中的 pending outbox 行重绑到当前代际。
+/// 定向同步不得经全量重绑改动其它账号/其它意图的 `updated_at` 与代际。
+pub fn rebind_outbox_generation_for_ids(
+    conn: &Connection,
+    account_key: &str,
+    account_generation: i64,
+    ids: &[i64],
+) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
+    let mut n = 0;
+    for id in ids {
+        n += conn.execute(
+            "UPDATE subscription_outbox
+                SET account_generation = ?1, updated_at = datetime('now')
+              WHERE id = ?2 AND account_key = ?3 AND status = 'pending'
+                AND account_generation <> ?1",
+            params![account_generation, id, account_key],
+        )?;
+    }
     Ok(n)
 }
 
@@ -433,6 +461,7 @@ pub fn rebind_outbox_generation(
 /// 可能成为无人退订的孤儿（取舍见 Note）。
 // Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
 pub fn abandon_stale_outbox(conn: &Connection, current_key: &str) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "DELETE FROM subscription_outbox WHERE account_key <> ?1",
         params![current_key],
@@ -452,6 +481,7 @@ pub fn advance_subscribe_stage(
     account_generation: i64,
     remote_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET stage = 'remote_created', remote_id = ?1, updated_at = datetime('now')
@@ -463,9 +493,8 @@ pub fn advance_subscribe_stage(
 }
 
 /// 退订恢复路径的**解析推进**（B2-R2 复审 P2）：`remote_id IS NULL` 的退订行经
-/// 幂等 `quick_add`-by-URL 解析出已验证 id 后，在列表发现/发送之前先把结果落库——
-/// 订阅列表长期失败或进程重启后，下一轮直接采用该 id，**不再重复 quick_add**
-/// （非幂等 quick_add 的服务端上，每重复一次都会新建一个重复订阅）。
+/// 订阅列表解析出已验证 id 后，在发送之前先把结果落库。
+/// 下一轮仍复核完整订阅列表，同时保留该已知目标；恢复路径不调用 quick_add。
 ///
 /// 守卫 (id, generation, action='unsubscribe', status='pending', remote_id IS NULL)：
 /// 过期响应/换代/被合并替换/已确认的行不得被旧解析结果推进 —— 未推进时调用方
@@ -476,6 +505,7 @@ pub fn advance_unsubscribe_resolution(
     account_generation: i64,
     resolved_remote_id: i64,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET resolved_remote_id = ?1, updated_at = datetime('now')
@@ -489,6 +519,7 @@ pub fn advance_unsubscribe_resolution(
 /// 精确确认出队：只删「本轮计划的那一行、代际未变、仍是 pending」。
 /// 中途被合并改写的队项是新 id（AUTOINCREMENT 不复用），旧 id 的确认天然落空。
 pub fn prune_outbox(conn: &Connection, ids: &[i64], account_generation: i64) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let mut n = 0usize;
     for id in ids {
         n += conn.execute(
@@ -519,6 +550,7 @@ pub fn confirm_subscribe_if_desired_unchanged(
     sent_folder: Option<&str>,
     sent_prev: Option<&str>,
 ) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "DELETE FROM subscription_outbox
           WHERE id = ?1 AND account_generation = ?2 AND action = 'subscribe' AND status = 'pending'
@@ -564,6 +596,7 @@ pub fn rebase_successor_edit_prev(
     feed_url: &str,
     remote_folder_after_send: &str,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET prev_folder = ?1, updated_at = datetime('now')
@@ -596,6 +629,7 @@ pub fn outbox_pending_by_id(conn: &Connection, id: i64) -> AppResult<bool> {
 /// 入参 (id, account_generation)：代际守卫防「过期计划的标记」落到同 id 但代际
 /// 已推进/重绑的行上（与 mark_outbox_failed 同源，R2/P3-2）。
 pub fn mark_outbox_local_only(conn: &Connection, items: &[(i64, i64)]) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let mut n = 0usize;
     for (id, generation) in items {
         n += conn.execute(
@@ -612,6 +646,7 @@ pub fn mark_outbox_local_only(conn: &Connection, items: &[(i64, i64)]) -> AppRes
 /// 入参 (id, account_generation, 摘要)：代际守卫防「过期计划的失败」记到同 id
 /// 但代际已推进的行上（id 不复用盖不住重绑这一维，R2/P3-2）。
 pub fn mark_outbox_failed(conn: &Connection, failed: &[(i64, i64, String)]) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     if failed.is_empty() {
         return Ok(());
     }
@@ -673,7 +708,8 @@ pub fn subscription_outbox_stats(
 /// `{pending, failed, local_only, last_error}` 与 [`SubscriptionOutboxStats`] /
 /// 前端 `SubscriptionOutboxStats`（src/lib/api.ts）三方同形。configured=false →
 /// None：未配置同步静默不发事件（与 queue_changed_payload 同一「未配置不刷
-/// 状态」纪律）。payload 只承载计数与错误摘要——不带 URL、账号或任何凭据。
+/// 状态」纪律）。顶层仅上述四个字段；last_error 可含自有 feed URL（含查询参数）
+/// 以及失败会话的端点、用户名，不能把字段清单解释成摘要没有这些信息。
 pub fn subscription_outbox_changed_payload(
     stats: &SubscriptionOutboxStats,
     configured: bool,
@@ -730,6 +766,7 @@ pub fn mark_outbox_session_blocked(
     account_key: &str,
     summary: &str,
 ) -> AppResult<usize> {
+    let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
         "UPDATE subscription_outbox
             SET attempts = attempts + 1, last_error = ?1, updated_at = datetime('now')

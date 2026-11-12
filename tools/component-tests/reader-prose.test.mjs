@@ -19,10 +19,11 @@ const TEST_HTML = [
 ].join('');
 const STREAM_TEXT = '<b>未消毒译文<b><script>window.__XSS_TRANS__=1</script>';
 
-componentTest('OPT-016B ReaderProse：源码→渲染→源码同一挂载树，危险标签在源码态不创建、事件/样式/滚动宿主不丢', { timeout: 30000 }, async () => {
+componentTest('OPT-016B ReaderProse：源码→渲染→源码同一挂载树，危险标签在源码态不创建、事件/样式/滚动宿主不丢', { timeout: 30000 }, async (t) => {
   installBackend();
   clearInvokeCalls();
   resetStore();
+  t.after(() => { delete globalThis.__OPEN_URL_ERROR__; });
 
   const row = mkRow({
     id: 101, title: '源码契约文章', url: 'https://example.com/a',
@@ -64,8 +65,17 @@ componentTest('OPT-016B ReaderProse：源码→渲染→源码同一挂载树，
   assert.equal(useAppStore.getState().lightboxUrl, 'https://images.example.com/p.png', 'img 点击应走灯箱（事件代理真实接线）');
   await act(async () => { useAppStore.getState().closeLightbox(); });
   await act(async () => { proseRender.querySelector('a').click(); });
-  await flush(2);
+  await waitFor(() => (globalThis.__OPEN_URLS__ ?? []).includes('https://example.com/link'), { label: '正文链接真实到达opener' });
   assert.ok((globalThis.__OPEN_URLS__ ?? []).includes('https://example.com/link'), 'a 点击应走 openExternal（Tauri opener 边界被真实调用）');
+
+  globalThis.__OPEN_URL_ERROR__ = new Error('no default browser');
+  await act(async () => { useAppStore.setState({ toasts: [] }); });
+  await act(async () => { proseRender.querySelector('a').click(); });
+  await flush(2);
+  assert.ok(useAppStore.getState().toasts.some((toast) =>
+    toast.text.includes('无法在浏览器中打开此链接')
+    && toast.text.includes('稍后重试')),
+    '正文 <a> 失败显示统一可执行提示');
 
   // ---- 切到源码态（真实 action）----
   await act(async () => { useAppStore.getState().toggleReaderRenderMode(); });

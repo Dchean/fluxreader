@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { useAppStore } from '../store';
+import { selectArticleBody, useAppStore } from '../store';
 import { Icons } from './icons';
-import { openExternal } from '../lib/external';
+import { openExternalWithFeedback } from '../lib/external';
+import { refreshAllLabel } from '../lib/copyPolicy';
 
 /* ============================================================
    全局右键菜单 —— 替换 WebView2 默认右键菜单（Copy/Cut/Paste/Select All）
@@ -31,7 +32,10 @@ export function ContextMenuHost() {
   /* 打开前持有焦点的元素：关闭时还原（键盘用户回到触发处，不落 body）。 */
   const previousFocusRef = useRef<HTMLElement | null>(null);
 
-  const close = useCallback(() => setMenu(null), []);
+  const close = useCallback(() => {
+    useAppStore.setState({ contextMenuOpen: false });
+    setMenu(null);
+  }, []);
 
   /** 当前可用（未禁用）菜单项，按 DOM 顺序——方向键/Home/End 的移动集合。 */
   const enabledItems = (): HTMLElement[] =>
@@ -63,14 +67,19 @@ export function ContextMenuHost() {
       e.preventDefault();
       e.stopPropagation();
       if (items.length === 0) {
+        useAppStore.setState({ contextMenuOpen: false });
         setMenu(null);
         return;
       }
+      useAppStore.setState({ contextMenuOpen: true });
       setMenu({ x: e.clientX, y: e.clientY, items });
     };
     // capture：在所有子元素 contextmenu 冒泡前拦截
     document.addEventListener('contextmenu', onCtx, true);
-    return () => document.removeEventListener('contextmenu', onCtx, true);
+    return () => {
+      document.removeEventListener('contextmenu', onCtx, true);
+      useAppStore.setState({ contextMenuOpen: false });
+    };
   }, []);
 
   /* 点击外部 / Esc 关闭 */
@@ -211,7 +220,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           ? [{
               label: '查看原文',
               icon: <Icons.externalLink />,
-              onSelect: () => { void openExternal(art.url); },
+              onSelect: () => { void openExternalWithFeedback(art.url); },
             },
             {
               label: '复制链接',
@@ -268,8 +277,10 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           icon: art.isRead ? <Icons.unreadDot /> : <Icons.check />,
           onSelect: () => st.toggleCurrentReadStatus(),
         });
-        items.push({
-          label: st.showFulltext ? 'RSS 原文' : '显示全文',
+        const body = selectArticleBody(st, art.id);
+        const ready = body.state === 'ready' || (body.state === 'cleared' && body.content !== '');
+        if (ready && (!body.fulltextExtracted || (body.rawContent && body.rawContent !== body.content))) items.push({
+          label: !body.fulltextExtracted ? '提取全文' : st.showFulltext ? 'RSS 原文' : '显示全文',
           icon: <Icons.doc />,
           onSelect: () => st.toggleReaderFulltext(),
         });
@@ -304,7 +315,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           onSelect: () => st.openAddFeedModal(''),
         },
         {
-          label: '刷新全部订阅源',
+          label: refreshAllLabel(st.settings.syncMode),
           icon: <Icons.refresh />,
           onSelect: () => st.triggerManualSync(),
         },

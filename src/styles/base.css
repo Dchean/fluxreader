@@ -243,7 +243,9 @@ body {
 }
 
 .app-root.layout-3col {
-  grid-template-columns: 260px var(--list-width, 380px) 1fr;
+  /* 用户列宽偏好只在 280–420px 内生效；窄视口再按 37vw 收缩。
+     980×640 时列表约 363px、阅读器约 357px，不再出现 560/160 的挤压。 */
+  grid-template-columns: 260px clamp(280px, min(var(--list-width, 380px), 37vw), 420px) minmax(0, 1fr);
 }
 
 .app-root.layout-2col {
@@ -305,6 +307,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: calc(100% - 8px);
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -313,6 +316,8 @@ body {
   cursor: pointer;
   transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   margin: 0 4px 8px;
+  font: inherit;
+  text-align: left;
 }
 
 .sidebar-search-pill:hover {
@@ -412,7 +417,7 @@ body {
 }
 
 .nav-tab-item.active-layout {
-  background: var(--accent) !important;
+  background: var(--nav-selected-bg, var(--accent)) !important;
   color: #ffffff !important;
   font-weight: 600;
   box-shadow: 0 2px 8px var(--accent-glow);
@@ -478,6 +483,14 @@ body {
   align-items: center;
   gap: 6px;
   flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .feed-folder-right {
@@ -546,6 +559,23 @@ body {
   font-weight: 600;
 }
 
+/* 源行主选择区是真实 button；刷新/编辑是同级 button，不再嵌套在 role=button
+   容器里。主按钮占满剩余宽度，计数仍在按钮内，操作区宽度与旧布局一致。 */
+.feed-leaf-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 /* 订阅源叶子节点的名称区（图标 + 标题，自动截断） */
 .feed-leaf-name {
   display: flex;
@@ -585,10 +615,17 @@ body {
 }
 
 .feed-leaf-item:hover .feed-leaf-actions,
+.feed-leaf-item:focus-within .feed-leaf-actions,
 .feed-folder-header:hover .feed-row-act-btn {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
+}
+
+/* 键盘路径不能等 visibility 的离散过渡结束：Tab 顺序在焦点进入主选择按钮的
+   同一帧就会计算，hidden 会让刷新/编辑被跳过。hover 仍保留淡入过渡。 */
+.feed-leaf-item:focus-within .feed-leaf-actions {
+  transition: none;
 }
 
 /* 行内小操作钮（源行/分类行共用） */
@@ -682,97 +719,132 @@ body {
   gap: 4px;
 }
 
-/* 左下角「刷新全部订阅源」主入口：比状态行更醒目，单行文案。
-   颜色/禁用态一律交给统一变体类 .btn-primary（见文件末尾「主按钮变体统一」），
-   这里只保留它作为整行主入口的布局与字号差异。 */
-.sidebar-refresh-all {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  font-family: inherit;
-  transition: background var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast);
-}
-
-/* 悬停与禁用态一律随 .btn-primary（见文件末尾「主按钮变体统一」），此处不再覆盖 */
-
 .sync-status-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px;
+  gap: 6px;
+  padding: 4px 7px;
   border-radius: var(--radius-sm);
 }
 
 .sync-status-pill {
   display: flex;
+  flex: 1;
   align-items: center;
-  gap: 7px;
+  min-width: 0;
   font-size: 11.5px;
-  color: var(--sync-ok);
+  color: var(--text-secondary);
   cursor: pointer;
   background: transparent;
   border: none;
-  padding: 0;
+  padding: 2px 0;
   font-family: inherit;
+  text-align: left;
 }
 
-.sync-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--sync-ok);
-  border-radius: 50%;
-  box-shadow: 0 0 6px var(--sync-ok);
+.sync-status-pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 未连接 Miniflux：灰色中性点，与文案"本地模式"一致 */
-.sync-dot-off {
-  background: var(--text-tertiary);
-  box-shadow: none;
+.sync-status-pill:hover {
+  color: var(--text-primary);
 }
 
-.sync-refresh-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  display: flex;
+.sync-status-row--success .sync-status-pill {
+  color: var(--sync-ok);
+}
+
+.sync-status-row--pending .sync-status-pill {
+  color: var(--feed-error);
+}
+
+.sync-status-row--syncing .sync-status-pill {
+  color: var(--feed-error);
+}
+
+.sync-status-row--error .sync-status-pill {
+  color: var(--danger);
+}
+
+.sync-indicator-button {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px;
-  border-radius: 4px;
-  transition: background-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+  width: var(--icon-btn-hit-md);
+  height: var(--icon-btn-hit-md);
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
 }
 
-.sync-refresh-btn:hover {
-  color: var(--text-primary);
+.sync-indicator-button:hover {
   background: var(--badge-bg);
 }
 
-.sync-refresh-btn.spinning svg {
-  animation: spin 0.8s linear infinite;
-}
-
-/* TASK-100：双刷新入口 busy 反馈统一「禁用+转圈」——小图标钮此前只转圈不禁用，
-   与大按钮（disabled）两种形态；禁用态视觉与 .btn-primary:disabled 同口径 */
-.sync-refresh-btn:disabled {
+.sync-indicator-button:disabled {
   cursor: default;
-  opacity: 0.55;
+  opacity: 0.65;
 }
 
-.sync-refresh-btn:disabled:hover {
-  color: var(--text-tertiary);
-  background: transparent;
+.sync-indicator-button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
-@keyframes spin {
-  100% { transform: rotate(360deg); }
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--text-tertiary);
+  border-radius: 50%;
+}
+
+.sync-dot--success {
+  background: var(--sync-ok);
+  box-shadow: 0 0 6px var(--sync-ok);
+}
+
+.sync-dot--pending,
+.sync-dot--syncing {
+  background: var(--feed-error);
+  box-shadow: 0 0 6px var(--feed-error);
+}
+
+.sync-dot--error {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+}
+
+.sync-dot--syncing {
+  animation: sync-breathe 1.35s ease-in-out infinite;
+}
+
+@keyframes sync-breathe {
+  0%, 100% {
+    opacity: 0.55;
+    transform: scale(0.82);
+    box-shadow: 0 0 2px var(--feed-error);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 9px var(--feed-error);
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* -------------------------------------------------------------
@@ -900,6 +972,10 @@ body {
 .timeline-virtual-wrap {
   width: 100%;
   margin: 0;
+  /* 父级是纵向 flex + overflow 滚动容器：虚拟容器的内联 height 是完整内容高，
+     默认 flex-shrink:1 会把它压到可视高度，导致页脚被误判为首屏末尾内容。
+     Note: 虚拟容器必须拒绝纵向 flex 压缩 — 见 .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
+  flex-shrink: 0;
 }
 
 .timeline-virtual-wrap.virtual-narrow {
@@ -962,6 +1038,17 @@ body {
   border-color: var(--accent);
   background: var(--bg-card-active);
   box-shadow: 0 0 0 1px var(--accent), 0 4px 16px var(--accent-glow);
+}
+
+/* 五布局统一的「当前条目」视觉：选中态必须在二列布局也可见。 */
+.article-card.active-selected,
+.social-card.active-selected,
+.gallery-card.active-selected,
+.podcast-card.active-selected,
+.notif-card.active-selected {
+  border-color: var(--accent);
+  background: var(--bg-card-active);
+  box-shadow: 0 0 0 2px var(--accent), 0 4px 16px var(--accent-glow);
 }
 
 .article-card.read {
@@ -1087,6 +1174,9 @@ body {
   display: flex;
   gap: 12px;
 }
+.social-card-collapsed {
+  overflow: hidden;
+}
 /* read gray */
 .social-card.read {
   opacity: 0.65;
@@ -1107,6 +1197,9 @@ body {
 
 .social-body {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .social-card-title {
@@ -1116,6 +1209,10 @@ body {
   margin-bottom: 4px;
   line-height: 1.4;
   word-break: break-word;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
 }
 
 .social-author-row {
@@ -1123,22 +1220,33 @@ body {
   align-items: center;
   gap: 6px;
   margin-bottom: 6px;
+  min-width: 0;
+  flex: 0 0 auto;
 }
 
 .social-author-name {
   color: var(--text-primary);
   font-size: 13.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .social-handle {
   font-size: 12px;
   color: var(--text-tertiary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .social-date {
   font-size: 11px;
   color: var(--text-tertiary);
   margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .social-text {
@@ -1158,24 +1266,56 @@ body {
   -webkit-user-select: text;
 }
 
-/* 社交卡自动收起（超 260px 的长正文折叠为 6 行 + 展开按钮；
-   点击展开恢复全文，isLong 判定见 SocialCard） */
+/* 折叠态是固定外高不变量：高度不随正文类型/摘要/图片解码变化。文本行裁切只是
+   观感层，height + overflow:hidden 才是块级 <img> 也无法绕过的最终上限。 */
 .social-text.collapsed {
-  display: -webkit-box;
-  -webkit-line-clamp: 6;
-  -webkit-box-orient: vertical;
+  display: block;
+  height: 150px;
+  max-height: 150px;
   overflow: hidden;
   margin-bottom: 4px;
+  flex: 0 0 150px;
+}
+
+.social-text-inner {
+  display: block;
+  min-height: 0;
+}
+
+.social-text.social-text-clipped {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+}
+
+.social-expand-slot {
+  height: 26px;
+  flex: 0 0 26px;
+  display: flex;
+  align-items: flex-start;
+  margin-bottom: 8px;
 }
 
 .social-expand-btn {
-  margin-bottom: 8px;
+  margin: 0;
+}
+
+/* 占位正文与落地正文共用同一固定高度；这里只保留占位态的底边距。 */
+.social-text.social-text-loading {
+  margin-bottom: 4px;
 }
 
 /* 社交卡正文内嵌 HTML 的轻量排版（feed 来源已是消毒白名单输出） */
 .social-text p { margin: 0 0 0.6em; }
-.social-text > :last-child { margin-bottom: 0; }
+.social-text-inner > :last-child { margin-bottom: 0; }
 .social-text img { max-width: 100%; height: auto; border-radius: var(--radius-sm); margin: 4px 0; }
+.social-text video {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  margin: 4px 0;
+  background: #000;
+}
 .social-text blockquote {
   margin: 0.6em 0;
   padding: 0.3em 0.9em;
@@ -1225,6 +1365,8 @@ body {
   color: var(--text-tertiary);
   border-top: 1px solid var(--border-subtle);
   padding-top: 10px;
+  flex: 0 0 auto;
+  margin-top: auto;
 }
 
 .social-act-item {
@@ -1270,6 +1412,9 @@ body {
   position: relative;
   width: 100%;
   margin: 0;
+  /* 与 .timeline-virtual-wrap 同因同解：内联 height 是虚拟滚动总高，不能被
+     滚动容器的纵向 flex 布局压缩。 */
+  flex-shrink: 0;
 }
 
 /* 虚拟化条目：位置（top/left/width/transform）由组件按 lane 与虚拟偏移内联设置 */
@@ -1291,6 +1436,34 @@ body {
   transform: translateY(-3px);
   box-shadow: 0 8px 24px rgba(0,0,0,0.25);
 }
+
+.gallery-media {
+  position: relative;
+}
+
+.gallery-media-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.gallery-image-count {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.gallery-image-count .svg-icon { width: 14px; height: 14px; }
 
 .gallery-card img {
   width: 100%;
@@ -1567,7 +1740,7 @@ body {
    ------------------------------------------------------------- */
 .reader-resize-handle {
   position: absolute;
-  left: calc(260px + var(--list-width, 380px));
+  left: calc(260px + clamp(280px, min(var(--list-width, 380px), 37vw), 420px));
   top: 0;
   bottom: 0;
   width: 5px;
@@ -1777,9 +1950,21 @@ body {
   font-size: 12px;
   color: var(--text-tertiary);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 4px 12px;
   margin-bottom: 14px;
+}
+
+.reader-byline > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.reader-byline .reader-meta-time,
+.reader-byline .reader-meta-read-time {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .reader-actions-toolbar {
@@ -2117,8 +2302,9 @@ body {
 }
 
 /* 窄窗口收缩策略（见文件尾部同名媒体查询——顺序上必须位于 .settings-sidebar 基础规则之后，同特异性下后者胜）：
-   ≤ 700px 侧栏收窄（220→170），导语文字宽度让位；
-   ≤ 560px 弹窗改为通栏（贴边 96vw），保证内容列至少还有一列卡片的可读宽 */
+   Tauri 主窗 minWidth=980，断点必须落在可达区间：
+   ≤1100px 侧栏收窄（220→190），导语文字宽度让位；
+   ≤1000px 弹窗按 94vw 连续收窄、侧栏 170px，保证内容列可读宽。 */
 
 .settings-sidebar {
   width: 220px;
@@ -2173,7 +2359,7 @@ body {
 }
 
 .settings-nav-item.active {
-  background: var(--accent);
+  background: var(--nav-selected-bg, var(--accent));
   color: #fff;
   font-weight: 600;
 }
@@ -2764,19 +2950,32 @@ body {
 /* ---------- 订阅页工具栏 ---------- */
 .feeds-tab-toolbar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   margin-bottom: 12px;
   gap: 12px;
   flex-wrap: wrap;
 }
 
-.feeds-tab-hint {
-  font-size: 12px;
+.feeds-tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.subscription-details-toggle {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 6px;
+}
+
+.subscription-details-body {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--text-tertiary);
-  /* 独占左侧剩余空间：右侧导入/导出/新建按钮连成一组（gap 12px）贴右，
-     不再被 space-between 均摊空隙撑开 83px */
-  margin-right: auto;
 }
 
 .settings-action-row {
@@ -2784,6 +2983,33 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin: 8px 0 16px;
+}
+
+.settings-action-block {
+  margin: 8px 0 16px;
+}
+
+.settings-action-block .settings-action-row {
+  margin: 0;
+}
+
+.settings-action-help {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.settings-action-help p {
+  margin: 0;
+}
+
+.settings-action-help p + p {
+  margin-top: 3px;
 }
 
 .prompt-editor-card {
@@ -2872,6 +3098,29 @@ body {
 
 .about-update-btn {
   font-size: 12px;
+}
+
+.database-backup-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.database-backup-meta {
+  color: var(--text-secondary);
+}
+
+.database-backup-path {
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.database-backup-error {
+  color: var(--danger);
 }
 
 .mini-dialog {
@@ -3079,6 +3328,14 @@ body {
   font-size: 12px;
 }
 
+.search-error-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 24px;
+}
+
 /* ---------- 灯箱 ---------- */
 .lightbox-overlay {
   cursor: zoom-out;
@@ -3090,6 +3347,63 @@ body {
   border-radius: 8px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
 }
+
+.lightbox-gallery {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 72px);
+  color: #fff;
+  cursor: default;
+}
+
+.lightbox-gallery .lightbox-img {
+  display: block;
+  max-width: min(85vw, calc(100vw - 32px));
+  max-height: calc(100vh - 200px);
+  object-fit: contain;
+}
+
+.lightbox-gallery-image {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+}
+
+.lightbox-image-loading {
+  position: absolute;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  white-space: nowrap;
+}
+
+.lightbox-control {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  cursor: pointer;
+}
+
+.lightbox-control:hover { background: rgba(50, 50, 50, 0.9); }
+.lightbox-control:disabled, .lightbox-control[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+.lightbox-control:focus-visible, .gallery-image-count:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.lightbox-close { position: absolute; right: 16px; top: 16px; }
+.lightbox-navigation, .lightbox-status { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.lightbox-status { flex-wrap: wrap; padding: 12px; }
+.lightbox-position { min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; }
+.lightbox-previous .svg-icon { transform: rotate(90deg); }
+.lightbox-next .svg-icon { transform: rotate(-90deg); }
 
 /* ---------- Toast 浮层容器 ---------- */
 /* Toast 层：内容区右下角堆叠（列布局自动不重叠），避开 PlayerBar。
@@ -3381,28 +3695,24 @@ body.has-player-expanded .toast-layer {
    .settings-content-pane / .settings-content-header 基础规则之后
    （同特异性下后者胜，写在前面会被基础规则覆盖——本文件早前的
    前置版本正是因此失效）。
-   ≤ 700px：弹窗收窄到 760px、侧栏 220→170，文字列宽度让位；
-   ≤ 560px：弹窗贴边 96vw、侧栏 148px、pane padding 收紧，
-            保证内容列至少保有一列卡片的可读宽。
+   ≤1100px：侧栏 220→190，文字列宽度让位；
+   ≤1000px：弹窗贴边 94vw、侧栏 170px、pane padding 收紧，
+            保证内容列至少保有一列卡片的可读宽（980 最小窗宽可达）。
    ============================================================ */
-@media (max-width: 700px) {
+@media (max-width: 1100px) {
+  .settings-sidebar {
+    width: 190px;
+  }
+}
+
+@media (max-width: 1000px) {
   .settings-modal {
-    width: 760px;
+    width: 94vw;
+    max-width: 94vw;
   }
 
   .settings-sidebar {
     width: 170px;
-  }
-}
-
-@media (max-width: 560px) {
-  .settings-modal {
-    width: 96vw;
-    max-width: 96vw;
-  }
-
-  .settings-sidebar {
-    width: 148px;
   }
 
   .settings-content-pane {
@@ -3412,33 +3722,6 @@ body.has-player-expanded .toast-layer {
   .settings-content-header {
     padding: 12px 14px 10px 18px;
   }
-}
-
-/* ---------- GitHub 设备流授权码常驻块 ---------- */
-.device-code-block {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.device-code-value {
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 3px;
-  color: var(--accent);
-  background: var(--accent-subtle);
-  border: 1px dashed var(--accent);
-  border-radius: var(--radius-sm);
-  padding: 6px 14px;
-  user-select: text;
-}
-
-.device-code-hint {
-  font-size: 10.5px;
-  color: var(--text-tertiary);
 }
 
 /* ---------- 首屏加载骨架（dataLoading 期间替代真实 UI） ---------- */
@@ -3644,6 +3927,29 @@ body.has-player-expanded .toast-layer {
   text-decoration: underline;
 }
 
+.hydrate-failure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 60px;
+  line-height: 1.55;
+  opacity: 0.7;
+}
+
+.hydrate-failure .hydrate-retry {
+  display: inline-flex;
+  align-items: center;
+  min-height: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-light);
+  opacity: 1;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 
 /* ============================================================
    全局右键菜单（替换 WebView2 默认菜单）
@@ -3768,6 +4074,15 @@ a[href]:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* 卡片本体也走统一焦点环；卡内按钮仍由上面的通用规则处理。 */
+.article-card:focus-visible,
+.social-card:focus-visible,
+.podcast-card:focus-visible,
+.notif-card:focus-visible {
+  outline: 2px solid var(--accent-light);
+  outline-offset: 2px;
 }
 
 /* 开关的 input 不可见（opacity:0 且 0×0），焦点环画在滑块上 */
@@ -4133,23 +4448,25 @@ a[href]:focus-visible,
 }
 
 /* ---------- prefers-reduced-motion（REQ-005） ----------
-   系统开启「减弱动态效果」时，本文件全部过渡与动画压缩到近瞬时。
-   用 0.01ms 而不是 none：transitionend / animationend 仍会触发，依赖这些
-   事件的代码不会因为过渡被移除而停在中间状态。
+   系统开启「减弱动态效果」时，transition 直接完成，animation 压缩到近瞬时。
+   不能给所有元素非零 transition-duration：默认 property:all 会使原本没有
+   过渡的虚拟几何与继承 visibility 产生 CSSTransition，延迟坐标或跳过 Tab 按钮。
+   当前产品和运行依赖没有 transitionend 状态消费者；animationend 仍由
+   useEnteringClass 消费，所以 animation-duration 保留 0.01ms。
    下面显式 animation:none 的是本任务新增的挂载即播入场动画；
    播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块 / 译文块 / 设置页
    分类分组用的是 transition（含 display 的 allow-discrete 离散过渡），
-   由上面的全局 transition-duration: 0.01ms 一并压平，两个方向都不会有
-   可感知动效。
+   在此模式的两个方向都立即切换。
    例外：加载指示器是进度反馈而非装饰动效，保留旋转——停转会让用户误判
-   「卡死了」，这比动效本身更糟。 */
+   「卡死了」，这比动效本身更糟。
+   Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-duration: 0s !important;
     transition-delay: 0ms !important;
   }
 
@@ -4166,4 +4483,14 @@ a[href]:focus-visible,
   .load-more-spinner {
     animation: loadMoreSpin 0.7s linear infinite !important;
   }
+
+  .sync-dot--syncing {
+    animation: none !important;
+  }
 }
+
+/* Local media recovery controls inherit each existing image slot's dimensions. */
+.cover-fallback { position: relative; }
+.image-retry { color: var(--text-secondary); background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 2px 5px; font: inherit; font-size: 11px; cursor: pointer; }
+.cover-fallback > .image-retry { position: absolute; inset-inline: 2px; bottom: 2px; }
+

@@ -14,11 +14,13 @@ pub struct FolderRow {
     pub position: i64,
     /// OPT-010：配置快照的稳定身份（跨设备匹配键；v26 起每行必有）。
     pub sync_id: Option<String>,
+    pub summary_mode: String,
+    pub translate_mode: String,
 }
 
 pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position, sync_id
+        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position, sync_id, summary_mode, translate_mode
          FROM folders ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -31,6 +33,8 @@ pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
             collapsed: r.get::<_, i64>(5)? != 0,
             position: r.get(6)?,
             sync_id: r.get(7)?,
+            summary_mode: r.get(8)?,
+            translate_mode: r.get(9)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -51,6 +55,23 @@ pub fn create_folder_with_sync_id(
     layout: &str,
     sync_id: Option<&str>,
 ) -> AppResult<i64> {
+    create_folder_origin(conn, name, layout, sync_id, "local")
+}
+
+/// RSS-created labels are remote from their first INSERT. Reusing a same-name
+/// local folder never changes its ownership; local membership promotes remote
+/// folders in the source INSERT/UPDATE transaction through schema triggers.
+pub fn create_remote_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i64> {
+    create_folder_origin(conn, name, layout, None, "remote")
+}
+fn create_folder_origin(
+    conn: &Connection,
+    name: &str,
+    layout: &str,
+    sync_id: Option<&str>,
+    origin: &str,
+) -> AppResult<i64> {
+    let _writer = crate::db::writer_guard(conn)?;
     let next_pos: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM folders",
@@ -60,9 +81,9 @@ pub fn create_folder_with_sync_id(
         .unwrap_or(0);
     let uid = sync_id.map(str::trim).filter(|s| !s.is_empty());
     conn.execute(
-        "INSERT INTO folders (name, position, layout, collapsed, sync_id)
-         VALUES (?1, ?2, ?3, 1, COALESCE(?4, lower(hex(randomblob(16)))))",
-        params![name, next_pos, layout, uid],
+        "INSERT INTO folders (name, position, layout, collapsed, sync_id,origin)
+         VALUES (?1, ?2, ?3, 1, COALESCE(?4, lower(hex(randomblob(16)))),?5)",
+        params![name, next_pos, layout, uid, origin],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -70,6 +91,7 @@ pub fn create_folder_with_sync_id(
 /// OPT-010：导入侧「旧库无身份 + 名称命中」的保守采用——只填空，绝不改写
 /// 已有身份（同名不同身份是不同对象，由预览显式列出冲突，不在这里猜）。
 pub fn set_folder_sync_id(conn: &Connection, id: i64, sync_id: &str) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE folders SET sync_id = ?1 WHERE id = ?2 AND (sync_id IS NULL OR trim(sync_id) = '')",
         params![sync_id, id],
@@ -78,31 +100,147 @@ pub fn set_folder_sync_id(conn: &Connection, id: i64, sync_id: &str) -> AppResul
 }
 
 pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        rename_folder(&tx, id, name)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let name = name.trim();
+    if name.is_empty()
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM folders WHERE id != ?1 AND name = ?2)",
+            params![id, name],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(AppError::new(
+            "validate",
+            "分类名称不能为空或与其他分类重名",
+        ));
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(
+        conn,
+        "g",
+        id,
+        &serde_json::Map::from_iter([("name".into(), serde_json::json!(name))]),
+    )?;
     conn.execute(
         "UPDATE folders SET name = ?1 WHERE id = ?2",
         params![name, id],
     )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
 pub fn delete_folder(conn: &Connection, id: i64) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        delete_folder(&tx, id)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let mut statement = conn.prepare("SELECT id FROM feeds WHERE folder_id = ?1")?;
+    let feeds = statement
+        .query_map([id], |r| r.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for feed in feeds {
+        super::feeds::delete_feed(conn, feed)?;
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(
+        conn,
+        "g",
+        id,
+        &serde_json::Map::from_iter([("deleted".into(), serde_json::json!(true))]),
+    )?;
+    // Retained sources no longer depend on the deleted category for their layout.
+    conn.execute(
+        "UPDATE feeds SET folder_id = NULL WHERE folder_id = ?1 AND active = 0",
+        [id],
+    )?;
     conn.execute("DELETE FROM folders WHERE id = ?1", params![id])?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
+    Ok(())
+}
+
+pub fn set_folder_ai_modes(
+    conn: &Connection,
+    id: i64,
+    summary: Option<FeedAiMode>,
+    translate: Option<FeedAiMode>,
+) -> AppResult<()> {
+    if summary.is_none() && translate.is_none() {
+        return Err(AppError::new(
+            "validate",
+            "至少给出一个要更新的分类 AI 字段",
+        ));
+    }
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        set_folder_ai_modes(&tx, id, summary, translate)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let mut patch = serde_json::Map::new();
+    if let Some(mode) = summary {
+        patch.insert("summary_mode".into(), serde_json::json!(mode.as_str()));
+    }
+    if let Some(mode) = translate {
+        patch.insert("translate_mode".into(), serde_json::json!(mode.as_str()));
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(conn, "g", id, &patch)?;
+    conn.execute(
+        "UPDATE folders SET summary_mode = COALESCE(?1, summary_mode),
+            translate_mode = COALESCE(?2, translate_mode) WHERE id = ?3",
+        params![
+            summary.map(FeedAiMode::as_str),
+            translate.map(FeedAiMode::as_str),
+            id
+        ],
+    )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
 pub fn update_folder_layout(conn: &Connection, id: i64, layout: &str) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        update_folder_layout(&tx, id, layout)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(
+        conn,
+        "g",
+        id,
+        &serde_json::Map::from_iter([("layout".into(), serde_json::json!(layout))]),
+    )?;
     conn.execute(
         "UPDATE folders SET layout = ?1 WHERE id = ?2",
         params![layout, id],
     )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
 pub fn set_folder_collapsed(conn: &Connection, id: i64, collapsed: bool) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        set_folder_collapsed(&tx, id, collapsed)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(
+        conn,
+        "g",
+        id,
+        &serde_json::Map::from_iter([("collapsed".into(), serde_json::json!(collapsed))]),
+    )?;
     conn.execute(
         "UPDATE folders SET collapsed = ?1 WHERE id = ?2",
         params![collapsed as i64, id],
     )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
@@ -113,11 +251,7 @@ pub fn set_folder_ai_flags(
     summary: bool,
     translate: bool,
 ) -> AppResult<()> {
-    conn.execute(
-        "UPDATE folders SET auto_summary = ?1, auto_translate = ?2 WHERE id = ?3",
-        params![summary as i64, translate as i64, id],
-    )?;
-    Ok(())
+    set_folder_ai_flags_partial(conn, id, Some(summary), Some(translate))
 }
 
 /// OPT-011：分类 AI 默认的单字段 patch（None = 不改该字段）。
@@ -141,14 +275,12 @@ pub fn set_folder_ai_flags_partial(
             "至少给出一个要更新的分类 AI 开关字段",
         ));
     }
-    conn.execute(
-        "UPDATE folders SET
-            auto_summary = COALESCE(?1, auto_summary),
-            auto_translate = COALESCE(?2, auto_translate)
-         WHERE id = ?3",
-        params![summary.map(|b| b as i64), translate.map(|b| b as i64), id],
-    )?;
-    Ok(())
+    set_folder_ai_modes(
+        conn,
+        id,
+        summary.map(FeedAiMode::from_legacy_bool),
+        translate.map(FeedAiMode::from_legacy_bool),
+    )
 }
 
 /* ============================================================
@@ -336,9 +468,9 @@ mod tests {
 
     /* ---------- OPT-011：分类 AI 单字段 patch（成功乱序不互相覆盖） ---------- */
 
-    fn flags(conn: &Connection, id: i64) -> (i64, i64) {
+    fn flags(conn: &Connection, id: i64) -> (String, String) {
         conn.query_row(
-            "SELECT auto_summary, auto_translate FROM folders WHERE id = ?1",
+            "SELECT summary_mode, translate_mode FROM folders WHERE id = ?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -356,21 +488,37 @@ mod tests {
 
         // 旧 full caller：整对写入照旧
         set_folder_ai_flags(&conn, id, true, false).unwrap();
-        assert_eq!(flags(&conn, id), (1, 0), "旧 full caller 语义保持");
+        assert_eq!(
+            flags(&conn, id),
+            ("on".to_string(), "off".to_string()),
+            "旧 full caller 语义保持"
+        );
 
         // 单字段 translate=true → summary 保持 1（不被快照旧值覆盖）
         set_folder_ai_flags_partial(&conn, id, None, Some(true)).unwrap();
-        assert_eq!(flags(&conn, id), (1, 1), "只改 translate，summary 保持");
+        assert_eq!(
+            flags(&conn, id),
+            ("on".to_string(), "on".to_string()),
+            "只改 translate，summary 保持"
+        );
 
         // 单字段 summary=false → translate 保持 1
         // （等价于乱序场景：各字段独立落库，谁先谁后都不带回对方的旧值）
         set_folder_ai_flags_partial(&conn, id, Some(false), None).unwrap();
-        assert_eq!(flags(&conn, id), (0, 1), "只改 summary，translate 保持");
+        assert_eq!(
+            flags(&conn, id),
+            ("off".to_string(), "on".to_string()),
+            "只改 summary，translate 保持"
+        );
 
         // 两字段皆缺：validate 拒绝（不空转写、不误当 no-op）
         let err = set_folder_ai_flags_partial(&conn, id, None, None).unwrap_err();
         assert_eq!(err.code, "validate");
-        assert_eq!(flags(&conn, id), (0, 1), "拒绝路径不得改动任何字段");
+        assert_eq!(
+            flags(&conn, id),
+            ("off".to_string(), "on".to_string()),
+            "拒绝路径不得改动任何字段"
+        );
     }
 
     /* ---------- OPT-010（P0-1）：导入创建的身份采用入口 ---------- */

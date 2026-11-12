@@ -1,6 +1,5 @@
 //! commands 的 settings 领域子模块（TASK-044 从 commands.rs 按既有章节拆分，纯搬运）。
 
-use super::read_dedup_flag;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -12,19 +11,21 @@ Settings
 
 #[tauri::command]
 pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<Option<String>> {
-    let conn = state.db.lock().await;
-    read_setting(&conn, &key)
+    crate::state::database_work(state.db.clone(), move |conn| read_setting(conn, &key)).await
 }
 
 /// 通用设置读取的真实实现（命令与单测/e2e 共用；单测无法构造 State）。
-/// B4 读侧收口：DPAPI 加密凭据键（ai_config / config_sync_credentials /
+/// B4 读侧收口：DPAPI 加密凭据键（ai_config / local_sync_password /
 /// miniflux_token / greader_password）不得经通用 IPC 读出——通用 get_setting
 /// 对落盘密文透明解密（db::get_setting），等于把静态加密的明文交回 webview；
 /// 前端被攻破或任何恶意 IPC 调用即拿走凭据。合法消费方走专用命令
-/// （get_ai_config / save_ai_config、config_sync 与同步连接的后端内核）。
+/// （get_ai_config / save_ai_config、本地资料库与 RSS 同步连接的后端内核）。
 // Note: 通用 IPC 敏感键收口 — 见 .agents/notes/implemented/bug-fix/2026-10-31-安全横向面收口.md
 pub fn read_setting(conn: &rusqlite::Connection, key: &str) -> AppResult<Option<String>> {
-    if crate::credentials::is_sensitive_key(key) {
+    if crate::credentials::is_sensitive_key(key)
+        || key.starts_with("local_sync_peer_")
+        || key.starts_with("local_sync_own_")
+    {
         return Err(sensitive_setting_rejected(key));
     }
     db::get_setting(conn, key)
@@ -43,7 +44,7 @@ fn sensitive_setting_rejected(key: &str) -> AppError {
 
 /// OPT-006：活动账号与同步进度键——通用 `set_setting` 不得改写。
 /// 这些都只能经专用命令修改（sync_save / sync_disconnect 在**同一事务**里
-/// 推进代际并做并发校验；config_sync 导入只写待确认建议）：
+/// 推进代际并做并发校验；连接建议必须经显式保存才能激活）：
 /// - 活动凭据四键：协议 / 地址 / 用户名 / 密码；
 /// - 代际与两类游标、Fever 历史状态、端点解析缓存：绕过写入会让在途会话的
 ///   代际复核失真或让新账号继承旧进度；
@@ -68,9 +69,18 @@ const PROTECTED_SETTING_KEYS: &[&str] = &[
 
 /// 通用设置写入的真实实现（命令与单测共用；单测无法构造 State）。
 pub fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> AppResult<()> {
+    if key == "app_settings" {
+        return Err(AppError::new(
+            "protectedSetting",
+            "普通设置必须通过字段补丁保存，不能整包覆盖其他设备的设置",
+        ));
+    }
     // OPT-006：活动连接/代际/进度键必须走专用保存流程（含代际推进与并发校验），
     // 通用写入是一条会绕过账号生命周期守卫的旁路——在此拒绝。
-    if PROTECTED_SETTING_KEYS.contains(&key)
+    if key.starts_with("local_sync_")
+        || key.starts_with("github_")
+        || key.starts_with("config_sync_")
+        || PROTECTED_SETTING_KEYS.contains(&key)
         || key.starts_with(db::ZERO_BINDING_DISCOVERY_KEY_PREFIX)
         || key.starts_with(db::BINDING_INCOMPLETE_KEY_PREFIX)
     {
@@ -80,33 +90,68 @@ pub fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> App
         ));
     }
     // B4 写侧收口：DPAPI 加密凭据键不得经通用 IPC 写入——合法保存只走专用
-    // 命令（save_ai_config、config_sync/github_auth 凭据内核、同步连接事务）。
+    // 命令（save_ai_config、local_sync_connect、RSS 同步连接事务）。
     if crate::credentials::is_sensitive_key(key) {
         return Err(sensitive_setting_rejected(key));
     }
-    // smartDedup 关闭瞬间清去重墓碑：用户显式想让重复文章回来，
-    // 之后的抓取按无去重语义正常入库（不清的话墓碑会继续拦截）
-    if key == "app_settings" {
-        let was_on = read_dedup_flag(conn);
-        let now_on = serde_json::from_str::<serde_json::Value>(value)
-            .ok()
-            .and_then(|v| v.get("smartDedup").and_then(|b| b.as_bool()))
-            .unwrap_or(false);
-        if was_on && !now_on {
-            // 审计（2026-11-01）：失败静默会让「关闭 smartDedup」看起来成功，
-            // 墓碑却仍在拦截重复文章——至少在日志里可见，行为其余不变。
-            if let Err(e) = db::clear_dedup_tombstones(conn) {
-                log::warn!("settings: 关闭 smartDedup 时清去重墓碑失败: {e}");
-            }
-        }
+    db::set_setting(conn, key, value)?;
+    Ok(())
+}
+
+/// IPC patch keys are broader than the WebDAV allowlist: machine preferences
+/// remain local and RSS content mode remains a non-secret portable preference.
+pub fn apply_app_settings_patch(
+    conn: &rusqlite::Connection,
+    patch: &serde_json::Value,
+) -> AppResult<String> {
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| AppError::new("validate", "设置补丁必须是对象"))?;
+    for (key, value) in patch {
+        db::validate_app_setting(key, value)?;
     }
-    db::set_setting(conn, key, value)
+    let tx = crate::db::write_transaction(conn)?;
+    let raw = db::get_setting(&tx, "app_settings")?.unwrap_or_else(|| "{}".into());
+    let mut settings: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|_| AppError::new("invalidSettings", "本机设置内容损坏，补丁未保存"))?;
+    let object = settings
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalidSettings", "本机设置不是对象，补丁未保存"))?;
+    crate::local_sync::logical::logical_settings(&tx, object)?;
+    let explicit = crate::local_sync::logical::capture_settings(&tx, patch)?;
+    object.extend(
+        patch
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    let result = serde_json::to_string(&settings)?;
+    db::set_setting(&tx, "app_settings", &result)?;
+    crate::local_sync::logical::finish_explicit(&tx, explicit)?;
+    tx.commit()?;
+    if patch.contains_key("syncMode") {
+        crate::scheduler::set_tray_refresh_mode(settings["syncMode"].as_str().unwrap_or("direct"));
+    }
+    Ok(result)
+}
+#[tauri::command]
+pub async fn patch_app_settings(
+    state: State<'_, AppState>,
+    patch: serde_json::Value,
+) -> AppResult<String> {
+    let result = crate::state::database_work(state.db.clone(), move |conn| {
+        apply_app_settings_patch(conn, &patch)
+    })
+    .await?;
+    state.local_sync.notify_local_commit();
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    apply_setting(&conn, &key, &value)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        apply_setting(conn, &key, &value)
+    })
+    .await
 }
 
 /* ============================================================
@@ -288,11 +333,18 @@ mod protected_setting_tests {
         }
     }
 
-    /// 对照：普通键（app_settings / 播放进度等）不受影响。
+    /// 对照：其他普通键仍可保存；应用设置只允许原子字段补丁。
     #[test]
     fn ordinary_keys_still_write() {
         let conn = conn();
-        apply_setting(&conn, "app_settings", r#"{"themeMode":"dark"}"#).unwrap();
+        assert_eq!(
+            apply_setting(&conn, "app_settings", r#"{"themeMode":"light"}"#)
+                .unwrap_err()
+                .code,
+            "protectedSetting"
+        );
+        apply_app_settings_patch(&conn, &serde_json::json!({"themeMode":"dark"})).unwrap();
+        apply_setting(&conn, "media_position", "12").unwrap();
         let saved = db::get_setting(&conn, "app_settings").unwrap().unwrap();
         assert!(saved.contains("dark"));
     }
@@ -400,23 +452,16 @@ pub async fn extract_fulltext(
 /// 同 ai.rs 的 `*_inner` 形态）：测试可在**网络在途窗口**内校验「不持 DB 锁」
 /// 与提交前提守卫（迟到结果不落已替换内容）。命令包装保持原签名不变。
 async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<ExtractOutcome> {
-    let url: Option<String> = {
-        let conn = state.db.lock().await;
-        db::get_article_url(&conn, article_id)?
-    };
-    let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
-        return Err(AppError::not_found("该条目没有原文网页地址"));
-    };
-    /* OPT-008B 第二阶段：捕获**发起时**的提交前提（内容身份/修订）与原文——
+    /* 捕获发起时的原文地址、内容身份/修订与正文，全部来自同一 DB worker——
     网络期间不持 DB 锁；落地时经带前提校验的提交，迟到提取不得写到已删除/
-    已分叉/已替换的内容上（不新增第二套版本；`(content_id, revision)` 即
-    交付给 013 复用的稳定内容版本接口）。 */
-    let (content_token, original) = {
-        let conn = state.db.lock().await;
-        match db::article_content_commit_token(&conn, article_id)? {
-            Some((token, _html)) => (token, db::get_article_content_html(&conn, article_id)?),
-            None => return Err(AppError::not_found("条目不存在或已被清理")),
-        }
+    已分叉/已替换或仅订正了 URL 的内容上；AI 仍使用自己的 AiCommitToken。 */
+    let (content_token, original) = crate::state::database_work(state.db.clone(), move |conn| {
+        db::article_content_commit_token(conn, article_id)?
+            .ok_or_else(|| AppError::not_found("条目不存在或已被清理"))
+    })
+    .await?;
+    let Some(url) = content_token.url.clone().filter(|u| !u.trim().is_empty()) else {
+        return Err(AppError::not_found("该条目没有原文网页地址"));
     };
 
     // 拉网页（复用抓取 client；30s 超时）
@@ -436,6 +481,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
     // 超量流式响应撑爆内存）；超限是可预期的失败形态，用业务文案如实上报。
     // 收字节后按 Content-Type charset 解码（GBK 站点硬按 UTF-8 会把乱码
     // 写进正文并推进修订），语义与原 resp.text() 一致。
+    let final_url = resp.url().to_string();
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -454,7 +500,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
         };
 
     // Readability 不是 Send → spawn_blocking 里跑
-    let base = url.clone();
+    let base = final_url.clone();
     let html2 = html.clone();
     let extracted =
         tokio::task::spawn_blocking(move || crate::extraction::extract_article(&html, &base))
@@ -462,7 +508,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
             .map_err(|e| AppError::internal(format!("blocking task: {e}")))??;
 
     // 头图兜底（正文没封面时）
-    let base2 = url.clone();
+    let base2 = final_url;
     let image = tokio::task::spawn_blocking(move || crate::extraction::lead_image(&html2, &base2))
         .await
         .map_err(|e| AppError::internal(format!("blocking task: {e}")))?
@@ -475,8 +521,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
     // TASK-076：两条「没有采用提取结果」的路径都返回 degraded=true 并带上原因，
     // 不再让调用方自己去猜（此前提取结果为空时同样落到下面的补丁分支，
     // 与「防退化」混在一起、无法区分）。
-    {
-        let conn = state.db.lock().await;
+    crate::state::database_work(state.db.clone(), move |conn| {
         // 判定抽到 extraction::degradation_reason（纯函数、可单测），此处只负责
         // 按判定结果落库或如实返回降级信息。
         if let Some(reason) = crate::extraction::degradation_reason(&original, &extracted) {
@@ -487,7 +532,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
         // R3：成功返回提交后的实际内容身份/修订（前端落记录，下一次 reload 不
         // 再把这份刚提取的正文按“修订变化”清空重取）。
         let committed =
-            db::replace_article_content_checked(&conn, article_id, &content_token, &extracted)?;
+            db::replace_article_content_checked(conn, article_id, &content_token, &extracted)?;
         let Some((content_id, content_revision)) = committed else {
             return Ok(ExtractOutcome::degraded(
                 original,
@@ -495,14 +540,18 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
             ));
         };
         if !image.is_empty() {
-            db::update_article_image_if_empty(&conn, article_id, &image)?;
+            // 正文已经提交：封面是可重试的补充元数据，不能把已成功的提取倒挂成失败。
+            if let Err(err) = db::update_article_image_if_empty(conn, article_id, &image) {
+                log::warn!("全文提取已成功，补充封面失败：{err}");
+            }
         }
         Ok(ExtractOutcome::extracted(
             extracted,
             content_id,
             content_revision,
         ))
-    }
+    })
+    .await
 }
 /* ============================================================
 图片代理（防盗链兼容）——参考 Papr 方案
@@ -544,12 +593,28 @@ fn referer_candidates(image_url: &str, page_url: Option<&str>) -> Vec<Option<Str
 #[tauri::command]
 pub async fn fetch_image(
     state: State<'_, AppState>,
+    webview: tauri::Webview,
     url: String,
     page_url: Option<String>,
-) -> AppResult<Vec<u8>> {
-    fetch_image_inner(&state.http, &url, page_url.as_deref()).await
+    request_id: String,
+    started: tauri::ipc::Channel<serde_json::Value>,
+) -> AppResult<tauri::ipc::Response> {
+    // Register before JS acknowledgement. Early release waits for this message then
+    // cancels this exact ID; no early-cancel tombstone map can grow without bound.
+    let request = state.images.begin(webview.label(), &request_id)?;
+    started
+        .send(serde_json::json!({ "registered": true }))
+        .map_err(|_| AppError::new("imageCancelled", "图片使用者已离开"))?;
+    let result = request
+        .run(fetch_image_inner(&state.http, &url, page_url.as_deref()))
+        .await;
+    result.map(tauri::ipc::Response::new)
 }
 
+#[tauri::command]
+pub fn cancel_image(state: State<'_, AppState>, webview: tauri::Webview, request_id: String) {
+    state.images.cancel(webview.label(), &request_id);
+}
 /// [`fetch_image`] 的纯 HTTP 内核（不依赖 AppState，模块单测直接调用）。
 async fn fetch_image_inner(
     http: &reqwest::Client,
@@ -560,6 +625,7 @@ async fn fetch_image_inner(
         return Err(AppError::new("badImageUrl", "仅支持 http/https 图片"));
     }
     let mut last_err = AppError::new("imageFetch", "图片抓取失败");
+    let mut all_gone = true;
     for referer in referer_candidates(url, page_url) {
         let mut req = http.get(url).header("User-Agent", IMAGE_UA);
         if let Some(r) = &referer {
@@ -568,14 +634,19 @@ async fn fetch_image_inner(
         match req.send().await {
             Err(e) => return Err(e.into()), // 传输错误：换 Referer 无济于事
             Ok(resp) => match resp.error_for_status() {
-                Err(e) => last_err = AppError::new("imageFetch", format!("HTTP 错误: {e}")),
+                Err(e) => {
+                    all_gone &= e.status().is_some_and(|s| {
+                        s == reqwest::StatusCode::NOT_FOUND || s == reqwest::StatusCode::GONE
+                    });
+                    last_err = AppError::new("imageFetch", format!("HTTP 错误: {e}"));
+                }
                 Ok(resp) => {
                     // 流式收体（read_body_capped）：CL 预检 + 累计上限两道防线，
                     // 无 Content-Length 定界（chunked/EOF）的超量流不再先把内存
                     // 吃满才被拒。图是二进制：bytes 直接使用，不经
                     // decode_body_bytes。超限 = responseTooLarge（与 favicon/
                     // 全文提取同口径）；前端对 fetchImage 失败统一 catch 降级
-                    // （隐藏/回退原 src），错误码仅用于诊断，行为面不变。
+                    // （可重试占位）；预算、取消与网络失败不能清持久封面。
                     // Note: 图片代理旁路闭合 — 见 .agents/notes/implemented/bug-fix/2026-11-02-封面图流式收体闭合旁路.md
                     let bytes = crate::ingestion::read_body_capped(resp, MAX_IMAGE_BYTES).await?;
                     return Ok(bytes);
@@ -583,7 +654,11 @@ async fn fetch_image_inner(
             },
         }
     }
-    Err(last_err)
+    if all_gone {
+        Err(AppError::new("imageGone", "图片地址已失效"))
+    } else {
+        Err(last_err)
+    }
 }
 #[cfg(test)]
 mod image_proxy_tests {
@@ -629,6 +704,63 @@ mod image_proxy_tests {
         assert_eq!(got, vec![None, Some("https://ex.com/".to_string())]);
     }
 
+    /// Permanent means every valid Referer candidate said gone; a final 404 alone is insufficient.
+    #[tokio::test]
+    async fn permanent_image_failure_requires_all_referer_candidates_gone() {
+        for (statuses, expected) in [
+            (vec![404, 410, 404], "imageGone"),
+            (vec![403, 404, 410], "imageFetch"),
+            (vec![500, 404, 404], "imageFetch"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                for status in statuses {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    && std::time::Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5))
+                            }
+                            Err(e) => panic!("accept: {e}"),
+                        }
+                    };
+                    // Windows makes an accepted socket inherit the listener's
+                    // non-blocking mode (unlike Unix). The mock reads a complete
+                    // request below and would die on WSAEWOULDBLOCK under the
+                    // default parallel suite; the listener stays non-blocking
+                    // only for the bounded accept loop.
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut buf = [0; 1024];
+                    while !bytes.windows(4).any(|s| s == b"\r\n\r\n") {
+                        let n = stream.read(&mut buf).unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&buf[..n]);
+                    }
+                    write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                }
+            });
+            let http = crate::ingestion::build_client(5);
+            let error = fetch_image_inner(
+                &http,
+                &format!("http://{address}/cover"),
+                Some("https://page.example/article"),
+            )
+            .await
+            .unwrap_err();
+            server.join().unwrap();
+            assert_eq!(error.code, expected);
+        }
+    }
     /// 无 Content-Length 定界的超量流 mock（EOF 定界）：实发超过 25 MiB 图片界。
     /// 客户端在累计上限中止读取后，Windows 回环的写入失败时序不确定（TCP
     /// 缓冲可吞掉可观余量），阻塞式 write_all 可能长时间不返回导致测试挂起
@@ -1047,20 +1179,14 @@ mod extract_fulltext_commit_tests {
 
     /// 内存库（articles/contents 最小 schema，正文真值在 contents） + AppState。
     fn setup(port: u16) -> AppState {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn.execute_batch(&format!(
-            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE contents (id INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE,
-                 url_norm TEXT,
-                 content_html TEXT, body_text TEXT NOT NULL DEFAULT '',
-                 extraction_source TEXT NOT NULL DEFAULT 'rss',
-                 fulltext_extracted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1);
-             CREATE TABLE articles (id INTEGER PRIMARY KEY, url TEXT, content_id INTEGER,
-                 ai_summary TEXT, translated_content TEXT, ai_epoch INTEGER NOT NULL DEFAULT 0);
+            "INSERT INTO feeds(id,feed_url,title) VALUES(1,'https://example.invalid/rss','source');
              INSERT INTO contents (id, identity, content_html, body_text)
                  VALUES (1, 'h|extract-test', '<p>RSS 摘要</p>', 'RSS 摘要');
-             INSERT INTO articles (id, url, content_id)
-                 VALUES (1, 'http://127.0.0.1:{port}/article', 1);"
+             INSERT INTO articles (id,feed_id,guid,title,url,content_id,rss_content_id)
+                 VALUES (1,1,'guid','article','http://127.0.0.1:{port}/article',1,1);"
         ))
         .unwrap();
         AppState::new(
@@ -1121,6 +1247,105 @@ mod extract_fulltext_commit_tests {
             ("<p>RSS 摘要</p>", 2),
             "拒绝后正文保持、修订保留推进值"
         );
+    }
+
+    #[tokio::test]
+    async fn url_only_change_rejects_old_webpage_without_advancing_content_revision() {
+        const PAGE: &str = "<html><head><title>Article</title></head><body><article><p>A complete article with substantially more text than the RSS excerpt, sufficient for extraction.</p><p>The second paragraph preserves enough meaningful content for Readability.</p></article></body></html>";
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let port = start_blocking_html(PAGE, received_tx, release_rx);
+        let state = setup(port);
+        let change_url = async {
+            tokio::time::timeout(Duration::from_secs(5), received_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE articles SET url = 'https://corrected.example/article' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            release_tx.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(extract_fulltext_inner(&state, 1), change_url);
+        assert!(outcome.unwrap().degraded);
+        let conn = state.db.lock().await;
+        let (token, html) = db::article_content_commit_token(&conn, 1).unwrap().unwrap();
+        assert_eq!(token.content_id, Some(1));
+        assert_eq!(token.content_revision, 1);
+        assert_eq!(html, "<p>RSS 摘要</p>");
+    }
+
+    #[tokio::test]
+    async fn redirect_resolves_article_resources_and_cover_against_final_response_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let n = stream.read(&mut buffer).unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                if index == 0 {
+                    stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /new/deep/article\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    assert!(String::from_utf8_lossy(&request).starts_with("GET /new/deep/article "));
+                    let page = format!("<html><head><title>Article</title><meta property=\"og:image\" content=\"cover.jpg\"></head><body><article>{}<p><a href=\"related.html\">Related article</a><img src=\"photo.jpg\"></p></article></body></html>", "<p>Useful article content with complete sentences that can be extracted into a longer article body.</p>".repeat(12));
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).unwrap();
+                }
+            }
+        });
+        let state = setup(port);
+        let outcome = extract_fulltext_inner(&state, 1).await.unwrap();
+        server.join().unwrap();
+        assert!(!outcome.degraded);
+        assert!(outcome
+            .html
+            .contains(&format!("http://127.0.0.1:{port}/new/deep/related.html")));
+        assert!(outcome
+            .html
+            .contains(&format!("http://127.0.0.1:{port}/new/deep/photo.jpg")));
+        let conn = state.db.lock().await;
+        let cover: String = conn
+            .query_row("SELECT image_url FROM articles WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cover, format!("http://127.0.0.1:{port}/new/deep/cover.jpg"));
+    }
+
+    #[tokio::test]
+    async fn cover_failure_reports_success_for_already_committed_fulltext() {
+        const PAGE: &str = "<html><head><title>Article</title><meta property=\"og:image\" content=\"https://example.com/cover.jpg\"></head><body><article><p>A complete article with substantially more text than the RSS excerpt, sufficient for extraction.</p><p>The second paragraph preserves enough meaningful content for Readability.</p></article></body></html>";
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let port = start_blocking_html(PAGE, received_tx, release_rx);
+        let state = setup(port);
+        state.db.lock().await.execute_batch("CREATE TRIGGER fail_cover BEFORE UPDATE OF image_url ON articles BEGIN SELECT RAISE(ABORT, 'injected cover failure'); END;").unwrap();
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(5), received_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            release_tx.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(extract_fulltext_inner(&state, 1), release);
+        let outcome = outcome.expect("正文已成功提交，封面补写失败不应改变回执");
+        assert!(!outcome.degraded);
+        let conn = state.db.lock().await;
+        let (token, html) = db::article_content_commit_token(&conn, 1).unwrap().unwrap();
+        assert_eq!(outcome.content_id, token.content_id);
+        assert_eq!(outcome.content_revision, token.content_revision);
+        assert_eq!(outcome.html, html);
     }
 
     /// R3（wire 增字段）：成功提取的 outcome 必须携带**提交后的实际内容身份/

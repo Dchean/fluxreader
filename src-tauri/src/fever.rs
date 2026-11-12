@@ -33,12 +33,10 @@
 //! - `unread_item_ids`/`saved_item_ids` 是权威**全量** id 集合（不受 50 条限制）；
 //!   响应缺该字段是协议错误，**不得当空集合**（空集合会触发双向对账清状态）。
 //! - `mark=item` 只接受**单个** id（逗号分隔无效），推送需逐个条目调用。
-//! - **mark 星标语义按服务端变体分野（B1）**：FreshRSS（api_version 实测 4）的
-//!   `as=saved/unsaved` 是绝对赋值（`markFavorite(id, true/false)`）；Miniflux
-//!   （固定源码 `baseResponse` 恒为 `api_version: 3`）的 `as=saved` 与
-//!   `as=unsaved` **都**走 `storage.ToggleStarred` 取反——星标推送经
-//!   [`FeverClient::push_star_state`] 按 api_version 分派，toggle 型先探测当前
-//!   is_saved、仅在与目标不一致时发送。
+//! - **mark 星标语义依实现而异**：已核对 FreshRSS 和固定 Miniflux faecfa2
+//!   的 saved/unsaved 都按目标条件赋值；api_version 3 本身不保证 toggle。
+//!   兼容夹具另覆盖 toggle 变体。低版本/未知实现先探测 is_saved，只在与目标
+//!   不一致时发送，写后仍由上层读回确认；这同时兼容绝对赋值和 toggle。
 //! - 不支持添加订阅（Fever 协议无写订阅端点）——`quick_add` 由上层降级处理。
 //!
 //! 结构映射：Fever 的 item id 即 Miniflux entry id（十进制），与 Google Reader
@@ -201,9 +199,9 @@ struct FeverItem {
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
-    is_saved: i64,
+    is_saved: Option<i64>,
     #[serde(default)]
-    is_read: i64,
+    is_read: Option<i64>,
     #[serde(default)]
     created_on_time: i64,
 }
@@ -259,9 +257,15 @@ async fn read_envelope(mut resp: reqwest::Response, action: &str) -> AppResult<F
 const AUTH_FAILED_MSG: &str =
     "Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」）";
 
-/// mark 星标语义的变体分界：`api_version >= 4`（FreshRSS 实测 4）为绝对赋值；
-/// `api_version 3`（Miniflux 固定源码）为 toggle（saved/unsaved 都取反）。
+/// 已验证 FreshRSS v4 走绝对赋值；低版本/未知实现保守读前探测。
+/// 版本号不是 toggle 能力声明，v3 的条件绝对赋值同样走兼容探测路径。
 const STAR_ABSOLUTE_MIN_API_VERSION: i64 = 4;
+
+type RequestGuard = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub struct FeverClient {
@@ -271,6 +275,7 @@ pub struct FeverClient {
     /// 最近一次响应信封里的 api_version（0 = 本轮尚无任何响应）。Fever 每个
     /// 响应都携带该字段，星标推送的变体分派据此判定，无需额外探测请求。
     api_version: Arc<AtomicI64>,
+    request_guard: Option<RequestGuard>,
 }
 
 impl FeverClient {
@@ -283,7 +288,21 @@ impl FeverClient {
             api_key,
             http,
             api_version: Arc::new(AtomicI64::new(0)),
+            request_guard: None,
         }
+    }
+
+    /// 同步会话注入逐请求检查；独立协议客户端不持有数据库或会话依赖。
+    pub(crate) fn with_request_guard(mut self, guard: RequestGuard) -> Self {
+        self.request_guard = Some(guard);
+        self
+    }
+
+    async fn ensure_request_current(&self) -> AppResult<()> {
+        if let Some(check) = &self.request_guard {
+            check().await?;
+        }
+        Ok(())
     }
 
     /// API 入口（不含 query）。各后端形态不同：
@@ -336,12 +355,13 @@ impl FeverClient {
         // Miniflux 用 r.FormValue 取值，query 与 form body 都收，形状兼容不回退。
         // action/mark/as/id/with_ids/since_id 等留在 query（两类后端均走 $_REQUEST/
         // FormValue）；api_key 不再出现在 URL，顺带消除进服务器访问日志的泄露面。
-        let resp = self
-            .http
-            .post(&url)
-            .form(&[("api_key", self.api_key.as_str())])
-            .send()
-            .await?;
+        self.ensure_request_current().await?;
+        let resp = crate::sync_http::send(
+            self.http
+                .post(&url)
+                .form(&[("api_key", self.api_key.as_str())]),
+        )
+        .await?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             return Ok((None, status));
@@ -424,6 +444,7 @@ impl FeverClient {
             api_key: self.api_key.clone(),
             http: self.http.clone(),
             api_version: self.api_version.clone(),
+            request_guard: self.request_guard.clone(),
         }
     }
 
@@ -618,11 +639,11 @@ impl FeverClient {
         self.mark_items(ids, "unsaved").await
     }
 
-    /// 收藏推送的幂等收敛入口（B1：Miniflux toggle 星标翻转修复）。
+    /// 收藏推送的幂等收敛入口（兼容绝对赋值和 toggle 变体）。
     ///
     /// - api_version >= 4（FreshRSS 家族）：mark 是绝对赋值，保持总是发送
     ///   （零探测开销；重复发送对绝对赋值幂等）。
-    /// - api_version 3（Miniflux 家族）或版本未知（本轮尚无任何响应）：先以
+    /// - api_version 3 或版本未知（本轮尚无任何响应）：先以
     ///   `items&with_ids` 探测当前 is_saved，**仅当当前态≠目标态才发送**——
     ///   「响应丢失后的重发」与「另一设备已改到目标态」都收敛到用户意图；
     ///   盲发在 toggle 型上会把已处目标态的条目翻反。
@@ -630,28 +651,7 @@ impl FeverClient {
     /// 探测失败或条目在响应中不可见 → 保守报错（队列保留，下轮重试），绝不盲发。
     /// 返回是否实际发送 mark（false = 服务端已处目标态，无需发送）。
     pub async fn push_star_state(&self, id: i64, target_saved: bool) -> AppResult<bool> {
-        if self.api_version.load(Ordering::Relaxed) >= STAR_ABSOLUTE_MIN_API_VERSION {
-            if target_saved {
-                self.mark_starred(&[id]).await?;
-            } else {
-                self.mark_unstarred(&[id]).await?;
-            }
-            return Ok(true);
-        }
-        let items = self.items_with_ids(&[id]).await?;
-        let current_saved = items
-            .iter()
-            .find(|it| it.id == id.to_string())
-            .map(|it| crate::greader::has_tag(&it.categories, tags::STARRED))
-            .ok_or_else(|| {
-                AppError::new(
-                    "protocol",
-                    format!(
-                        "Fever 探测收藏态失败：条目 {id} 不在 with_ids 响应中（保守跳过，不盲发）"
-                    ),
-                )
-            })?;
-        if current_saved == target_saved {
+        if !self.star_state_needs_write(id, target_saved).await? {
             return Ok(false);
         }
         if target_saved {
@@ -660,6 +660,41 @@ impl FeverClient {
             self.mark_unstarred(&[id]).await?;
         }
         Ok(true)
+    }
+
+    /// Split the optional toggle probe from its write so the sync owner can
+    /// recheck the captured source identity between the two HTTP requests.
+    pub(crate) async fn star_state_needs_write(
+        &self,
+        id: i64,
+        target_saved: bool,
+    ) -> AppResult<bool> {
+        if self.api_version.load(Ordering::Relaxed) >= STAR_ABSOLUTE_MIN_API_VERSION {
+            return Ok(true);
+        }
+        let items = self.items_with_ids(&[id]).await?;
+        let Some(item) = items.iter().find(|it| it.id == id.to_string()) else {
+            return Err(AppError::new(
+                "verification",
+                format!(
+                    "Fever 探测收藏态失败（verification/inconclusive）：条目 {id} 未出现在 with_ids 响应中，无法证明已删除"
+                ),
+            ));
+        };
+        let current_saved = item.starred_state();
+        let current_saved = match current_saved {
+            crate::greader::RemoteState::True => true,
+            crate::greader::RemoteState::False => false,
+            crate::greader::RemoteState::Missing => {
+                return Err(AppError::new(
+                    "verification",
+                    format!(
+                        "Fever 探测收藏态失败（verification/inconclusive）：条目 {id} 的 with_ids 响应缺少 is_saved（保守跳过，不盲发）"
+                    ),
+                ));
+            }
+        };
+        Ok(current_saved != target_saved)
     }
 
     async fn mark_items(&self, ids: &[i64], mark: &str) -> AppResult<()> {
@@ -673,12 +708,15 @@ impl FeverClient {
             // fever.php 只读 `$_POST['api_key']`——此前 api_key 拼 query、POST 空
             // body，FreshRSS 上「拉得到、推不出去」的认证侧根因）；mark/as/id 留
             // query（FreshRSS 走 $_REQUEST，Miniflux 实证 query 可用，不动）。
-            let resp = self
-                .http
-                .post(&url)
-                .form(&[("api_key", self.api_key.as_str())])
-                .send()
-                .await?;
+            // 一次高层调用可含多个 mark；探测返回后也必须重新检查。
+            // 检查不跨 HTTP 持锁，已经发出的请求仍可能在断开后才完成。
+            self.ensure_request_current().await?;
+            let resp = crate::sync_http::send(
+                self.http
+                    .post(&url)
+                    .form(&[("api_key", self.api_key.as_str())]),
+            )
+            .await?;
             if !resp.status().is_success() {
                 let status = resp.status().as_u16();
                 return Err(AppError::network(format!(
@@ -708,7 +746,7 @@ fn parse_items(items: Option<Vec<FeverItem>>) -> AppResult<Vec<ItemContent>> {
             "Fever items 响应缺少 items 字段（缺失不得当空数组）",
         )
     })?;
-    Ok(items.into_iter().map(fever_item_to_item_content).collect())
+    items.into_iter().map(fever_item_to_item_content).collect()
 }
 
 /// 逗号分隔的十进制 id 集合（`unread_item_ids` / `saved_item_ids` /
@@ -738,22 +776,29 @@ fn parse_csv_ids(raw: &str, field: &str) -> AppResult<Vec<i64>> {
     Ok(out)
 }
 
-/// Fever item → 统一 `ItemContent`（复用 greader 的状态 tag 语义）。
-/// `is_read`/`is_saved` 映射为 categories 里的 read/starred tag，这样
-/// sync.rs 里 `greader::has_tag(...)` 的合并/广播逻辑两种协议通用。
-fn fever_item_to_item_content(item: FeverItem) -> ItemContent {
+/// Fever item → 统一 `ItemContent`。
+///
+/// `is_read`/`is_saved` 的三态写入 `ItemContent` 的显式 override：
+/// 缺失 = Missing（只允许更新内容，不得改写本地读/藏），0/1 = 明确状态。
+/// categories 仍保留 read/starred tag，供既有展示/测试消费者读取；合并逻辑
+/// 必须走 `read_state()` / `starred_state()`，不能再用 `has_tag` 把缺失当 false。
+fn fever_item_to_item_content(item: FeverItem) -> AppResult<ItemContent> {
+    let read_state = fever_state_field(item.is_read, &item.id, "is_read")?;
+    let starred_state = fever_state_field(item.is_saved, &item.id, "is_saved")?;
     let mut categories = vec![tags::READING_LIST.to_string()];
-    if item.is_read == 1 {
+    if read_state == crate::greader::RemoteState::True {
         categories.push(tags::READ.to_string());
     }
-    if item.is_saved == 1 {
+    if starred_state == crate::greader::RemoteState::True {
         categories.push(tags::STARRED.to_string());
     }
-    ItemContent {
+    Ok(ItemContent {
         // 十进制字面值：与 FeverId 的整数定义一致（mark/with_ids/对账共用同一
         // 定义；下游 greader::parse_item_id 对无前缀纯数字同样按十进制解析）。
         id: item.id.get().to_string(),
-        categories,
+        categories: crate::greader::ItemCategories::from_values(categories),
+        read_state_override: Some(read_state),
+        starred_state_override: Some(starred_state),
         title: item.title,
         author: item.author,
         published: item.created_on_time,
@@ -772,6 +817,27 @@ fn fever_item_to_item_content(item: FeverItem) -> ItemContent {
             html_url: String::new(),
         }),
         enclosure: Vec::<EnclosureRef>::new(),
+    })
+}
+
+/// Fever 的 `is_read/is_saved` 只接受 0/1；缺失为三态 Unknown，其它数值是
+/// 协议错误。不得把 2/-1 等异常值静默当 false（那会污染本地读/藏）。
+fn fever_state_field(
+    value: Option<i64>,
+    id: &FeverId,
+    field: &str,
+) -> AppResult<crate::greader::RemoteState> {
+    match value {
+        None => Ok(crate::greader::RemoteState::Missing),
+        Some(0) => Ok(crate::greader::RemoteState::False),
+        Some(1) => Ok(crate::greader::RemoteState::True),
+        Some(other) => Err(AppError::new(
+            "protocol",
+            format!(
+                "Fever 条目 {} 的 {field} 非法（只接受 0/1，实际 {other}）",
+                id.get()
+            ),
+        )),
     }
 }
 
@@ -876,12 +942,14 @@ mod tests {
             author: Some("a".into()),
             html: Some("<p>x</p>".into()),
             url: Some("https://x".into()),
-            is_saved: 1,
-            is_read: 1,
+            is_saved: Some(1),
+            is_read: Some(1),
             created_on_time: 1788000000,
         };
-        let ic = fever_item_to_item_content(item);
+        let ic = fever_item_to_item_content(item).unwrap();
         assert_eq!(ic.id, "5705");
+        assert_eq!(ic.read_state(), crate::greader::RemoteState::True);
+        assert_eq!(ic.starred_state(), crate::greader::RemoteState::True);
         assert!(crate::greader::has_tag(&ic.categories, "/com.google/read"));
         assert!(crate::greader::has_tag(
             &ic.categories,
@@ -892,5 +960,60 @@ mod tests {
             Some("feed/21")
         );
         assert_eq!(ic.published, 1788000000);
+    }
+
+    #[test]
+    fn item_state_fields_are_tri_state() {
+        let missing = FeverItem {
+            id: FeverId(5706),
+            feed_id: FeverId(21),
+            title: "missing".into(),
+            author: None,
+            html: None,
+            url: None,
+            is_saved: None,
+            is_read: None,
+            created_on_time: 1,
+        };
+        let missing = fever_item_to_item_content(missing).unwrap();
+        assert_eq!(missing.read_state(), crate::greader::RemoteState::Missing);
+        assert_eq!(
+            missing.starred_state(),
+            crate::greader::RemoteState::Missing
+        );
+
+        let explicit_false = FeverItem {
+            id: FeverId(5707),
+            feed_id: FeverId(21),
+            title: "false".into(),
+            author: None,
+            html: None,
+            url: None,
+            is_saved: Some(0),
+            is_read: Some(0),
+            created_on_time: 1,
+        };
+        let explicit_false = fever_item_to_item_content(explicit_false).unwrap();
+        assert_eq!(
+            explicit_false.read_state(),
+            crate::greader::RemoteState::False
+        );
+        assert_eq!(
+            explicit_false.starred_state(),
+            crate::greader::RemoteState::False
+        );
+
+        let invalid = FeverItem {
+            id: FeverId(5708),
+            feed_id: FeverId(21),
+            title: "invalid".into(),
+            author: None,
+            html: None,
+            url: None,
+            is_saved: Some(2),
+            is_read: None,
+            created_on_time: 1,
+        };
+        assert!(fever_item_to_item_content(invalid).is_err());
     }
 }

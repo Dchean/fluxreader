@@ -232,6 +232,8 @@ export const resetBodyCacheForTests = bodyCacheMod.resetBodyCacheForTests;
    清空，避免上一用例挂起的在途请求（受控 Promise 永不 settle）吞掉下一用例的同键触发。 */
 const aiSliceMod = await import('../../dist-test/store/slices/ai.js');
 export const resetAiRequestStateForTests = aiSliceMod.resetAiRequestStateForTests;
+const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+const { resetReadingPositionForTests } = await import('../../dist-test/lib/readingPosition.js');
 
 /* ------------------------------------------------------------------
    6) 统一错误账本（R1 修复）：console.error / jsdom 未捕获 / React 三通道错误
@@ -254,12 +256,16 @@ export const reactErrors = [];
    与真实失败分开记账。 */
 const ACT_WARNING_RE = /An update to .* inside a test was not wrapped in act\(\.\.\.\)/;
 export const actWarnings = [];
+/** 归属仅表示警告到达时所在阶段，不猜异步来源；仍保留全进程原文与原分级。 */
+export const actWarningAttribution = [];
+let currentActPhase = 'setup/gap';
 const origError = console.error.bind(console);
 const formatArgs = (a) => a.map((x) => (x instanceof Error ? `${x.name}: ${x.message}` : String(x))).join(' ');
 console.error = (...a) => {
   const msg = formatArgs(a);
   if (ACT_WARNING_RE.test(msg)) {
     actWarnings.push(msg);
+    actWarningAttribution.push({ phase: currentActPhase, message: msg });
     return;
   }
   consoleErrors.push(msg);
@@ -461,9 +467,12 @@ export function resetStore(extra = {}) {
     rawTranslatedIds: {},
     /* OPT-013 B3：校验状态缓存（五态显示数据源）随基线清空——防跨用例污染。 */
     aiStatusById: {},
+    aiStatusRevision: 0,
     openedReadIds: {},
     categories: [],
     entries: [],
+    readingSession: null,
+    sourceIndex: new Map(),
     feedIndex: new Map(),
     feedCounts: new Map(),
     /* OPT-008B R2：scope 计数快照随基线清空——否则上一个用例/域的快照会按
@@ -473,9 +482,12 @@ export function resetStore(extra = {}) {
     playerExpanded: false,
     settingsOpen: false,
     searchOpen: false,
+    contextMenuOpen: false,
     closeAskVisible: false,
     lightboxUrl: null,
     lightboxEntryId: null,
+    lightboxPageUrl: undefined,
+    lightboxGallery: null,
     newCategoryModalOpen: false,
     addFeedModalOpen: false,
     editFeedModalOpen: false,
@@ -485,6 +497,28 @@ export function resetStore(extra = {}) {
     errors: [],
     errorCenterOpen: false,
     saveAndSyncBusyOwner: null,
+    /* 同步账户/队列/订阅回执是跨用例真实事件源；基线清空防止上一用例的
+       账户名、橙色灯或 outbox 计数泄漏到下一用例。 */
+    libraryGeneration: 0, libraryRestoreBusy: false,
+    localSyncState: null, localSyncBusy: null, localSyncError: null,
+    portableBackup: { busy: null, preview: null, result: null, error: null, refreshFailed: false },
+    syncStatus: 'synced',
+    backgroundSyncing: false,
+    syncConnected: false,
+    syncAccount: null,
+    syncProtocol: null,
+    syncEndpoint: null,
+    syncLastSync: 0,
+    syncSucceededAt: null,
+    syncWaiting: 0,
+    syncFailed: 0,
+    syncLocalOnly: 0,
+    syncBindableRetry: 0,
+    syncBoundPending: 0,
+    syncRetryWait: 0,
+    syncTerminalFailed: 0,
+    syncExpiredUnconfirmed: 0,
+    syncQueueLastError: null,
     /* OPT-009 B3：订阅写回回执与能力矩阵是事件/挂载写入的模块状态——
        基线清空，避免跨用例残留（上一用例的能力矩阵被下一个用例读到）。 */
     subOutboxStats: null,
@@ -504,12 +538,14 @@ export function resetStore(extra = {}) {
   });
   resetBodyCacheForTests();
   resetAiRequestStateForTests();
+  resetReadingPositionForTests();
 }
 
 /** 全量清理：卸载所有挂载树（聚合错误）、复位 store、移除遗留 DOM、关闭 jsdom。
     任一步失败都在完成其余步骤后聚合抛出（清理必完成、失败非静默）。 */
 export async function teardownAll() {
   const errors = [];
+  try { const act = await getAct(); await act(async () => { await awaitLocalFlagWriteFrontier(); }); } catch (e) { errors.push(e); }
   try { await unmountAll(); } catch (e) { errors.push(e); }
   try { resetStore(); } catch (e) { errors.push(e); }
   try {
@@ -533,14 +569,23 @@ export function componentTest(name, options, body) {
   const opts = typeof options === 'function' ? {} : (options ?? {});
   const fn = typeof options === 'function' ? options : body;
   return test(name, opts, async (t) => {
+    currentActPhase = `${name} / body`;
     const errors = [];
     const gap = beginTestErrors(); // 间隙错误（上轮结束后新出现）不静默
     if (gap) errors.push(gap);
     try {
+      const act = await getAct();
+      await act(async () => { await awaitLocalFlagWriteFrontier(); });
+      resetReadingPositionForTests();
       await fn(t);
     } catch (e) {
       errors.push(e);
     }
+    currentActPhase = `${name} / cleanup`;
+    try {
+      const act = await getAct();
+      await act(async () => { await awaitLocalFlagWriteFrontier(); });
+    } catch (e) { errors.push(e); }
     /* OPT-018：用例 body 之后、卸载之前再给一轮 act 覆盖的 flush——挂载后的
        短异步 effect（autostart 读注册表等）若在此窗口落地，setState 仍在 act 内；
        否则它会落在 body 与 unmount 之间的空隙，报 not wrapped in act。长定时器
@@ -552,10 +597,21 @@ export function componentTest(name, options, body) {
     }
     try {
       await unmountAll();
+      const act = await getAct();
+      await act(async () => { await awaitLocalFlagWriteFrontier(); });
     } catch (e) {
       errors.push(e);
     }
+    // Media transport and restore/report hooks share one instance; no resource crosses a case.
+    try {
+      const { awaitCoverReportFrontier, resetCoverCacheForTest } = await import('../../dist-test/lib/coverImage.js');
+      await awaitCoverReportFrontier();
+      resetCoverCacheForTest();
+    } catch (error) { errors.push(error); }
+    // RS4：卸载effect也可能存档锚；即使body或卸载失败，仍清活锚/存档/节流基准。
+    try { resetReadingPositionForTests(); } catch (e) { errors.push(e); }
     const ledgerErr = endTestErrors();
+    currentActPhase = 'between tests';
     if (ledgerErr) errors.push(ledgerErr);
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, `用例失败/清理/错误账本共 ${errors.length} 项失败`);
@@ -591,6 +647,7 @@ export function disarmLifecycleWatchdog() {
     hook reject 后 exit 0），故这里显式 `process.exitCode = 1`——否则清理失败会
     被静默成绿灯。 */
 export async function runFinalTeardown() {
+  currentActPhase = 'final teardown';
   let failure = null;
   try {
     await teardownAll();
@@ -605,6 +662,11 @@ export async function runFinalTeardown() {
   /* OPT-018：act 警告只留计数，信息级输出——不影响退出码。整轮累计，不按
      用例清零，便于对照「本进程是否出现过测试调度噪声」。 */
   console.log(`[component-regression] act warnings recorded: ${actWarnings.length}`);
+  if (actWarningAttribution.length) {
+    const byPhase = {};
+    for (const item of actWarningAttribution) byPhase[item.phase] = (byPhase[item.phase] ?? 0) + 1;
+    console.log(`[component-regression] act warning arrival phases: ${JSON.stringify(byPhase)}`);
+  }
   if (failure) {
     origError(`[component-regression] 最终清理/检查失败：${failure?.message ?? failure}`);
     process.exitCode = 1;
@@ -615,3 +677,4 @@ export async function runFinalTeardown() {
 
 /* 供诊断输出：把挂载树数量暴露给入口汇总。 */
 export function mountedCount() { return mountedRoots.length; }
+

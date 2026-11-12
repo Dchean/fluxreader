@@ -1,15 +1,4 @@
-//! OPT-008B 第一阶段 R1 返工：读传播的**本地半边**（read 广播 = 同组原子读+版本+入队）
-//! 与「全部已读真的清空范围」的真实隔离库回归。
-//!
-//! 返工依据（主控裁决）：
-//! - 显示去重不意味着操作只改代表：`mark_all_read_with_enqueue` 3 源同 URL 3 未读
-//!   的探针（tmp/optimization-20261008/OPT-008B/opt008b_controller_probe.rs）证明
-//!   只改代表时 changed=1/read=1/queued=1，另外 2 行仍未读；离线/纯直连无法靠
-//!   远端收敛，范围未清空。
-//! - 读政策本地半边：同组（同 `url_norm`）read 原子更新相应本地条目版本与队列
-//!   （与推送 read 广播同政策）；unread/star 只当前条目。
-//!
-//! 这些用例先在旧实现下红、修复后绿（red-first）。
+//! 源内 RSS 等价组的四类原子状态写入与推送失败保留回归。
 
 use app_lib::db;
 
@@ -26,29 +15,44 @@ fn setup(name: &str) -> rusqlite::Connection {
 
 fn seed_same_url_rows(conn: &rusqlite::Connection, n: i64) -> Vec<i64> {
     let folder = db::create_folder(conn, "probe", "article").unwrap();
-    let mut ids = Vec::new();
-    for i in 0..n {
-        let feed = db::insert_feed(
-            conn,
-            &format!("https://probe.invalid/feed/{i}"),
-            None,
-            "probe",
-            None,
-            folder,
-            "inherit",
-            false,
-            false,
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO articles(feed_id,guid,url,url_norm,title,published_at,is_read)
-             VALUES(?1,?2,'https://probe.invalid/shared','https://probe.invalid/shared','probe','2026-10-12T00:00:00Z',0)",
-            rusqlite::params![feed, format!("guid-{i}")],
-        )
-        .unwrap();
-        ids.push(conn.last_insert_rowid());
-    }
-    ids
+    let feed = db::insert_feed(
+        conn,
+        "https://probe.invalid/feed",
+        None,
+        "probe",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    (0..n)
+        .map(|i| {
+            db::upsert_article_with_feed(
+                conn,
+                feed,
+                &db::NewArticle {
+                    guid: format!("guid-{i}"),
+                    url: Some("https://probe.invalid/shared".into()),
+                    title: "probe".into(),
+                    author: None,
+                    summary: None,
+                    content_html: Some("<p>same RSS</p>".into()),
+                    body_text: "same RSS".into(),
+                    image_url: None,
+                    enclosure_url: None,
+                    enclosure_mime: None,
+                    duration_sec: None,
+                    published_at: Some("2026-10-12T00:00:00Z".into()),
+                    source: "direct".into(),
+                },
+                false,
+            )
+            .unwrap()
+            .0
+        })
+        .collect()
 }
 
 fn read_queued(conn: &rusqlite::Connection) -> Vec<i64> {
@@ -123,7 +127,7 @@ fn mark_all_read_clears_all_scoped_copies_atomically() {
 /// 范围闭包：scope 内命中组的**跨 scope 兄弟**按 read 广播政策一并标读+入队
 /// （跨布局/跨源不缩减）；scope 外不相关条目不动。
 #[test]
-fn mark_all_read_broadcasts_to_same_group_copies_outside_scope() {
+fn mark_all_read_keeps_same_url_sources_outside_scope_unchanged() {
     let conn = setup("scope_closure");
     let folder = db::create_folder(&conn, "F", "article").unwrap();
     // scope 内：feed1（article 布局）一行
@@ -190,20 +194,20 @@ fn mark_all_read_broadcasts_to_same_group_copies_outside_scope() {
         .unwrap();
     let by_id: std::collections::HashMap<i64, i64> = states.into_iter().collect();
     assert_eq!(by_id[&in_scope], 1, "scope 内行使已读");
-    assert_eq!(by_id[&sibling], 1, "同组跨 scope 兄弟按 read 广播政策标读");
+    assert_eq!(by_id[&sibling], 0, "不同源的同 URL 条目不传播状态");
     assert_eq!(by_id[&unrelated], 0, "不相关条目不得被波及");
-    assert_eq!(changed, 2, "changed = 真实改变行数（scope 行 + 广播兄弟）");
+    assert_eq!(changed, 1, "只改变范围内当前源的行");
     let queued = read_queued(&conn);
     assert!(
-        queued.contains(&in_scope) && queued.contains(&sibling) && !queued.contains(&unrelated),
-        "入队集合 = 改变集合（含广播兄弟，不含无关行）: {queued:?}"
+        queued.contains(&in_scope) && !queued.contains(&sibling) && !queued.contains(&unrelated),
+        "入队集合严格限于范围内源: {queued:?}"
     );
 }
 
 /// 单条「标读 + 入队」（用户入口）同样持本地广播半边：同组未读副本一并读+版本+入队；
 /// 取消标读（unread）只当前条目；收藏只当前条目。
 #[test]
-fn single_read_with_enqueue_broadcasts_group_but_unread_and_star_stay_current() {
+fn all_four_actions_update_every_source_local_group_member() {
     let conn = setup("single");
     let ids = seed_same_url_rows(&conn, 2);
     let (a, b) = (ids[0], ids[1]);
@@ -235,7 +239,7 @@ fn single_read_with_enqueue_broadcasts_group_but_unread_and_star_stay_current() 
     // unread（取消标读）只当前条目
     db::set_read_with_enqueue(&conn, a, false).unwrap();
     assert_eq!(read_state(a), 0);
-    assert_eq!(read_state(b), 1, "unread 不得广播给同组兄弟");
+    assert_eq!(read_state(b), 0, "源内等价组未读操作同样作用到每个实体");
 
     // star 只当前条目
     db::set_starred_with_enqueue(&conn, a, true).unwrap();
@@ -246,7 +250,21 @@ fn single_read_with_enqueue_broadcasts_group_but_unread_and_star_stay_current() 
         .unwrap()
     };
     assert_eq!(star_state(a), 1);
-    assert_eq!(star_state(b), 0, "收藏不得广播给同组兄弟");
+    assert_eq!(star_state(b), 1, "源内等价组收藏作用到每个实体");
+    db::set_starred_with_enqueue(&conn, a, false).unwrap();
+    assert_eq!((star_state(a), star_state(b)), (0, 0));
+    let versions: Vec<(i64, i64)> = conn
+        .prepare("SELECT read_version,star_version FROM articles ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        versions,
+        vec![(2, 2), (2, 2)],
+        "四类本地操作各自推进每个实体的字段版本"
+    );
 }
 
 /// 批量标读同口径：整批同事务、同组闭包全部读+入队；不相关 URL 不动。
@@ -296,11 +314,11 @@ fn bulk_read_with_enqueue_applies_group_closure() {
     assert!(!queued.contains(&other));
 }
 
-/// 故障注入：读广播目标查询失败（remote_dup_ids 被写成 BLOB 使 String 读取失败）
+/// 故障注入：读广播目标查询失败（remote_id 被写成 BLOB 使 String 读取失败）
 /// 时，推送计划必须整体失败、**保留队列意图**——不得 `unwrap_or_default` 当成
 /// 「没有副本」继续推送并 prune（那会把原 read 意图一并清掉）。
 #[tokio::test]
-async fn push_plan_error_keeps_queue_instead_of_dropping_broadcast_targets() {
+async fn invalid_remote_target_keeps_queue_without_partial_push() {
     use app_lib::sync;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -351,12 +369,9 @@ async fn push_plan_error_keeps_queue_instead_of_dropping_broadcast_targets() {
     db::set_article_remote_id(&conn, aid, eid).unwrap();
     db::set_read(&conn, aid, true).unwrap();
     db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
-    // 注入：remote_dup_ids 读取失败（BLOB → String 读取错误）
-    conn.execute(
-        "UPDATE articles SET remote_dup_ids = x'00' WHERE id = ?1",
-        [aid],
-    )
-    .unwrap();
+    // 注入：remote_id 读取失败（BLOB → String 读取错误）
+    conn.execute("UPDATE articles SET remote_id = x'00' WHERE id = ?1", [aid])
+        .unwrap();
 
     let dbm = Arc::new(Mutex::new(conn));
     let http = app_lib::ingestion::build_client(10);

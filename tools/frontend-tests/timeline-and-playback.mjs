@@ -147,18 +147,19 @@ export async function run(ctx) {
        OPT-017E：清单由 9 项扩为 10 项（补「错误中心」errorCenter）——旧 9 项
        保留，新增 errorCenter 探针与 App 实参接线断言。 */
     const baseOverlay = {
-      searchOpen: false, settingsOpen: false, newCategoryModalOpen: false,
+      searchOpen: false, contextMenuOpen: false, settingsOpen: false, newCategoryModalOpen: false,
       addFeedModalOpen: false, editFeedModalOpen: false, renameCatModalOpen: false,
       lightboxUrl: null, playerExpanded: false, playerActive: false,
       closeAskVisible: false, errorCenterOpen: false,
     };
-    checkNew('(P3[F2]) 浮层清单恰为 10 项且名称稳定（新增/删除浮层必须同步本表；OPT-012 起含 closeAsk，OPT-017E 起含 errorCenter）',
-      OVERLAY_SOURCES.length === 10
+    checkNew('(P3[F2]) 浮层清单恰为 11 项且名称稳定（NF3补contextMenu，保留既有10项）',
+      OVERLAY_SOURCES.length === 11
       && OVERLAY_SOURCES.map((o) => o.name).join(',')
-        === 'search,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded,closeAsk,errorCenter');
+        === 'search,contextMenu,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded,closeAsk,errorCenter');
     /* 逐项：只打开这一项 ⇒ anyOverlayOpen 必须为 true（漏判/少算任一项即失败） */
     const overlayProbes = [
       ['search', { searchOpen: true }],
+      ['contextMenu', { contextMenuOpen: true }],
       ['settings', { settingsOpen: true }],
       ['newCategory', { newCategoryModalOpen: true }],
       ['addFeed', { addFeedModalOpen: true }],

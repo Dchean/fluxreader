@@ -1,308 +1,132 @@
-# 同步协议 × 服务端兼容矩阵（Google Reader / Fever）
+# 同步协议与服务端兼容矩阵
 
-本文是同步状态语义的**用户可见对照表**。政策的代码单点在
-[`src-tauri/src/sync/conflict_policy.rs`](../src-tauri/src/sync/conflict_policy.rs)
-（每格政策的常量定义、选择理由、历史依据都在那里），本文与其同步维护——
-**改政策 = 改政策点 + 改本文 + 改对应锁定测试**。政策为什么以常量形式存在、
-三类事实为什么要分列，见
-[同步冲突政策单点](../.agents/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)。
+本页分开记录外部协议/服务端能力、客户端实际政策、验证覆盖。政策单点为 [conflict_policy.rs](../src-tauri/src/sync/conflict_policy.rs)；改变政策必须同步实现、本文和锁定测试。选择理由见[冲突政策决定](../.agents/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)。
 
-**时点声明**：文中涉及外部服务端实现的事实（Miniflux / FreshRSS / 本仓
-`src-tauri/tests/mock_greader.rs` 测试替身）来自源码查阅时点（2026-10），
-**不代表部署服务的版本**；升级或更换服务端后须复核。
+外部参照固定为 [Miniflux faecfa2](https://github.com/miniflux/v2/tree/faecfa2fac61a91f4f69550bb1afd506c4b51749) 与 [FreshRSS 4e8a258](https://github.com/FreshRSS/FreshRSS/tree/4e8a258b011aad190597d7953b7122fc43f4658f)。2026-11-03 的来源记录在 `tmp/audit-sync-core/upstream/provenance.json`，2026-11-06 对订阅更新/URL 匹配另有固定源码复核。旧鉴权材料的 FreshRSS `219eaf58` 属 2026-10-08 时点。夹具模拟这些形态，不等于某个真实部署版本已经验收。
 
-**版本验证声明（必读）**：本矩阵的「指定服务端版本已验证」列**只覆盖测试替身**
-（`src-tauri/tests/mock_greader.rs` 的宽松形态，以及
-`src-tauri/tests/greader_compat_e2e.rs` 的 Miniflux/FreshRSS 严格夹具、
-`src-tauri/tests/fever_compat_e2e.rs` 的 FreshRSS/Miniflux 形态 Fever 严格夹具）——它们是
-被自动化测试锁定的服务端形态。
-**Miniflux / FreshRSS 的具体部署版本未逐一实机验收**；文中「协议/服务端支持」列
-涉及外部服务端的事实来自源码查阅时点（2026-10），**不代表所有部署版本都已验收**。
-升级或更换服务端后三者都须复核。三列必须分开——协议/服务端事实、本客户端实现现状、
-实际验收过的版本不是一回事；把「本客户端未实现」写成「协议做不到」会掩盖可补齐的能力。
+**当前重构状态**：2026-11-09的双向状态、源内内容分组和保留策略正在实施；以下历史实测只说明其固定基线。当前门禁结果在验收入口与本轮报告，不能据本文旧绿灯推断重构可发布。
 
-范围：状态与条目同步（push 队列 + pull 合并/对账）。订阅层（feeds 阶段的
-订阅/分类增删改）不在本矩阵内。两协议共用同一条
-`sync_queue → plan_push / exec_push` 推送管线与同一条 `merge_pulled_entry`
-合并函数，协议差异集中在**对账方向**与**游标/条目获取能力**两处。
+**历史验证上限**：生产客户端的受控 HTTP/SQLite 测试已覆盖下列有限路径；本轮同步缺陷与重认证报告修复已在固定范围通过独立复审，版本与原始失败链见[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md#本轮修复的限定验收2026-11-07)。FreshRSS 1.30.4、Miniflux 2.3.5 的隔离真实服务端已完成下方[限定 live 实测](#live-deployments)；这些结果不代表全部部署、版本或异常路径均已验收。
 
-## 1. 协议 × 操作差异矩阵
+## 状态操作与冲突政策
 
-三列口径：**协议/服务端支持** = 协议规范或当前参考实现（Miniflux main 等）
-事实上的能力；**本客户端已实现** = FluxReader 当前代码真正落地的行为；
-**指定服务端版本已验证** = 实际被测试/实机验收覆盖到的服务端形态。
-某格为「客户端选择的策略」时，协议列不写、只在实现列写并标注。
+| 操作 | 外部能力 | 客户端行为与限制 |
+| --- | --- | --- |
+| 标读推送 | GR `edit-tag` 可聚合 entry ID；Fever `mark=item&as=read` 只接受单 ID | 同源等价组每个成员独立入队；GR合批/Fever逐ID，每个身份读回确认；不同源不传播 |
+| 取消标读推送 | GR remove read；固定 FreshRSS/Miniflux 的 Fever 支持扩展 `as=unread` | 同源等价组各成员独立目标，不跨源。原 Fever 规范只定义 read/saved/unsaved，不能把此扩展当所有 Fever 服务端支持 |
+| 收藏/取消收藏推送 | GR starred add/remove 为赋值；固定 FreshRSS api_version4 与 Miniflux api_version3 都是绝对赋值 | 同源等价组各成员独立目标。Fever ≥4 直接写，3/未知先查 is_saved，仅不同才写以兼容历史 toggle；api_version3 不能等同 toggle |
+| GR light 读状态 | 完整 reading-list 可用 `xt=read` 排除已读 | 双向：完整远端未读集合可将本地已读恢复未读；本地未读缺席时仍先查候选存在性再标读，集合失败不作该字段差分 |
+| Fever light 读状态 | `unread_item_ids` 全集，没有已读集合 | 双向权威：命中可恢复未读，未命中置已读；依赖集合完整和字段保护 |
+| 两协议 light 收藏 | GR starred 流、Fever saved 集合 | 双向权威；完整集合内命中收藏、不命中取消。不是协议强制的冲突政策 |
+| full 合并 | 协议提供条目及状态，不规定本地合并方向 | Content处理身份/正文及首次初始化，已绑定flags由State双向合并，跨源不传播；本机早到绑定必须同源与非空内容确证 |
 
-| 维度 | 协议/服务端支持 | 本客户端已实现 | 指定服务端版本已验证 |
-|---|---|---|---|
-| 标读（推送） | GR `edit-tag`（`a=user/-/state/com.google/read`）按 entry id 批量；Fever `mark=item&as=read` **只接受单个 id**（逗号分隔无效，须逐个调用） | 绑定 entry + **全部同文副本**（read 广播政策，§3）；GR 多 entry 聚合单请求；Fever 逐 id 调用（同一 `plan_push`，协议无关） | mock_greader 替身锁定 GR 推送往返；Fever `mark=item` 仅模块头 curl 实证 + live 测试（`#[ignore]`，CI 外人工执行），无自动化版本验收 |
-| 取消标读（推送） | GR `edit-tag` remove read；Fever `mark=item&as=unread`（单 id） | **仅绑定 entry**，不广播 | 同上一行（GR mock 锁定；Fever 仅实证/live） |
-| 收藏 / 取消收藏（推送） | GR starred tag add/remove（显式 add-remove 语义，非 toggle）；Fever `mark=item&as=saved/unsaved`（单 id），但**两家 mark 语义不同**（源码核对，2026-10-31）：FreshRSS（api_version 4）绝对赋值（`markFavorite(id, true/false)`）、Miniflux（api_version 固定 3）对 saved/unsaved **都**走 `ToggleStarred` 取反 | 仅绑定 entry；Fever 侧按 api_version 分派（`FeverClient::push_star_state`）：Miniflux 型先 `items&with_ids` 探测当前 is_saved、仅当≠目标态才发 mark（响应丢失重发与「另一设备已改」都收敛到用户意图；探测失败保守报错不盲发），FreshRSS 型保持总是发送 | GR mock 锁定；Miniflux toggle 变体由 `fever_compat_e2e` 的响应丢失重发 / stale 队列两用例锁定（B1）；「已收藏再收 as=saved 会翻反」的固定源码事实也在夹具层锁定 |
-| 轻量对账 · 读状态 | GR 权威信号：`stream/items/ids` 可拉「已读 id 集合」（`s=read`），也可经官方 `xt` 排除参数拉「当前未读全集」（`s=reading-list&xt=read`，三家服务端均支持）；**无显式「保持未读」信号**；Fever 只有 `unread_item_ids`（无已读集合） | **GR 单向 read-wins（2026-11-01 起为未读差分形态）**：light 轮不再全量拉 read 集合，改拉 `reading-list + xt=read` 当前未读全集，与本地已绑定未读行差分出「远端新变已读」，仍经 `conflict_policy` 单向落地；差分候选经 `item_contents` 存在性校验（远端已删除的未读条目不误标），未读集合不完整（页上限/请求失败/损坏 continuation）整轮跳过差分（fail-closed）。**Fever 双向权威**不变（unread 命中 → 本地未读可复活；未命中 → 本地已读）。**注：read-wins 是本客户端选择的冲突策略，不是 Google Reader 协议必然要求**；见 §2 | mock_greader 替身（xt 排除路由 + `unread_diff_e2e` 四等价性用例）与 greader_compat_e2e 严格夹具（未读覆盖/失败隔离）经自动化测试锁定；真实 Miniflux/FreshRSS 未逐一实机验收 |
-| ot×状态流增量（已证伪，勿再立项） | **按状态流 + ot 拉增量不可行**（2026-11-01 四路审计证伪）：Miniflux 把 read/starred 流的 ot 映射为 `AfterPublishedDate`（过滤列是发布时间，`internal/googlereader/handler.go`）；FreshRSS 的 ot 匹配 `date≥ot OR lastModified≥ot` 而状态变更只动 `lastUserModified`（`EntryDAO.php`），状态变更不进 ot 窗口；Bazqux 官方文档 Warning 明言勿用 ot | **不实现**；light 轮 read 对账以「未读差分」为协议支持的等价替代（上一行），starred 保持全量集合对账 | mock/严格夹具锁定的是替代机制本身；「不可行」为源码/官方文档事实（2026-10/2026-11 查阅），无从自动化验证 |
-| 轻量对账 · 星标 | GR starred stream / Fever `saved_item_ids` 都能给出「当前收藏 id 集合」，隐含「未命中 = 已取消」 | **双向权威**（命中 → 收藏；未命中 → 取消收藏）——两协议一致（同为客户端策略） | mock_greader；截断守卫由 `star_reconcile_truncation_e2e` 锁定 |
-| 全量合并 · 读状态 | 协议本身不规定合并规则 | 与 Fever 共用 `merge_pulled_entry`：read-anywhere-wins（任何副本已读都接受）；unread 仅同源绑定 entry 接受（**跨源副本的未读不复活**）；跨源副本记账 + 远端已读即标读 | `dual_client_e2e` / `dedup_sync_e2e` 锁定客户端语义（无服务端版本维度） |
-| 权威状态集合端点 | GR `stream/items/ids`（s=starred；未读集合 = s=reading-list + xt=read），continuation 分页，单请求 `n` 上限 **10000**（GR 官方 wiki；Miniflux `MaxEntryIDsLimit=10000`；FreshRSS 无 clamp）；Fever `unread_item_ids` / `saved_item_ids`，单请求返回全集——**协议下界：无 continuation、无增量参数，集合只能整段重拉，不存在增量空间**（2026-11-01 登记，防重复立项） | 两协议均拉全量集合用于轻量对账；GR 单页 n=10000（200 页上限语义不变），分页截断/中断按失败处理；Fever 响应**缺字段是协议错误**（不当空集合）、CSV 非法项显式报错 | mock_greader（含分页/截断形态；Fever 路由按 action 补对应字段）；Fever 严格形态（缺字段/非法 CSV）由 `fever_compat_e2e` 锁定；live 测试（`#[ignore]`）另行 |
-| 条目 id 取值形态 | Fever：FreshRSS `fever.php` 的 `id` 是 PHP numeric-string（JSON **字符串**，如 `"1791440000000000"`），Miniflux 是 JSON 数字；GR `stream/items/ids` 的 `id` 是 64 位**十进制字符串**，`item_contents` 是长格式 tag（尾部 hex） | `FeverId` 两种形态都接受、一律按十进制（不猜 hex、不经 f64；非法/负值/溢出显式错误）；`greader::parse_item_id` 按协议形状（前缀 tag→hex；无前缀纯数字→十进制） | `fever_compat_e2e`（字符串长 id 全链路往返、JSON 数字形态、非法/溢出/负值/浮点报错）；`greader.rs` 单测（前缀 hex 含 a-f、无前缀十进制） |
-| 条目获取 | GR `item_ids`(reading-list, ot, xt) 分页列举 + `item_contents`（100 条/批）；Fever `items` 支持 `since_id`（向更新）**与 `max_id`（向更旧，历史回溯）**——当前 Miniflux `internal/fever/handler.go` 约 227-267 行与 FreshRSS `findEntries` 均支持 `max_id`，重复直到返回空数组 | GR 全量 id 列举（单页 n=10000）+ 正文分块；light 对账前对 starred 权威集合中「尚无本地行」的 id 逐块 `item_contents` 回补（100 条/请求，每集合每轮预算 2000 条，见 §6-L7；read 侧回补随 read 集合退场，未读集合仅服务差分不回补，未绑定条目由 full/窗口收敛）；Fever `items&since_id` 增量（50 条/页）+ `items_before(max_id)` 历史回溯 + `with_ids` 补齐权威集合缺正文条目（50 条/批，B2 起按「本地已有正文」DB 侧预过滤，已有正文的 id 不再重拉）；历史页/with_ids 按 id 去重；**每页为独立短事务**（页数据+该页游标同 commit，任何行失败整页回滚、内存统计/maps/seen 一并回滚）；响应按 `chunk()` 逐块累计的 16 MiB 读取硬界（覆盖无 Content-Length/压缩膨胀） | mock_greader 替身锁 GR 条目获取（另按 action 补 Fever 宽松空集字段）；Fever 条目获取由 `fever_compat_e2e` 严格夹具自动化锁定（长 id/125 篇/去重/with_ids/页事务回滚/17 MiB 与 chunked·brotli 超限）；GR 回补与 Fever 预过滤由 `sync_phases_e2e`（回补收敛/URL 不匹配独立成行/回补失败游标守恒/with_ids 请求计数）与 `fever_pull.rs` 内联测试锁定；live 测试（`#[ignore]`）另行 |
-| 历史回溯（向更旧翻页） | **Fever `items&max_id` 支持**（当前 Miniflux main/dev 与 FreshRSS `fever.php`：取 `id < max_id` 的最近 50 条，两家固定实现均 `ORDER BY id DESC`）；GR 无此概念（用 ot 时间窗口近似） | **已实现**：首连/full 同步 `items_before` 循环直到空页取尽保留历史（含已读非收藏）；游标取页内最小 id（与页内顺序无关）且必须严格减小；分页失败/游标不前进显式记 `report.errors` 并保留已拉进度。「历史是否仍被服务端保留另当别论」 | `fever_compat_e2e`（125 篇全可达、页序无关鲁棒性、分页失败重试、游标不前进快速失败、幂等与增量只走 since_id） |
-| 历史状态与自动续取（OPT-005 R1/R2/R3） | 协议不规定（客户端策略） | 内部 settings `fever_history_state` 显式三态（无 schema 迁移）：缺失=**Unknown（绝不当完成**，旧库只有 since 也自动从顶部补旧历史）；`pending:<max_id>`=未完成；`complete`=已取尽；损坏=**显式错误且不动游标**。每页「页数据+checkpoint/since」同事务；「先初始化 Pending 成功才允许更大的 since 落库」；每轮至多 200 页（1 万条），预算/失败/游标不前进都保留 Pending 续取点、不推进完成时间；**含自动 light** 从 Pending 续取，只有走到空页才 Complete；手动 full 从顶部重放（幂等）。**R3：map（匹配映射）读取失败——初次构建或页回滚后重建——记 report 并立即终止本轮，保留 Pending/已确认 since，不执行后续 history/with_ids/完成时间；绝不退化成空映射继续**（空 feed 映射会让 merge 合法跳过却照常确认游标/写 Complete）。`max_id` 严格 `<` 漏掉的 `i64::MAX` 边界条目由 `with_ids(MAX)` 顶覆盖 | `fever_compat_e2e`（状态写失败不推 since→light 重试、页 INSERT 失败整页回滚+Pending 保留→下轮补回、Unknown 旧库自动补旧历史、损坏状态报错不改游标、full 失败→light 自动补齐、200 页预算→下轮续取 10050 条、i64::MAX 已读非收藏可达、R3 map 列类型错误两反例：初始读取失败无假 Complete/since/time、页失败后重建失败终止整轮） |
-| 增量游标 | GR `ot` 为服务端时间过滤参数（过滤列随实现而异）；Fever `since_id` 为条目 id 过滤 | GR `last_sync_ts`（unix 秒）**起点候选**（id 列举开始前取）+ 幂等合并 ⇒ 无漏无重；仅本轮「窗口拿全」（id 列举 + 分块零失败）才推进；Fever：`since_id` 分页**非空页持续到空页**（服务端可先 `LIMIT 50` 再经 hook 过滤产生非空短页，短页不是结束）；`last_sync_entry_id` **只由成功提交的页事务推进**（增量页或顶部连续页；与页数据同 commit，失败回滚不推进）——with_ids 补齐、Pending 续取页与失败页都不推动（防跳过未拉区间）+ `last_sync_ts`（仅零失败且历史无未完成时写，供切换回 GR 后的首拉） | `pull_cursor_e2e` + mock_greader；Fever 增量与游标隔离由 `fever_compat_e2e`（LIMIT 后过滤短页继续、增量第二页失败不被 with_ids 大 id 推动、`since_id=上次 max` 起）；真实服务端过滤列差异见 §5（源码查阅，未实机验收） |
-| 时间过滤列 | GR `ot` 语义随服务端实现；Fever 无时间过滤（条目 id 单调递增游标） | 不依赖过滤列（起点候选 + 幂等合并） | mock 与真实 Miniflux main 一致为 `published_at > ot`（严格大于，2026-10-31 源码对齐后自动化锁定，未实机验收） |
-| 「失败 ≠ 空集合」守卫 | 协议本身不规定（纯客户端安全策略） | GR unread（未读差分）/starred 按字段独立：成功侧照常对账，仅失败侧跳过（未读集合不完整时 read 差分整轮不落地）；unread/saved 任一失败 → `reconcile_ok = false`，整段对账跳过（`fever_pull.rs`） | GR：`greader_compat_e2e` 两侧失败隔离、`star_reconcile_truncation_e2e`、`unread_diff_e2e`；Fever：逻辑覆盖 + live 测试 |
-| 字段版本守卫（pending 保护升级，OPT-007） | 协议本身不规定（纯客户端防乒乓策略） | 字段粒度：`articles.read_version` / `star_version` 随本地读/藏写入**同事务**递增（推送成功清队后版本仍保留），pull 起点快照 + 当前 DB 版本 + 该字段 pending 三输入判定——快照不等或有 pending 即跳过该字段（另一字段不受牵连）；版本快照必须在任何 HTTP 之前抓取。两协议共享，见 §2 | `pull_field_versions_e2e`（屏障网络时序）；单元：`conflict_policy.rs` / `greader_pull.rs` / `fever_pull.rs` |
+四格方向常量仍集中在 `conflict_policy.rs`。2026-11-09 用户选择双向未读，取代此前GR read-wins及跨源read广播；旧选择曾避免历史未读成批返回，其历史理由保留在原决定。现在两协议按实际服务端接收状态对账，不承诺离线点击的全局真实时间顺序。源内相同内容保留每个GUID/远端ID实体，仅分组显示；四向用户动作对所有组成员同事务入队，每个成员受字段版本/pending与ACK读回保护。
 
-## 2. 冲突政策表（对账方向）
+GR 的 `kept-unread` 标签（`user/-/state/com.google/kept-unread`）目前没有专门的识别或消费逻辑。收到该标签时仍按上述普通 read/unread 规则处理，不将它解释为持续“保持未读”的单独意图；客户端尚未实现 sticky-unread 语义。
 
-**全部四格都是本客户端选择的冲突策略，不是协议必然要求**：
-Google Reader 规范没有规定「远端已读集合未命中时本地该怎样」，Fever 也没有规定
-「saved 集合未命中即取消收藏」。协议只提供集合端点；方向语义由本客户端选定、
-写成常量、被锁定测试锚住。特别是 **GR × 读状态的 read-wins 单向**
-是客户端为避免「历史条目成批翻回未读」而做的取舍，不是 Google Reader 的要求。
+共享保护：HTTP 前还捕获源 `sync_id/lifecycle_version`，精确内容合并、GR 未读差分及 GR/Fever 权威对账提交时须仍属同一 active 生命周期；退订再重订不会接受旧生命周期的响应。失败重建映射同时保留源和字段快照。本地读/藏写入在同一事务递增各自 `read_version`/`star_version`，pull 在任何 HTTP 前捕获字段版本；落地只接受版本未变且对应字段无 pending 的结果。清队不清版本，read 的冲突不阻止无冲突 star，反之亦然；失败后重建映射不能刷新原版本快照。GR 权威集合失败按 read/star 字段隔离，成功侧仍可对账；Fever unread/saved 任一失败跳过该段对账。
 
-政策格与代码常量一一对应（`conflict_policy.rs`；行级落地
-`apply_read_by_policy` / `apply_star_by_policy`——两者返回 `AppResult<usize>`，
-DB 写失败向上传播不再吞成 0）：
+## 条目身份、状态与确认
 
-| 政策格 | 常量 | 取值（客户端策略） | 理由（摘要） |
-|---|---|---|---|
-| GR × 读状态 | `GR_READ_DIRECTION` | 单向 read-wins（**客户端选择**） | GR 只能拿到「已读 id 集合」，没有「明确保持未读」信号；把「不在已读集合」解释成「刚取消已读」会成批翻回历史条目。远端显式标未读由 push 段承担 |
-| GR × 星标 | `GR_STAR_DIRECTION` | 双向权威（**客户端选择**） | 收藏低频强意图、取消是显式动作；截断集合的误判由失败守卫拦截（`star_reconcile_truncation_e2e`） |
-| Fever × 读状态 | `FEVER_READ_DIRECTION` | 双向权威（unread 集合，**客户端选择**） | Fever 拿不到已读集合，「未命中 = 已读」是唯一信号，不双向则两端读状态都无法收敛。前提：Miniflux 按 URL 去重 entry，Fever 视角无跨源副本；误判代价由失败守卫 + 字段版本守卫兜底 |
-| Fever × 星标 | `FEVER_STAR_DIRECTION` | 双向权威（**客户端选择**） | 同 GR × 星标（saved 集合） |
+| 契约 | 当前实现及边界 |
+| --- | --- |
+| ID 形态 | Fever JSON 数字或十进制数字字符串都按整数处理，拒绝负值/溢出/浮点，不经 f64；GR 无前缀数字按十进制，带 Google item tag 的尾段按 hex，不凭长度猜进制 |
+| 状态三态 | GR 缺失/null categories 是 Missing，显式 `[]` 是 false；Fever 缺字段 Missing、0/1 为明确值，其他数字拒绝。Missing 只更新可接受内容，不覆盖已有读藏 |
+| ACK 不等于已应用 | 请求成功外观之后按目标 ID 读回；重复/无关 ID 不补足缺项。主目标存在且目标态一致才确认；空/短/缺状态/非法回包保留 retry_wait/verification，不猜目标删除 |
+| 远端来源凭据 | 只有真实Content响应的origin建立`remote_origin_feed_id`；裸ID、已有正文和本机feed信息不构成证明。State与Push只消费当前有效凭据；article ID/feed或source身份/生命周期变化清证，发送前和ACK落库前再次核对，失效意图留队等待补证 |
+| 成员确认 | 每个持久成员只确认自己的远端ID；组内未确认字段保护同组，不能用一个成员成功代替全组。相同states轮已尝试queue ID不重复补推 |
+| 入库归属 | 精确远端条目身份优先，URL只缩小候选，未绑定本机早到条目还须同源、标题/附件与非空正文等价确证。有效远端 ID 且 feed 已绑定时，缺/空/空白 URL 仍可独立入库，空白链接不产生匹配键；新 GR 条目缺有效 origin 明确失败并保留游标，已绑定 ID 的稀疏回包继续兼容 |
+| 正文修订 | 同一精确远端 ID 可更新 RSS 正文/标题/媒体并拆分显示组，保留 readability 展示正文；AI 输入变化清旧产物，稀疏回包不清已有正文。图片来源显式rss/page：完整非空RSS可删除旧RSS图，独立page封面保留；正文图集、封面及附件实际输出变化共用媒体版本触发器。本地字段 pending/版本保护继续独立生效 |
+| 无 GUID 直连 | URL/title+date 仅是候选；非空持久键采用规范URL/无URL域与内容/标题/附件载荷，排除日期及原候选形式，有字节时复核。补日期/纠正日期后清正文重放仍恢复同一轻身份；不同正文独立。空正文使用规范URL/标题/原始选定源日期UTC（缺失显式None）与附件的完整观察，明确日期不同独立、同输入幂等，抓取/钳制时刻不进入身份；弱空→非空不转移旧状态，真实GUID/remote ID仍原行补全 |
+| 订阅身份 | 远端 feed ID 优先，仅未绑定本地行参与 URL 兜底。远端来源的同 ID 改 URL 保留本地 ID、文章、布局、分类与自定义标题；本地来源的已绑定源保留本地 URL。多重绑定、规范 URL 多候选或唯一 URL 冲突明确报错并保留原值，退订对账按远端 ID 判断。远端源重新出现恢复原稳定身份；本地退订墓碑仍阻止复活，同 ID 改 URL 不提前清旧 URL 墓碑。首连计数/候选/实际推送及 OPML 只含 active，保留来源索引仍含 retained |
 
-共享守卫（两协议一致，属政策的一部分）：
+有已证明远端身份的本地意图进入推送；缺身份或缺来源证明的条目按所属源区分 local_only 与 bindable_retry，不计作可推 waiting。超过 30 天转 expired_unconfirmed，保留队项和本地读藏。显式恢复用摘要 account_generation 复核当前账号、按文章当前目标建立新操作 ID；缺文章仍过期，恢复不等于确认。断开/换号放弃旧状态队列，本地直连读藏保留但不会自动迁入新账号。详见[队列生命周期](../.agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md)及[回补与恢复](../.agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md)。
 
-- **字段版本守卫 + 字段 pending（OPT-007）**：接受远端某个字段前要求
-  「pull 起点版本快照 == 当前 DB 版本 且 该字段无未推送 pending」——本地
-  写入在同事务递增对应版本，即使随后推送成功、队列已清，版本仍保留，陈旧
-  网络快照不能回滚用户刚确认的意图；read 与 star 两列彼此独立（本地只改读
-  时收藏照常收敛，反之亦然）。快照必须在**任何 HTTP 之前**抓取，失败后按
-  DB 重建映射时保持快照原值（不回刷）。消费点：两个 reconcile 循环与
-  `merge_pulled_entry` 的 `field_accepts_remote`（`conflict_policy.rs`）；
-  共享查询/快照 `db::sync_match_maps`。
-- **「失败 ≠ 空集合」**：权威集合拉取失败（网络/服务端错误、分页截断）时
-  整轮对账跳过，绝不把失败当成「远端什么都没有」做双向回写。
+冷绑定由Content每轮最多2000条轮转补证，已有证明的状态变化不新增origin请求。GR已有未读消失候选仍通过contents确认目标存在，该请求在State许可内，不能把“0新增origin补证”理解成所有状态读取都0正文HTTP。未完成订阅绑定或墓碑判断未知时，两通道都不发条目/权威集合请求。同轮Content可复用前置完整集合的ID用于发现，失败字段留待下一轮，后置State成功字段取新集合；旧结果不重放flags。Fever仍要求unread/saved成对成功，失败时已绑定flags连正文页也不得改写。
 
-方向锁定测试：`src-tauri/src/sync/greader_pull.rs` /
-`src-tauri/src/sync/fever_pull.rs` 的 `#[cfg(test)]`（政策格逐格锁死，含
-「政策被翻转必红」的判别力声明）；端到端锁定见 §6 测试索引。
+## 分页、回补与持久边界
 
-## 3. 同文副本读状态传播政策
+| 路径 | 获取预算 | 提交与恢复 |
+| --- | --- | --- |
+| GR 主列举 | reading-list + ot，单页 n=10000，最多200页；continuation 必须合法、未重复且严格前进 | 在列举开始前取起点墙钟候选。普通正文100 ID/块；逐语句落库，失败保留已提交内容并保留旧主游标，不能称整页回滚 |
+| GR 权威集合 | unread/starred 用完整集合，不依赖 ot；分页不完整、空itemRefs却有continuation都报协议错误 | Missing/损坏集合不是空集；成功字段可独立对账。格式正常但语义漏报无法结构检测 |
+| GR 缺身份/正文回补 | 每次 pull 每集合最多2000个唯一ID，100/请求、批内并发至多3；按数值ID与账号代际持久轮转 | 预算内请求和合并全部成功才存进度，缺feed/空正文也占预算防头部饥饿；进度或预过滤DB错终止。states发现订阅后最多重拉一次，同一states轮最多两份预算 |
+| Fever 增量 | since_id 向新，每页50；非空短页继续到空页 | 连续成功的增量页或从顶部连续历史页才推进 since；数据和该页游标同短事务，失败整页及内存统计/maps/seen回滚，先前成功页保留 |
+| Fever 历史 | max_id 向旧，页内最小ID为下页游标且严格减小；每轮最多200页 | Unknown/Pending/Complete，缺失Unknown、损坏明确报错；预算或失败保留Pending，自动light续取，full从顶部幂等重放。先存Pending才允许更大since；只有空页完成 |
+| Fever 点查 | with_ids 50 ID/批；i64::MAX 顶边界另点查 | 点查与Pending续取页不推进连续since，防跳过区间；初始或回滚后map读取失败即停止，不退空映射继续 |
 
-**保持现状：读状态向同文副本跨源传播（read 广播）。**
-来源：核心一致性重构路线第 6 条——owner 不在场时按保守默认处置（保持现状、
-显式记录为政策并同步进用户可见文档）；是否改为「布局隔离优先」由 owner 后续
-决定，同文建模分离落地策略开关时不预设结论。决策背景见
-[核心一致性重构路线](../.agents/notes/implemented/architecture/2026-10-05-核心一致性重构路线.md)。
+GR/Fever 协议响应使用16 MiB流式读取硬界，含解压后的大小。Fever完成时间写入只在无失败且历史完成后尝试，写入失败进入报告；GR游标在主列举、合并、绑定和权威回补全部成功后推进。绑定不完整或新条目缺归属时保留旧游标，下一轮可重试。
 
-现状语义（消费点 `push.rs` 的 `plan_push`）：
+认证重试累计首轮已提交变化与统计，只过滤已恢复的认证故障。首轮非认证 SQL/协议错误继续作为注明“当时状态”的历史事实保留；重试成功不把旧“待重试”文案冒充当前队项状态，重认证登录失败也不替换原报告。远端已接受但本地确认出队失败时明确报告，队项留待重试。
 
-- `read` 动作推送对象 = 绑定 entry + 全部已记账同文副本 entry
-  （双端动机：Read You 等客户端不去重，桌面读完一篇，手机上另一源的副本
-  也必须已读，否则同一篇在另一源里重新冒出未读）；
-- `unread` / `star` / `unstar` 只推绑定 entry 本身，不广播；
-- 全量合并路径：跨源副本记账（`add_article_dup_entry`）+ 远端已读即标读
-  （read-anywhere-wins）；跨源副本的**未读**永不落地（`merge_pulled_entry`
-  的 is_own 判定 + `merge_remote_status` 的 same-feed 判定）。
+GR/Fever会话的每次实际读取/写请求前复核账号代次；GR惰性action token返回后，POST前再次复核，文章edit-tag还核对本次计划的来源凭据。Fever保持逐ID mark和50ID分块ACK，51条为51次mark+2次读回，未发送ID不参与该次ACK域。断开后阻止新请求；已发写入或认证无法撤回，登录自动发现的既有候选流程不因此变成可取消。订阅outbox断开保留同账号意图，断开时不能发送，同身份重连可重绑代际后恢复；换身份按现有规则清账。原始反例与后继复审保留在验收入口所列证据中，不改写原失败。
 
-## 4. 增量游标语义
+## 固定服务端差异
 
-- **GR（时间游标）**：本轮游标候选在 id 列举**开始前**取（起点墙钟），
-  拉取零失败才写入 `last_sync_ts`。论证（起点候选 + 合并幂等 ⇒ 无漏无重）
-  见 `greader_pull.rs` 的注释；失败时保持旧游标、下一轮重拉同一窗口
-  （失败守卫族）。边界语义按「服务端 `>=` 过滤」设计；服务端若为严格 `>`，
-  同一秒内先列举后变更的条目会漏进下一轮（幂等合并下安全，但依赖后续
-  轮次/全量补齐）。
-- **Fever（条目 id 游标）**：`since_id` 升序分页；`last_sync_entry_id` 按
-  已合并条目 max 推进（只计已合并，本就安全）；时间戳游标并行维护仅服务
-  于「切换回 GR 后的首拉窗口」。
+- **Miniflux GR**：ot 为 `published_at > ot`，严格大于发布时间；不是状态修改时间。固定 [handler](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/googlereader/handler.go) 与 [query builder](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/storage/entry_query_builder.go)支持此结论。未读/收藏完整集合回补绕开ot，已读未收藏晚到旧文仍依赖full；起点墙钟不能消除同秒或旧发布时间边界。
+- **FreshRSS GR**：固定 [greader.php](https://github.com/FreshRSS/FreshRSS/blob/4e8a258b011aad190597d7953b7122fc43f4658f/p/api/greader.php) 将 MinDate/MinModifiedDate 用 OR 组合；[EntryDAO](https://github.com/FreshRSS/FreshRSS/blob/4e8a258b011aad190597d7953b7122fc43f4658f/app/Models/EntryDAO.php)为 `id >= ot×1000000 OR lastModified >= ot`。读藏改的是lastUserModified，所以不能把ot当状态变更流。认证形态夹具共享Miniflux时间模型，不证明FreshRSS时间列实测。
+- **Fever端点与短页**：Miniflux常用 `{base}/fever/`；FreshRSS `/api/fever.php` 或 `/p/api/fever.php`，api_key在POST表单而非query。两者max_id页为id DESC。FreshRSS在LIMIT50之后由EntryBeforeDisplay过滤，hook也作用with_ids；非空短页不等于结束，被hook排除的项可能整体不可见。
+- **Fever收藏版本差异**：固定Miniflux虽报告api_version3，saved/unsaved已是条件绝对赋值。历史toggle夹具是兼容反例，不能当所有v3事实；保守先探测仍有多设备并发窗口。
+- **订阅修改**：固定Miniflux [Update Feed API](https://miniflux.app/docs/api.html#endpoint-update-feed)和[storage/feed.go](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/storage/feed.go)允许同ID更改feed_url，并按原URL精确去重。因此客户端不能用折叠HTTP/HTTPS的URL覆盖两个已知ID。若部署总重定向到同HTTPS且服务端去重，不满足该碰撞前提。
+- **Bazqux前瞻**：未接入。既有官方材料警告不要依赖ot主列举、推荐xt未读流；它保留退订源历史，未读集合中消失但contents仍可取的条目会击穿“未读差分＋存在性”的假设。接入前需定义退订行排除/清理域，不直接承诺兼容。
 
-## 5. 服务端已知实现差异
+固定Fever集合端点没有continuation或已验证的状态增量参数，当前只能整段重拉。GR long-poll/ContinueWhatNewStream、Fever last_id_on_sync、订阅清单ETag/304在历史核对中缺少可采纳的固定版本依据，未实现为通用优化；这不等于未来版本永不存在。选择理由见[会话复用与有界并发](../.agents/notes/implemented/architecture/2026-11-01-同步会话复用与有界并发与聚焦同步.md)。
 
-以下均为外部源码查阅时点事实（见文首声明），每条附本仓侧的应对：
+## 鉴权、分类与订阅写回
 
-- **Miniflux（GR 兼容端点）**：把 `ot` 映射为 `published_at > ot`
-  （严格大于，过滤列是**发布时间**而非变更时间）。应对：起点候选 +
-  幂等合并不依赖过滤列；「晚到旧文章」风险见 §6-L1。
-- **FreshRSS（GR 兼容端点，ot 列事实）**：ot 匹配 `date ≥ ot OR lastModified ≥ ot`
-  （`EntryDAO.php`），而标读/收藏等状态变更只前移 `lastUserModified`——
-  **状态变更不进 ot 窗口**（§1「ot×状态流增量」证伪的一半）。应对：read 侧
-  不依赖 ot（未读差分以 ot=0 全集列举），条目窗口按 published 严格大于设计。
-- **Bazqux（GR 兼容端点，前瞻，未接入）**：主列举（`s=reading-list` + ot）
-  不兼容——官方 API 文档对 ot 给出 Warning 明言勿用，推荐的同步方式即 xt 流
-  （未读流）形态。应对：本仓未接入 Bazqux；接入前主列举须按未读差分同构改造
-  （未读差分已与该推荐形态同构），ot 窗口语义不能假设成立。接入前置改造
-  清单另含一条边界——**退订残留 × 未读差分误标**：Bazqux 保留退订源的历史
-  条目，退订后本地残留的未读绑定行，其远端条目退出未读集合但 contents 按
-  id 仍可取，「未读差分 + 存在性校验」会将其误标为已读（§6-L9 的具体形态）；
-  接入前必须先落退订后的本地行清理/排除口径（如差分域剔除已退订 feed 的
-  绑定行）。
-- **Miniflux（Fever 端点）**：`{base}/fever/`；按 URL 去重 entry（Fever
-  对账双向性的前提）；**items 端点支持 `max_id` 向更旧条目翻页（历史回溯，
-  重复直到返回空数组）**——来源 `internal/fever/handler.go` 约 227-267 行
-  （2026-10 源码查阅时点），**max_id 页为 `ORDER BY id DESC`**（与 FreshRSS
-  同序；夹具里的升序页只是泛化鲁棒性对照，不是 Miniflux 事实）。
-  应对：客户端已实现 `items_before` 循环（§1「历史回溯」行），游标取页内
-  最小 id，与页内顺序无关。
-- **FreshRSS（Fever 端点）**：`/api/fever.php`，新版布局移至
-  `/p/api/fever.php`；`api_key` **只读 POST form body**（`p/api/fever.php:172`），
-  放 query 里一律无效；条目 `id` 以 PHP numeric-string 序列化为 JSON **字符串**
-  （64 位十进制）；`max_id` 页为 `ORDER BY id DESC`；`getItems()` 先 `LIMIT 50`
-  再由 `EntryBeforeDisplay` 扩展 hook 过滤——**hook 对 items 全分支（含
-  with_ids）统一生效**，被丢弃条目对 Fever 整体不可见；**过滤后的非空短页
-  不代表没有后页**，客户端分页必须持续到空页才停。应对：端点解析按候选
-  404 顺延（`src-tauri/tests/fever_freshrss_e2e.rs`）；id 字符串形态由
-  `FeverId` 按十进制解析；短页与 hook-含-with_ids 语义由 `fever_compat_e2e`
-  的「LIMIT 后过滤」夹具锁定（「列表覆盖不到但按 id 可取」只作合成用例标注）。
-- **mock_greader（测试替身）**：ids 路由自 2026-10-31 起实现为
-  `published_at > ot`（严格大于，与真实 Miniflux 对齐，见
-  `tests/mock_greader.rs` 头注）。**测试锁定的是客户端语义（起点候选
-  + 幂等合并 + 失败守卫），不是任何特定服务端的过滤列**。
+| 维度 | 当前契约 |
+| --- | --- |
+| GR认证 | 请求统一带 `Authorization: GoogleLogin auth=<auth>`；POST用action token作为T。Miniflux token可等于auth，FreshRSS可为独立字符串；首写OnceCell缓存 |
+| token失败 | 仅404允许回退登录auth；401/403/5xx/空体/网络错明确失败，不靠URL猜服务端 |
+| 分类读取 | category_name单点识别type folder或缺type且label前缀ID；label优先，缺省取`user/.../label/`后缀，中文/斜杠保留；state tag和type tag不成目录 |
+| 分类写入 | 裸目标名始终前置一次`user/-/label/`后用form编码，名字本身含前缀字面量不误判；移动需处理旧成员关系，不把追加label当移动 |
+| GR普通写响应 | HTTP成功且trim后为OK才视作成功外观；FAIL/空体/其他正文脱敏报协议错，不回显凭据或服务端正文。状态写还需目标读回 |
+| 订阅能力 | GR支持客户端订阅/分类写回；Fever相应操作仅本地。客户端当前分类改名/删除仍按成员操作表达，不宣称远端空分类已改；固定Miniflux也存在rename-tag/disable-tag，但其删除保留订阅语义不同，不能直接替换当前删除产品行为 |
+| 退订例外 | 既有400/404容忍可能把真实删除失败当目标不存在并清队；墓碑仍由pull确认回收，本机不复活但远端可残留。此已接受上限与状态ACK读回是不同机制 |
 
-**版本验证声明（复述，见文首）**：以上「协议/服务端支持」事实来自源码查阅
-时点（2026-10），**除 mock_greader 测试替身（自动化锁定）外，Miniflux /
-FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「已验收版本清单」。
+能力声明由生产能力矩阵和持久订阅回执承担，详见[能力矩阵与持久回执](../.agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md)、[订阅执行器](../.agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)。旧配置镜像只改本机及非敏感连接建议的历史边界保留在原Note；新纯本地资料库及便携包不携活动账号或连接建议，不混旧凭据激活新地址。
 
-## 6. 已知限制与测试索引
+当前组合已退役 Gist、GitHub 同步授权及手动配置快照前后端；GitHub Releases 更新检查保留。纯本地 WebDAV 使用持续状态/正文同步入口，与 RSS 服务互斥；换机使用便携 v4 `.flxb` 预览与确认恢复，凭据和 AI 产物不进入同步/便携数据。当前本地库使用独立新格式，旧库保留、不迁移；恢复提交与界面回读分别报告，详见[备份说明](backup.md)。真实服务、原生选择器和容量证据仍以当次验收为准，历史配置快照往返不能替代。
 
-已知限制：
+作为该入口退役前的基础批事实，手动配置快照曾在 `40389fa` 提升至 schema3：组 `summary_mode/translate_mode` 必须显式为 `inherit/on/off`，与两个旧 bool 独立保存；下载、预览、应用先校验真实版本，schema1/2 明确拒绝。模式沿导出、预览、新建/已有组应用与双签名闭合，变化使旧预览失效。稳定身份优先、缺身份时保守按名匹配的理由与 FND 修复证据仍在[配置快照决定](../.agents/notes/implemented/architecture/2026-10-15-配置快照镜像应用.md)，不把旧格式或 schema3 手动快照视作便携 v4。
 
-- **L1 游标变更时间假设**：增量窗口不能单独保证「晚到的旧文章」被拉到
-  ——真实 Miniflux 把时间过滤应用于发布时间，一篇发布时间早于游标、但
-  晚进入订阅源的文章不会命中增量窗口。兜底：手动/首连的全量对账（full）+
-  失败守卫保证失败窗口重拉；彻底解法待服务端 × 版本兼容实测。
-  **收窄（B2 回补落地；2026-11-01 随未读差分调整）**：starred 权威集合成员
-  不再依赖窗口——light 对账前对集合中「尚无本地行」的 id 逐块
-  `item_contents` 回补并走既有合并链绑定（100 条/请求、每集合每轮预算 2000 条；
-  单请求失败该侧跳过对账、游标保留）；远端「新变已读」经未读差分收敛，同样
-  不依赖窗口。**残余场景**：未绑定的未读条目（不进差分域，未读集合仅服务
-  差分、不做回补）与远端**已读**且未绑定的条目（read 侧回补随 read 集合
-  退场）——只能等手动全量 / 增量窗口收敛。
-- **L2 Fever 首同步深度（已解决；R1/R2/R3 补齐恢复、事务与错误传播语义）**：
-  Fever 协议/当前 Miniflux/FreshRSS 支持 `items&max_id` 向更旧条目翻页；客户端
-  已实现历史回溯（OPT-005）：首连/full 同步循环取尽保留历史（含已读非收藏），
-  增量走 `since_id`。历史状态为显式三态（Unknown/Pending/Complete；缺失/损坏
-  不当完成），每轮至多 200 页（1 万条），到达/失败保留 Pending=可重拉游标，
-  下一次同步（含**自动 light**）自动续取，只有走到空页才 Complete——不是永久
-  上限，也不是手动 full 才能补。每页数据与该页游标同事务（失败整页回滚、内存
-  统计/maps/seen 回滚）；**R3：map 读取失败（初次或页回滚后重建）即终止本轮、
-  保留 Pending/已确认 since，退空映射继续的伪确认路径已封死**。`max_id` 严格
-  `<` 边界外的 `i64::MAX` 条目由 `with_ids(MAX)` 顶覆盖。剩余边界是**服务端
-  自身保留策略**（例如服务端清理过旧条目），客户端无法凭空补出服务端已删除的
-  条目。实现与锁定：`src-tauri/src/fever.rs` 的 `items_before` 与 `chunk()`
-  读取硬界、`src-tauri/src/sync/fever_pull.rs` 的页事务三段式与 map 错误传播、
-  `src-tauri/src/db/sync_map.rs` 的三态 helpers、
-  `src-tauri/tests/fever_compat_e2e.rs`。
-- **L3 GR 单向的对称缺口**：远端「显式标未读」不经 GR 轻量对账回流；
-  该方向变更只能等全量同步（同源合并路径的 `accept_unread`）或由本端
-  push 覆盖。跨源副本的未读在任何路径都不落地（§3）。
-- **L4 kept-unread 不识别**：GR `kept-unread` 标签（`user/-/state/com.google/kept-unread`）
-  无识别/消费方（OPT-017F 已删除仅剩定义的常量），「保持未读」意图按普通未读处理。
-- **L5 Fever 截断不可检测**：unread/saved 集合是单请求全集响应，无
-  continuation 可校验；GR 侧的截断检测纪律在 Fever 协议上无对应
-  机制（依赖服务端响应完整性）。
-- **L6 GR 缺字段未失败关闭（已解决；2026-10-20 收敛；2026-11-01 补口）**：GR 的
-  `subscription/list`、`tag/list`、`stream/items/ids`、`item_contents` 返回
-  200 但缺 `subscriptions` / `tags` / `itemRefs` / `items` 时，现均映射为
-  `protocol`，不得当空集合；`item_contents` 非空请求返回条数少于请求数
-  （含 0）同样判 `protocol`（服务端截断/异常不得伪装成已同步），按块失败
-  保留游标；非法 `itemRefs.id` 与非法 continuation 同样失败关闭并保留游标。
-  continuation 另外记录已见值、要求严格前进并限制 200 页；重复数字不会无限
-  分页。订阅绑定失败会写账号级持久 marker，独立 states 命令在首个 HTTP 前
-  即阻断条目/权威集合请求与游标推进。marker 只在订阅遍历完整、所有远端订阅
-  （含已有 `origin='local'` 匹配源）都完成 remote_id 绑定时清除；目录失败、
-  feed/分类墓碑未知、插入失败和提前 break/continue 均保持 incomplete。
-  例外仅为 known tombstone（`feed_url_tombstoned == Ok(true)`）的预期 continue：
-  该源是用户本机主动删除，不要求重新绑定。
-  新 feed 的 insert+bind 使用同一事务，绑定失败不留 remote 孤儿；历史
-  `origin='remote'` 未绑定行仅当当前远端 URL 集已不含它时清理，local 源不受影响。
-  itemRefs 为空但 continuation 合法也是 protocol 结构错误，主列表/read/starred
-  都保留游标。
-  HTTP 200 的 JSON 解码/schema 错误也统一为 `protocol`（传输/读体失败仍是
-  `network`）。read/starred 权威集合改为字段级独立对账：单侧失败只跳过该侧；
-  主列表/正文失败不再连带跳过另一成功集合。严格夹具见 `greader_compat_e2e`。
-- **L7 GR 权威集合回补（已落地；B2；2026-11-01 随未读差分收窄为 starred）**：light 对账前，starred 权威集合
-  中「不在 `mf_id_to_article` 映射」的 id 逐块拉 `stream/items/contents`
-  （100 条/请求，每集合每轮预算 2000 条，到达预算记 report、对账照常、剩余
-  下轮续补），走 merge_pulled_entry 既有四分支匹配链自然绑定并应用状态；
-  冲突方向仍只消费 `conflict_policy` 单点。单请求/合并失败 = 该侧本轮跳过
-  对账 + 游标保留（fail-closed，对齐主列举分块守卫）；URL 归一化不匹配的行
-  走 ③ 分支独立 upsert，不误绑/误标既有行。read 侧回补随 read 集合退场；
-  未读集合仅服务差分、不做回补（未绑定未读条目不新增 light 绑定通道）。
-  残余场景见 L1 收窄段。
-- **L8 Fever `as=unread` 为实现扩展（2026-11-01 登记）**：官方 Fever 规范的
-  `mark` 写操作只定义 `as=read|saved|unsaved`，「恢复未读」的原语义是
-  `unread_recently_read=1` 配合已读集合；本客户端使用的 `mark=item&as=unread`
-  是 FreshRSS 与 Miniflux 各自实现的扩展（两者均支持，已核对 FreshRSS
-  Fever API 文档与 Miniflux `internal/fever/handler.go`）。§1「取消标读
-  （推送）」行按此口径理解；若未来接入仅按原规范实现的 Fever 服务端，
-  该推送路径需按 `unread_recently_read` 收敛。
-- **L9 未读集合「语义级截断/空集谎言」不可检测（2026-11-01 登记）**：wire 层
-  截断（continuation 未耗尽 / 请求失败）由完整性守卫结构性拦截；但一份
-  **格式完好而语义不完整**的未读集合（服务端缺陷把未读条目漏出 `xt=read`
-  流，或 §5 Bazqux 的退订残留形态）客户端无法识别——这些条目会经「未读差分
-  + contents 存在性校验（条目仍存在）」被误标为已读。与旧 read 全量对账的
-  失败方向相反：旧形态缺条 = 漏标（无害），差分形态缺条 = 误标。缓解：xt=
-  流是三家服务端官方支持的同步原语（Bazqux 官方推荐形态）；真实服务端实机
-  验收未完成前，该残余风险不可关闭。
+## 纯本地WebDAV候选
 
-测试索引（对账方向的锁定分层）：
+WebDAV与活动RSS账号互斥。本地源按创建归属/原本地历史进入同步，远端RSS镜像不进入其journal；分类按创建origin及本地源成员闭包归属，remote_id不作身份推断。普通设置、源/组布局及AI行为开关同步；凭据、AI服务配置/产物不传。read/star独立按操作创建时固定的Lamport/actor/seq合并，离线冲突不承诺真实点击或上传先后；重试不生成新操作。
 
-- 政策格锁定（单元）：`greader_pull.rs` / `fever_pull.rs` 的
-  `#[cfg(test)]`——GR 单向不复活、GR/Fever 星标双向、Fever 双向复活、
-  双侧字段 pending + 字段版本守卫（含「本地碰过并改回原值也不放行旧快照」
-  与两字段彼此独立）；`conflict_policy.rs` 政策格取值锚。
-- 端到端（既有）：`sync_phases_e2e.rs`（远端陈旧已读经轻量对账收敛；
-  pending 守卫）、`dual_client_e2e.rs`（跨源副本未读不复活；副本广播；
-  pending 防乒乓）、`star_reconcile_truncation_e2e.rs`（GR starred 截断
-  → 对账中止，失败守卫）、`pull_cursor_e2e.rs`（分块/id 列举失败游标
-  不推进）、`dedup_sync_e2e.rs`（同源判定矩阵/墓碑）。
-- 端到端（未读差分等价性，2026-11-01）：`unread_diff_e2e.rs`（远端新标
-  已读 → 本地落已读；本地已读幂等 0 行；远端已删除的未读条目不误标；
-  未读集合请求失败整轮跳过差分、恢复后收敛）。
-- 端到端（OPT-007 字段版本与拉取可靠性，屏障时序）：`pull_field_versions_e2e.rs`
-  （请求在途本地 star + 推送确认清队 → 旧远端 unstar 快照不回滚；快照早于
-  最早 HTTP；字段彼此独立；新入库后同轮后续保护；GR map 构建失败不空映射
-  假成功、批失败重建 maps 后重拉不跳过）。
-- 端到端（Fever 严格夹具，OPT-005）：`fever_compat_e2e.rs`（字符串长 id 十进制
-  往返、JSON 数字形态、125 篇历史全可达/幂等、增量只走 `since_id`、分页失败可
-  重试、游标不前进快速失败、重叠页去重、with_ids 补齐、缺字段/非法 id/非法 CSV
-  显式错误、mark 逐条单 id）。
-- 端到端（Fever R1 恢复语义）：`fever_compat_e2e.rs`（LIMIT 后 hook 过滤的非空
-  短页继续翻页、full 第二页失败→自动 light 续取、增量失败游标不被 with_ids
-  大 id 推动、`i64::MAX` 已读非收藏顶覆盖、200 页预算→下轮 light 续取
-  10050 条、17 MiB 响应被 16 MiB 界限拒绝）。
-- 端到端（Fever R2 事务/状态/硬界）：`fever_compat_e2e.rs`（真 DB trigger：
-  状态键写失败→不推 since、light 重试成功；页内 remote-100 INSERT 失败→整页
-  回滚+统计回滚+Pending 保留→下轮补回且不提前 Complete；旧库 since 无状态→
-  自动补旧历史；损坏状态报错不改游标；chunked 无长度与 brotli 解压膨胀都被
-  16 MiB 读取硬界拒绝；hook 含 with_ids；合成列表遗漏单列标注）。
-- 端到端（Fever R3 map 错误传播）：`fever_compat_e2e.rs`（真实列类型错误两反例：
-  ① 初始 `sync_match_maps` 读取失败（url_norm=BLOB）→ 立即终止本轮，0 条目、
-  状态保持 Pending、since/ts 不推进、无 items/with_ids 请求；② 页失败后重建
-  读取失败（页 1 成功提交的 trigger 污染列）→ 终止整轮，since 停在连续成功
-  范围 100、状态保持 Pending、无顶部回溯伪确认）。
-- 端到端（live，`#[ignore]`，CI 外人工执行）：`fever_sync_live_e2e.rs`、
-  `fever_live_e2e.rs`（Fever 真实后端的集合/对账往返）。
+清单和状态/正文对象不可变，写后读取确认精确字节，不能当作全球winner。旧LOCK唯一下一代方案已被真实WsgiDAV过期延迟请求反例否定。接收缺块/错误不是空库，状态/正文分别重试；未读或收藏正文未补齐显示pending。远端物理DELETE当前关闭：替换对象精确ACK和已知actor覆盖仍不能证明未知/离线读取者已无保护义务。未确认正文继续保留，不能以新设备缺正文作为允许回收的理由；远端空间治理仍待完成。
 
-## 7. GReader 鉴权与分类契约（OPT-004 补记）
+候选正文目录分页、内容唯一分块，便携v4从同一内容身份导出流式包。新库恢复新actor和主键高水位，断开凭据与旧队列。详细协议职责、真实备选和存储边界见[资料库决定](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)，独立WAL连接的事务前提见[写预留决定](../.agents/notes/implemented/architecture/2026-11-09-多连接SQLite写预留与原子设置.md)。
 
-本节超出主线「状态同步对账」范围（订阅层与认证层），为回溯便利列入本文件。
-三列口径同 §1：协议/服务端支持来自**固定上游源码**（FreshRSS `219eaf58` 的
-`p/api/greader.php`、Miniflux `internal/googlereader/middleware.go`；时点 2026-10-08，
-见 `tmp/optimization-20261008/upstream/`）；实现列是 FluxReader 代码真实行为；
-验证列只覆盖**测试替身**，不代表真实服务端实测。
+早期真实WsgiDAV生产入口测试仅覆盖当时版本，不能背书之后的正文目录/原子设置/WAL改动。后继状态候选与小批量投影、B3请求生命周期和三处实测热点已有对应限定证据；旧50k锁失败与约985MiB峰值仍保留，完整规模、HTTP SLO和原生窗口尚未验收。当前版本、结果与剩余条件集中在验收入口，不能把单次129固定输入后测或下述GR/Fever证据外推为WebDAV整体通过。
 
-| 维度 | 协议/服务端支持 | 本客户端已实现 | 验证（夹具，非真实服务端） |
-|---|---|---|---|
-| 请求认证 | Miniflux：GET 读 `Authorization: GoogleLogin auth=<auth>`，POST **只读**表单 `T`；FreshRSS：所有请求读 `Authorization`（设用户上下文），自身忽略 `T` 的宽容分支除外 | 所有请求（GET/POST）统一携带 Authorization；POST 表单 `T` 用 action token | 两个严格夹具：Miniflux 形态 POST 只认 `T=auth`；FreshRSS 形态缺 Authorization 一律 401 |
-| action token | 两端都有 `/reader/api/0/token`：Miniflux 返回登录 auth 本身；FreshRSS 返回 `str_pad(sha1(salt+user+apiPasswordHash), 57, 'Z')`（与 auth 不同） | 首写前 `GET /token`，`OnceCell` 单次缓存；Miniflux/FreshRSS 两种返回值都接受 | `greader_compat_e2e.rs`：token 仅取一次；FreshRSS 写请求 `T` 必须等于 `/token` 返回的另一字符串 |
-| token 失败边界 | 协议未规定 | **仅 404 回退**用登录 auth 当 `T`；401/403/5xx/空体/网络失败如实报错，不回退不猜 URL | 夹具注入 401/500/空体/404/拒连，逐项锁定「报错 vs 回退」方向 |
-| 分类识别 | Miniflux tag `{id,label,type:"folder"}`；FreshRSS tag 只有 `{id,type:"folder"}`（无 label）、subscription category 只有 `{id,label}`（无 type） | `greader::category_name` 单点：type folder 或「type 缺失 + label 前缀 id」；label 优先，缺则取 `user/.../label/` 后缀（中文/斜杠原样保留）；state tag 与 `type:"tag"` 一律不成目录 | 严格夹具经 `sync::feeds_phase` 验证：FreshRSS 形态目录/归属正确、state tag 不污染；Miniflux 形态回归不变 |
-| 写操作响应体 | 成功约定是文本 `OK`（FreshRSS `edit-tag`/`subscription/edit` 均 `exit('OK')`；Miniflux 同形态）；协议未规定错误体，实现可能回 `FAIL` | `post_form_text` 要求 200 **且** trim 后 == `OK`；FAIL/空体/其它正文 → 脱敏协议错误（不回显响应体），调用方不得按成功 prune 队列 | 严格夹具注入 `200+FAIL` / `200+空体`：直接客户端报错不假成功；`sync::push_states_now` 队列保留；` OK \n` 容忍、清除注入后成功路径仍 prune |
-| 写分类 stream id | `subscription/edit` 的 `a` 是 label stream id（`user/-/label/<名>` / `user/<user>/label/<名>`）；FreshRSS 按前缀解析，裸名解析为空 → 落默认分类 | `edit_subscription` 的 `dest_label`（用户裸目录名）无条件前置一次为 `user/-/label/<名>` 再交 `reqwest.form` 编码；名字本身含前缀字面量不误判 | FreshRSS/Miniflux 严格夹具**实际移动分类**并可断言（中文/斜杠名、字面量前缀名）；既有 `sync_gap_repro_e2e` 断言更新为真实 wire 形态（未减断言） |
+<a id="live-deployments"></a>
+## 真实服务端的限定实测
 
-已知限制：真实 Miniflux/FreshRSS 部署版本未实机验收；夹具只锁定客户端契约与
-固定源码的实现形态（`mock_greader.rs` 补 `/token` 路由并按真实 wire 解析 `a`，
-不校验认证；认证严格校验在 `greader_compat_e2e.rs` 的独立夹具）。
+2026-11-10/11后继：5dc3客户端已在同版本FreshRSS/Miniflux重新运行基础各7项并通过，另有8个本机先抓绑定/双库反向状态场景获得限定独审。首轮完整12因RSS-S1防覆盖证据缺口不通过的历史保留；11-11原审复核新4个slow的原状态摘要、过程trace与完整恢复后关闭RSS-S1，原8个binding/dual加新4个slow共12场景限定通过，不累计为16。当前localSync组合改变共同事务/schema，不能沿用这些基线结果宣布新组合已验证。精确绑定、原失败和后继进度集中在[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md#2026-11-09-已确认重构路线与退出条件)。
+
+2026-11-07，客户端从 `dev@1bb698c` 加修复后的固定 `snapshot-cd` 重编，运行既有生产 live 测试，原测试未改。每套服务使用2源120篇合成文章，GR 3项为认证/订阅、ID/正文、收藏写回恢复；Fever 4项为认证/订阅、未读/收藏/条目、读藏写回恢复及空临时库的完整同步。完整同步实测为 Fever 引擎的2源120篇落库，不外推为已跑 GR 引擎完整同步。
+
+| 服务端与运行环境 | 实际输入地址 | 已通过覆盖 | 仍未通过或未覆盖 |
+| --- | --- | --- | --- |
+| Miniflux2.3.5，固定 faecfa2，Go1.26构建、PostgreSQL17.6 | 根地址 `http://127.0.0.1:1922` | GR 3项、Fever 4项，各项恰1 passed且exit0；完整未读/收藏ID集合前后相同 | 其他版本、部署反代、多设备并发与全部异常输入未逐一覆盖 |
+| FreshRSS1.30.4，PHP8.4.27内置服务器 | GR `http://127.0.0.1:13555/api/greader.php`；Fever `http://127.0.0.1:13555/api/fever.php` | GR 3项、Fever 4项，各项恰1 passed且exit0；完整未读/收藏ID集合前后相同 | 本配置的根地址自动发现失败，显式路径通过不关闭该失败；其他Web服务器、反代和版本未逐一覆盖 |
+
+FreshRSS 首次输入根地址时，未知 `/accounts/ClientLogin` 被 PHP 内置服务器交给上级入口，302后返回200 HTML，客户端未得到认证体而失败；该次未改变服务端状态。明确 API 路径是现有产品支持的输入，没有修改客户端或测试来绕过断言。此结果限定当前服务器路由形态，不推导所有 FreshRSS 根地址都失败。
+
+原始每项结果、服务端完整ID快照和148文件客户端绑定在本机 `tmp/repair-2026-11-06/environment/evidence/live-cd-final-summary.json` 及其所列目录；当时活动工作区只多出已记录的 scheduler 注释变化。上述为真实生产客户端的定向运行证据，未单独作独立审计，也不替代安装版/WebView2、真实用户库或最终集成门禁。
+
+## 验证入口与边界
+
+| 检查对象 | 已有可执行覆盖 |
+| --- | --- |
+| 源生命周期/修订 | source_lifecycle_revision_e2e：在途退订与重订、GR 权威屏障、源复活/墓碑、首连和 OPML、远端正文修订及全文/AI/pending；GR/Fever 单元另覆盖权威集合和重建快照 |
+| 政策方向/字段版本 | conflict_policy单元、pull_field_versions_e2e、dual_client_e2e、unread_diff_e2e；屏障覆盖请求后本地写、清队后旧快照、字段独立性 |
+| 集合完整/游标 | greader_compat_e2e、star_reconcile_truncation_e2e、pull_cursor_e2e、pull_window_e2e；缺字段/重复continuation/短contents/请求ID覆盖 |
+| Fever历史与恢复 | fever_compat_e2e：125条、非空短页、Unknown/Pending、200页续取、i64::MAX、页写失败/重建map失败、流式收体与字符串ID |
+| ACK和本地意图 | sync_ack_verification_e2e、sync_gap_repro_e2e、expired recovery、sync-recovery组件；未知不判删除、精确身份逐项结算、源内组部分ACK保护、过期重建与账号代次 |
+| 本轮同步正确性 | sync_correctness_e2e；断开逐请求、无 URL、新条目缺归属、重认证保变化/故障、出队与时间持久化失败、远端 ID 优先及冲突保全。独立反例与最终 setter 的固定版本证据见验收入口 |
+| 鉴权/分类 | greader_compat_e2e的两种严格认证形态、feed_edit与sync_gap分类移动；普通mock_greader不验证真实认证 |
+| 真实部署 | greader_live_e2e、fever_live_e2e、fever_sync_live_e2e的原7个ignored用例已在上表两套服务端逐项运行；仅覆盖约定合成账号/读写恢复范围，不由CI默认测试推定 |
+
+测试名是覆盖入口，不是当前全部通过的结论。精确提交的门禁状态与最近证伪结果由[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)集中记录；未解决行为留在roadmap，避免矩阵与每篇Note复制轮次进度。

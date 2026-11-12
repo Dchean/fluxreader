@@ -6,7 +6,7 @@ export const TAB_META: { id: string; title: string; subtitle: string; icon: () =
   { id: 'reading', title: '阅读', subtitle: '正文字体、字号、版面、打开方式', icon: Icons.article },
   { id: 'feeds', title: '订阅', subtitle: '分类管理、内容布局绑定、AI规则', icon: Icons.rss },
   { id: 'ai', title: 'AI服务', subtitle: '模型端点配置、连通性探测、自定义提示词', icon: Icons.spark },
-  { id: 'sync', title: '同步', subtitle: '后端连接、双向增量同步', icon: Icons.refresh },
+  { id: 'sync', title: '同步', subtitle: '同步服务连接、双向增量同步', icon: Icons.refresh },
   { id: 'shortcuts', title: '快捷键', subtitle: '全键盘导航流转、全局指令', icon: Icons.keyboard },
   { id: 'about', title: '关于', subtitle: '客户端版本信息、底层架构', icon: Icons.info },
 ];

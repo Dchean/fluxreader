@@ -1,31 +1,114 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCenterDwellAi } from './useAutomaticAi';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { scrollAwayRange, isUserScrollEvent, PROGRAMMATIC_SCROLL_SUPPRESS_MS } from './scrollAwayRead';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { elementScroll, useVirtualizer, type ReactVirtualizer, type VirtualItem } from '@tanstack/react-virtual';
 import { useShallow } from 'zustand/react/shallow';
 import {
   useAppStore,
+  type AppState,
   LAYOUT_NAMES,
   VIEW_NAMES,
   podcastClickAction,
   autoAiBlockOpen,
   entryNeedsHydration,
   selectAiProductState,
+  selectAiCacheStatus,
+  selectAiStatusInput,
   selectArticleBody,
   selectVisibleEntries,
   selectFeedConfig,
+  resolveFeedLayout,
 } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime, formatDuration } from '../lib/format';
-import { openExternal, handleArticleLinkClick } from '../lib/external';
-import { proxyImageUrl } from '../lib/imageProxy';
-import { onCoverError } from '../lib/coverImage';
+import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
+import { useImageResource } from './useImageResource';
+import { canProxyImages, needsImageProxy } from '../lib/imageProxy';
+import { galleryMediaKey } from '../lib/galleryMedia';
 import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
 import { refillDecision } from './timelineRefill';
-import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from './timelineAnchor';
-import { GALLERY_COLUMN_GAP, GALLERY_OVERSCAN, estimateGalleryCardHeight, galleryItemPlacement, galleryTabbableIndex, resolveGalleryLaneCount } from './GalleryLayout';
+import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from '../lib/readingPosition';
+import { GALLERY_COLUMN_GAP, GALLERY_OVERSCAN, estimateGalleryCardHeight, galleryItemPlacement, galleryTabbableIndex, galleryVisibleIndexes, galleryWindowIndexes, resolveGalleryLaneCount } from './GalleryLayout';
+import { HydrateFailure } from './HydrateFailure';
+import { anyOverlayOpen } from './shortcutYield';
+
+/* 折叠态外高是不变量，不是估算值：正文区固定 150px，整卡固定 310px。正文是否
+   含图、列表行有没有 imageUrl、摘要长短都不参与高度计算。展开或显示译文时
+   才退出固定外高，按真实内容增长。虚拟估算必须与这里逐字同源。 */
+const SOCIAL_COLLAPSED_BODY_HEIGHT = 150;
+const SOCIAL_COLLAPSED_CARD_HEIGHT = 310;
+/* .timeline-virtual-item 的固定行间距（padding-bottom: 12px）。虚拟估算必须用
+   整行外高，避免首帧总高按 310 算、实测按 322 算而出现滚动高差。 */
+const SOCIAL_COLLAPSED_ROW_HEIGHT = SOCIAL_COLLAPSED_CARD_HEIGHT + 12;
+
+type FocusedCard = { id: string; index: number; filterKey: string };
+
+/* 阅读上下文唯一标识（布局|视图|订阅|筛选|排序）。滚动归零、删除焦点恢复与
+   focusCardAt 任务都以它判定「是不是同一个列表」；组件内的 filterKey 与焦点
+   任务 isCurrent 的实时校验共用同一派生口径。 */
+type ReadingContextState = Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'activeFeedFilter' | 'timelineFilter' | 'timelineSort'>;
+const filterKeyOf = (s: ReadingContextState) => `${s.activeContentLayout}|${s.activeViewFilter}|${s.activeFeedFilter}|${s.timelineFilter}|${s.timelineSort}`;
+
+/** 播放器激活时，卡片上的 Space 让给 App 的全局播放切换；卡内真实交互控件
+ *  仍由 App 的 isInteractiveSpaceTarget 让路清单排除。 */
+function activePlayerOwnsSpace(e: React.KeyboardEvent): boolean {
+  return e.key === ' ' && useAppStore.getState().player.isActive;
+}
+
+/** 从卡内任意焦点节点回找卡片身份（不含阅读上下文，由捕获方补 filterKey）；
+   画廊的 data-card-index 在 img/占位子节点上。 */
+function focusedCardDescriptor(target: Element | null): Omit<FocusedCard, 'filterKey'> | null {
+  const card = target?.closest('.article-card, .social-card, .podcast-card, .notif-card, .gallery-card') as HTMLElement | null;
+  if (!card?.dataset.id) return null;
+  const indexNode = card.matches('[data-card-index]')
+    ? card
+    : card.querySelector<HTMLElement>('[data-card-index]');
+  const index = Number(indexNode?.dataset.cardIndex);
+  if (!Number.isInteger(index)) return null;
+  return { id: card.dataset.id, index };
+}
+
+/* 行虚拟项容器。transform 不进 React 快照（写入者约定见 syncRowGeometryNow），
+   但 dataset（data-virtual-start/size）随 commit 落地；若坐标直写只依赖虚拟器
+   onChange 与父级 layout effect 兜底，慢调度下会出现「快照已新、transform 仍旧
+   值」的跨帧窗口（CI run 5c9f8b5 动作帧：目标已变高、已挂载邻居仍在折叠起点）。
+   这里在行项自身 layout effect 中按当次渲染的 vi.start 提交内直写，使任何携带
+   新 dataset 的 commit 在同一提交、paint 前把 transform 一并写齐；挂载当帧同样
+   由本 effect 与 measureRowElement 落位。Notify/父级 layout effect 仍负责
+   commit 间隙（RO 驱动的 resizeItem）与全窗口兜底。
+   Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+function TimelineRowItem({ vi, item, measureRef, children }: {
+  vi: VirtualItem;
+  item: ArticleEntry;
+  measureRef: (node: HTMLDivElement | null) => void;
+  children: ReactNode;
+}) {
+  const elementRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (element) element.style.transform = `translateY(${vi.start}px)`;
+  }, [vi.start]);
+  const setNode = useCallback((node: HTMLDivElement | null) => {
+    elementRef.current = node;
+    measureRef(node);
+  }, [measureRef]);
+  return (
+    <div
+      data-index={vi.index}
+      data-card-id={item.id}
+      data-virtual-start={vi.start}
+      data-virtual-size={vi.size}
+      ref={setNode}
+      className="timeline-virtual-item"
+      style={{ position: 'absolute', top: 0, left: 0, width: '100%' }}
+    >
+      {children}
+    </div>
+  );
+}
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -35,7 +118,7 @@ import { GALLERY_COLUMN_GAP, GALLERY_OVERSCAN, estimateGalleryCardHeight, galler
      避免内容瞬间替换造成的视觉跳动（"闪一下"）。
    - 列表切换后滚动位置归零（新列表从顶部阅读）。
      TASK-115 例外：切布局/视图/范围后**切回**且缓存命中时，按 per-filterKey
-     锚存档恢复到离开时的位置（返回位置统一规则，见 timelineAnchor.ts
+     锚存档恢复到离开时的位置（返回位置统一规则，见 readingPosition.ts
      头注规则表）；其余切换仍归零。
 
    展示口径：源名称/分类由 feedId 经解析表派生（不冗余存储）；
@@ -68,18 +151,40 @@ export function Timeline() {
      与既有 J/K 键盘流同一语义，不新增第二套导航。
      focusIndex 跟随 activeArticleId（搜索/命令面板/J-K 选中后焦点同步）。 */
   const [focusIndex, setFocusIndex] = useState(0);
+  const [liveMessage, setLiveMessage] = useState('');
+  const focusedCardRef = useRef<FocusedCard | null>(null);
+  const previousItemsRef = useRef(items);
+  const lastSyncedSelectionRef = useRef<string | null>(null);
   /* TASK-115②：最后选中的文章 id（关闭信号消费侧的归还目标）。activeArticleId
      跟随 effect 顺带记账——关闭阅读器的时刻它必然持有阅读器正在显示的文章
      （关闭后置 null 的分支不更新，ref 保留关闭前的值）。选型理由见
-     timelineAnchor.ts 头注 X2 节（store 不反向依赖 components 层）。 */
+     readingPosition.ts 头注 X2 节（store 不反向依赖 components 层）。 */
   const lastActiveArticleIdRef = useRef<string | null>(null);
+  const focusTaskRef = useRef<{ frame?: number; timer?: ReturnType<typeof setTimeout> }>({});
+  const cancelCardFocus = () => {
+    const task = focusTaskRef.current;
+    if (task.frame !== undefined) cancelAnimationFrame(task.frame);
+    if (task.timer !== undefined) clearTimeout(task.timer);
+    focusTaskRef.current = {};
+  };
   useEffect(() => {
-    if (!activeArticleId) return;
-    lastActiveArticleIdRef.current = activeArticleId;
-    const idx = items.findIndex((a) => a.id === activeArticleId);
-    if (idx >= 0) setFocusIndex(idx);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeArticleId]);
+    const onFocus = (event: FocusEvent) => {
+      if ((event.target as HTMLElement)?.closest('[role="menu"], [role="dialog"], .modal-overlay')) cancelCardFocus();
+    };
+    // contextmenu 的捕获阶段先撤销旧任务，不依赖 React effect 的提交次序。
+    document.addEventListener('contextmenu', cancelCardFocus, true);
+    document.addEventListener('focusin', onFocus);
+    return () => {
+      cancelCardFocus();
+      document.removeEventListener('contextmenu', cancelCardFocus, true);
+      document.removeEventListener('focusin', onFocus);
+    };
+  }, []);
+
+  /* 阅读上下文唯一标识：滚动归零（filterKey effect）、删除焦点恢复与
+     focusCardAt 过期任务判定都以它为「同一个列表」的依据，派生口径与
+     模块级 filterKeyOf 一致。 */
+  const filterKey = filterKeyOf({ activeContentLayout, activeViewFilter, activeFeedFilter, timelineFilter, timelineSort });
 
   /* 方向键在卡片间移动：目标可能未被虚拟化渲染，先 scrollToIndex 再于下一帧聚焦 */
   /* TASK-115②：定位-聚焦动作收口为 focusCardAt（绝对下标），焦点归还与方向键
@@ -87,17 +192,52 @@ export function Timeline() {
      → 下一帧聚焦」——align:auto 语义正好满足契约「原卡可见不滚、不可见才
      scrollToIndex 定位」，两种入口不再各写一份。 */
   const focusCardAt = (index: number) => {
+    cancelCardFocus();
+    if (index < 0 || index >= items.length) return;
+    const targetId = items[index].id;
+    /* 任务里的 rAF/定时器链可能比一次上下文切换活得久：过期任务的原生 focus
+       会把已作废的列表滚向旧上下文的位置。isCurrent 按实时 store 校验发起时
+       的阅读上下文，切换即视为过期（与恢复 effect 的 filterKey 门控同一依据）。 */
+    const taskFilterKey = filterKey;
+    const task = focusTaskRef.current;
+    const isCurrent = () => {
+      const state = useAppStore.getState();
+      return focusTaskRef.current === task && filterKeyOf(state) === taskFilterKey
+        && !anyOverlayOpen({ ...state, playerActive: state.player.isActive })
+        && !document.activeElement?.closest('[role="menu"], [role="dialog"]');
+    };
+    if (!isCurrent()) return;
     setFocusIndex(index);
     suppressNextScrollEvents();
     /* 画廊走 lanes 虚拟化实例（与行虚拟化同容器同 align:auto 语义：原卡可见
        不滚、不可见才 scrollToIndex 定位），其余布局走行虚拟化实例。 */
     const focusVirtualizer = activeContentLayout === 'image' ? galleryVirtualizer : rowVirtualizer;
     focusVirtualizer.scrollToIndex(index, { align: 'auto' });
-    requestAnimationFrame(() => {
+    let attempts = 0;
+    const focusWhenMounted = () => {
+      if (!isCurrent()) return;
       const root = scrollRef.current;
       const el = root?.querySelector<HTMLElement>(`[data-card-index="${index}"]`);
-      el?.focus();
-    });
+      const cardId = el?.closest<HTMLElement>('[data-ctx="article"]')?.dataset.id;
+      if (el && cardId === targetId) {
+        /* 虚拟定位可能尚在测量后一帧才完全落定；焦点默认滚动作为第二道可见性保证。 */
+        el.focus();
+        let visibilityChecks = 0;
+        const keepVisible = () => {
+          if (!isCurrent() || !el.isConnected || !root) return;
+          const rootRect = root.getBoundingClientRect();
+          const cardRect = el.getBoundingClientRect();
+          if (cardRect.top < rootRect.top || cardRect.bottom > rootRect.bottom) {
+            el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          }
+          if (visibilityChecks++ < 4) task.timer = setTimeout(keepVisible, 30);
+        };
+        keepVisible();
+        return;
+      }
+      if (attempts++ < 3) task.frame = requestAnimationFrame(focusWhenMounted);
+    };
+    task.frame = requestAnimationFrame(focusWhenMounted);
   };
   const moveCardFocus = (from: number, delta: number) => {
     const next = from + delta;
@@ -110,12 +250,73 @@ export function Timeline() {
      这里夹取到一个必然存在的下标，保证列表中**始终有一张卡可 Tab 进入**。 */
   const tabbableIndex = items.length === 0 ? -1 : Math.min(focusIndex, items.length - 1);
 
+  /* J/K、搜索与命令面板选中文章后，DOM 焦点必须落到目标卡；卡片可能尚在
+     虚拟化窗口外，focusCardAt 会先 scrollToIndex 再等挂载。只对「选中 id 首次
+     变化」生效，后台刷新 items 不抢用户当前焦点。 */
+  useEffect(() => {
+    if (!activeArticleId) {
+      lastSyncedSelectionRef.current = null;
+      return;
+    }
+    lastActiveArticleIdRef.current = activeArticleId;
+    if (lastSyncedSelectionRef.current === activeArticleId) return;
+    const idx = items.findIndex((a) => a.id === activeArticleId);
+    if (idx < 0) return;
+    lastSyncedSelectionRef.current = activeArticleId;
+    focusCardAt(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeArticleId, items]);
+
+  /* 当前持焦卡被收藏/筛选移除时，React 卸载节点会把焦点甩到 BODY。这里以
+     「移除前的卡片身份 + 下标」恢复：优先同下标的后一张，末尾则夹到新的末项；
+     用户焦点在筛选控件/侧栏时不抢焦点。恢复仅在产生焦点的同一阅读上下文内
+     生效：filterKey 变化的 items 替换是另一套条目，旧下标恢复会与上下文归零
+     竞争把列表滚向陈旧深滚位置。
+     Note: 根因与运行时证据见 .agents/notes/implemented/bug-fix/2026-11-07-画廊重启用时虚拟化offset对齐.md */
+  useEffect(() => {
+    const previousItems = previousItemsRef.current;
+    const focusedCard = focusedCardRef.current;
+    if (!focusedCard || focusedCard.filterKey !== filterKey) {
+      previousItemsRef.current = items;
+      return;
+    }
+    const currentById = new Map(items.map((item) => [item.id, item]));
+    const previousById = new Map(previousItems.map((item) => [item.id, item]));
+
+    const active = document.activeElement as HTMLElement | null;
+    const focusLost = !active
+      || active === document.body
+      || active === document.documentElement
+      || !active.isConnected;
+    const currentItem = currentById.get(focusedCard.id);
+    const previousItem = previousById.get(focusedCard.id);
+
+    if (!currentItem && previousItem && focusLost) {
+      const fallbackIndex = Math.min(focusedCard.index, items.length - 1);
+      const fallback = fallbackIndex >= 0 ? items[fallbackIndex] : null;
+      const liveItem = useAppStore.getState().entries.find((entry) => entry.id === focusedCard.id);
+      const action = previousItem.isStarred && liveItem && !liveItem.isStarred
+        ? '已取消收藏'
+        : '已从当前列表移除';
+      setLiveMessage(`${action}「${previousItem.title}」${fallback ? `，焦点移至「${fallback.title}」` : '，列表已为空'}`);
+      if (fallback) {
+        focusedCardRef.current = { id: fallback.id, index: fallbackIndex, filterKey };
+        focusCardAt(fallbackIndex);
+      } else {
+        focusedCardRef.current = null;
+        scrollRef.current?.focus({ preventScroll: true });
+      }
+    } else if (currentItem && previousItem && currentItem.isStarred !== previousItem.isStarred) {
+      setLiveMessage(`${currentItem.isStarred ? '已收藏' : '已取消收藏'}「${currentItem.title}」`);
+    }
+    previousItemsRef.current = items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
+
   /* 筛选上下文变化 → 滚动归零。不再用 key 重挂载整个列表 DOM（此前每次
      布局/视图/排序切换都强制卸载重建全部卡片 + 重建全部 IntersectionObserver/
      ResizeObserver，是「切换卡顿 + 加载正文闪动」的主因）；改为复用 DOM，
      React 只 diff 列表项，内容切换即时可见。 */
-  const filterKey = `${activeContentLayout}|${activeViewFilter}|${activeFeedFilter}|${timelineFilter}|${timelineSort}`;
-
   useEffect(() => {
     /* 程序性归零：先开抑制窗口再滚，随后到达的 scroll 事件不算用户滚动 */
     suppressNextScrollEvents();
@@ -169,22 +370,146 @@ export function Timeline() {
      彻底消除「一次性渲染 500 张含正文卡片」的卡顿（成熟 RSS 客户端的共识做法）。
      画廊（image）走第二个实例（lanes 列模型，见下）；两实例共用同一滚动容器，
      同一时刻只有当前布局的那个处于 enabled。 */
+  const rowPendingScrollRef = useRef<{ offset: number; adjustments: number; behavior?: ScrollBehavior } | null>(null);
   const rowVirtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 160,
+    /* 折叠态是统一固定外高，所有社交行共用同一估算；不再读取摘要/封面特征。
+       展开后的真实高度仍由 SocialCard 的 layout effect 显式回写。Note: 见
+       .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
+    estimateSize: () => activeContentLayout === 'social' ? SOCIAL_COLLAPSED_ROW_HEIGHT : 160,
     overscan: 8,
     getItemKey: (index) => items[index]?.id ?? index,
     enabled: activeContentLayout !== 'image',
     /* 与画廊实例（下方）同口径：卡片测量回调不走 flushSync 强制同步提交。
        Note: 依据与取舍见同文件画廊实例注释与 docs/performance.md。 */
     useFlushSync: false,
+    scrollToFn: (offset, options, instance) => {
+      if (options.adjustments) {
+        rowPendingScrollRef.current = { offset, adjustments: options.adjustments, behavior: options.behavior };
+      } else elementScroll(offset, options, instance);
+    },
+    onChange: (instance) => {
+      /* 测量驱动的重排（含 measureElement 的 ResizeObserver 路径）只更新虚拟化
+         内部测量；transform 与容器高必须在同一次 notify 里直写 DOM，否则慢调度
+         下会 paint 出「卡片已变高、邻居仍在旧位置」的一帧。滚动消费仍按契约
+         排在坐标发布之后。
+         Note: 行坐标单一写入者与采样对齐 — 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+      syncRowGeometryNow();
+      consumeDeferredScroll(rowPendingScrollRef, instance);
+    },
   });
+  /* 社交卡展开/收起或显示译文时，外层高度会变化；等 RO 异步回写会让相邻虚拟项
+     多保留一帧旧起点。子卡在 layout effect 中同步报告外框高度，这里更新虚拟化
+     测量并触发一次 paint 前重渲染。 */
+  const syncRowGeometryNow = useCallback(() => {
+    const root = activeContentLayout === 'image' ? null : scrollRef.current;
+    const wrap = root?.querySelector<HTMLElement>('.timeline-virtual-wrap');
+    if (!root || !wrap) return;
+    wrap.style.height = `${rowVirtualizer.getTotalSize()}px`;
+    for (const virtualItem of rowVirtualizer.getVirtualItems()) {
+      const element = root.querySelector<HTMLElement>(
+        `.timeline-virtual-item[data-index="${virtualItem.index}"]`,
+      );
+      if (element) element.style.transform = `translateY(${virtualItem.start}px)`;
+    }
+  }, [activeContentLayout, rowVirtualizer]);
+  const [, setRowLayoutEpoch] = useState(0);
+  const syncSocialItemHeight = useCallback((index: number, height: number) => {
+    rowVirtualizer.resizeItem(index, height);
+    /* 子卡的 layout effect 同步执行到这里时，直接写 transform；不能等父级下一
+       次 render——内容 DOM 已经提交，晚一帧就是可见的卡片重叠。 */
+    syncRowGeometryNow();
+    setRowLayoutEpoch((epoch) => epoch + 1);
+  }, [rowVirtualizer, syncRowGeometryNow]);
+  /* 后代 layout effect 全部跑完后的兜底回写；滚动/布局切换后的普通 render
+     也走这里，保持 React 快照与直接写 DOM 的同值。 */
+  useLayoutEffect(() => {
+    syncRowGeometryNow();
+  });
+  /* 行虚拟项挂载/复用时在 ref 回调（commit layout 阶段附着、paint 前）落位。
+     虚拟器重新启用或窗口扩张的首个 commit 渲染时可能还没有 scrollRect，JSX
+     先渲染出空窗口，卡片要等下一次 rerender 才插入；与画廊
+     measureGalleryElement 同模式：measureElement 同步测量后按当次渲染的测量
+     写坐标，插入即带定位，不依赖 querySelector/根查找与 effect 时序。
+     key 守卫只拒绝不匹配条目的坐标写入（测量/缓存注册仍照常进行）；正常
+     enabled、key 匹配的挂载定位由此保证，更新路径由 geom 直写与行项
+     layout effect 收敛。
+     Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+  const measureRowElement = useCallback((element: HTMLDivElement | null) => {
+    rowVirtualizer.measureElement(element);
+    if (!element) return;
+    const measurement = rowVirtualizer.measurementsCache[Number(element.dataset.index)];
+    if (measurement && String(measurement.key) === element.dataset.cardId) {
+      element.style.transform = `translateY(${measurement.start}px)`;
+    }
+  }, [rowVirtualizer]);
   /* 画廊有界渲染：lanes 列模型 + 垂直虚拟化。可见范围 = 每列视口覆盖条数 +
      两端 overscan，挂载数与条目总数无关（窗口上界推导、列宽公式与「为什么
      不用 CSS 多列」见 GalleryLayout.ts 头注与 docs/performance.md 画廊节）。
      gap=14 与旧 column-gap / 卡片 margin-bottom 同值：列宽与纵向间距观感不变。 */
-  const galleryVirtualizer = useVirtualizer({
+  const galleryMeasureAnchorRef = useRef<{ id: string; index: number; lane: number; scrollTop: number } | null>(null);
+  const galleryPendingScrollRef = useRef<{ offset: number; adjustments: number; behavior?: ScrollBehavior } | null>(null);
+  const galleryWindowRef = useRef('');
+  const [, setGalleryWindowEpoch] = useState(0);
+  const galleryIndexes = (instance: ReactVirtualizer<HTMLDivElement, Element>, offset = instance.scrollOffset ?? 0) => galleryWindowIndexes(
+    instance.measurementsCache,
+    offset,
+    instance.scrollRect?.height ?? 0,
+    galleryLanes,
+  );
+  const galleryWindowKey = (instance: ReactVirtualizer<HTMLDivElement, Element>, offset = instance.scrollOffset ?? 0) => {
+    const indexes = galleryIndexes(instance, offset);
+    const visible = galleryVisibleIndexes(indexes.map((index) => instance.measurementsCache[index]), offset, instance.scrollRect?.height ?? 0);
+    return `${indexes.join(',')}:${galleryTabbableIndex(visible, tabbableIndex)}`;
+  };
+  /* 补偿基于产生时刻的 offset；该值与元素真实 scrollTop 脱节（重启用首帧的陈旧
+     窗口测量、或 scrollToIndex 与测量同 commit 的暂态）时补偿不可信，丢弃而非
+     滚向陈旧位置。正常解码补偿两者一致，逐帧消费不受影响。1.5px 与 virtual-core
+     的 approxEqual 同容差。 */
+  const consumeDeferredScroll = (
+    pendingRef: { current: { offset: number; adjustments: number; behavior?: ScrollBehavior } | null },
+    instance: { scrollElement?: { scrollTo?: (options: { top: number; behavior?: ScrollBehavior }) => void } | null },
+    readLayoutBeforePublish?: () => void,
+  ) => {
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = null;
+    const element = scrollRef.current;
+    if (element && Math.abs(pending.offset - element.scrollTop) > 1.5) return;
+    /* CI run 42462857980 画廊波：业务几何直写与补偿发布同栈完成，但可观察采样
+       里原生 scrollTop 先于坐标/总高变化（+295/+159 各一坏帧）。发布前对真实
+       网格读一次布局，让本同步点先收敛布局再发布滚动；不等待帧、不改补偿量与
+       锚语义。只挂在画廊补偿消费上——普通滚动、无补偿 onChange 与 row 路径不
+       增加同步布局读取。可测试候选，有效性由目标 CI 证明。Note: 见
+       .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+    readLayoutBeforePublish?.();
+    instance.scrollElement?.scrollTo?.({ top: pending.offset + pending.adjustments, behavior: pending.behavior });
+  };
+  /* virtual-core 的 getScrollOffset 在 .d.ts 标记 private，但运行时是实例方法
+     （3.17.8 `this.getScrollOffset = ...`），enabled=false 时调用它会把内部
+     offset 置空。这里只取该副作用，返回值弃用。 */
+  const forceResetStaleScrollOffset = (instance: object) => {
+    (instance as { getScrollOffset?: () => number }).getScrollOffset?.();
+  };
+  const syncGalleryGeometry = (instance: ReactVirtualizer<HTMLDivElement, Element>) => {
+    const height = instance.getTotalSize(); // 同时重建刚 resize 的测量表。
+    const container = scrollRef.current?.querySelector<HTMLElement>('.gallery-masonry-grid');
+    if (container) container.style.height = `${height}px`;
+    for (const element of instance.elementsCache.values()) {
+      const measurement = instance.measurementsCache[Number(element.getAttribute('data-index'))];
+      if (measurement && String(measurement.key) === (element as HTMLElement).dataset.cardId) {
+        (element as HTMLElement).style.transform = `translateY(${measurement.start}px)`;
+      }
+    }
+    // core 先更新逻辑 offset，业务先发布全部已挂节点坐标/容器，再发布 DOM scrollTop。
+    // 禁止先滚、等下一 React commit 才补坐标；不改正常用户滚动或 scrollToIndex。
+    consumeDeferredScroll(galleryPendingScrollRef, instance, () => {
+      const grid = scrollRef.current?.querySelector<HTMLElement>('.gallery-masonry-grid');
+      if (grid) void grid.offsetHeight;
+    });
+  };
+  const galleryVirtualizer: ReactVirtualizer<HTMLDivElement, Element> = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => estimateGalleryCardHeight(galleryWidth, galleryLanes),
@@ -193,13 +518,90 @@ export function Timeline() {
     lanes: galleryLanes,
     getItemKey: (index) => items[index]?.id ?? index,
     enabled: activeContentLayout === 'image',
-    /* 画廊卡片高度在挂载/图片解码后才被测量校正，测量回调持续触发；react-virtual
-       默认在这些回调里以 flushSync 强制同步提交——那是在提交阶段调用 flushSync
-       （dev 模式报「flushSync was called from inside a lifecycle method」），
-       且滚动中强制同步渲染正是 React 不建议的模式。改为普通调度（React 18+
-       在同一微任务内提交，滚动帧不受影响）；滚动锚定（测量后 scrollTop 补偿）
-       不受本开关影响，仍即时生效。 */
+    rangeExtractor: (): number[] => galleryIndexes(galleryVirtualizer),
+    scrollToFn: (offset, options, instance) => {
+      if (options.adjustments) {
+        galleryPendingScrollRef.current = { offset, adjustments: options.adjustments, behavior: options.behavior };
+      } else elementScroll(offset, options, instance);
+    },
+    /* 测量后的主轴位置与总高由虚拟化直接写 DOM，React 只拥有列宽/左缘，
+       避免 scrollTop 已补偿、旧 render 快照又写回上一帧 transform。已离开新
+       窗口但尚未卸载的节点也同步位置，避免卸载前保留一帧旧坐标。
+       Note: 取舍与异步图片实证见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md */
     useFlushSync: false,
+    directDomUpdates: true,
+    onChange: (instance) => {
+      syncGalleryGeometry(instance as ReactVirtualizer<HTMLDivElement, Element>);
+      const next = galleryWindowKey(instance as ReactVirtualizer<HTMLDivElement, Element>);
+      // adapter 只比较全局 range 两端；同端点下逐列集合也可能变化，必须请求提交新集合。
+      if (galleryWindowRef.current !== next) {
+        galleryWindowRef.current = next;
+        setGalleryWindowEpoch((epoch) => epoch + 1);
+      }
+    },
+  });
+  galleryVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta) => {
+    const root = scrollRef.current;
+    if (!root || root.scrollTop <= 0 || activeContentLayout !== 'image') return false;
+    let anchor = galleryMeasureAnchorRef.current;
+    if (!anchor || Math.abs(anchor.scrollTop - root.scrollTop) > 1 || items[anchor.index]?.id !== anchor.id) {
+      const rootTop = root.getBoundingClientRect().top;
+      const candidates = [...root.querySelectorAll<HTMLElement>('.gallery-virtual-item')]
+        .map((element) => ({ element, top: element.getBoundingClientRect().top - rootTop }))
+        .filter(({ top }) => top >= 0 && top < root.clientHeight)
+        .sort((left, right) => left.top - right.top || Number(left.element.dataset.index) - Number(right.element.dataset.index));
+      const element = candidates[0]?.element;
+      if (!element?.dataset.cardId) return false;
+      anchor = {
+        id: element.dataset.cardId,
+        index: Number(element.dataset.index),
+        lane: Number(element.dataset.galleryLane),
+        scrollTop: root.scrollTop,
+      };
+      galleryMeasureAnchorRef.current = anchor;
+    }
+    // Note: 多列测量只补偿同一可见锚的同列前驱，不能累加其他列的高度差 — 见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md
+    const adjust = item.lane === anchor.lane && item.index < anchor.index;
+    if (adjust) anchor.scrollTop += delta;
+    return adjust;
+  };
+  useLayoutEffect(() => {
+    galleryMeasureAnchorRef.current = null;
+    galleryPendingScrollRef.current = null;
+    rowPendingScrollRef.current = null;
+  }, [filterKey, galleryLanes, galleryWidth]);
+  const measureGalleryElement = useCallback((element: HTMLDivElement | null) => {
+    galleryVirtualizer.measureElement(element);
+    if (!element) return;
+    const measurement = galleryVirtualizer.measurementsCache[Number(element.dataset.index)];
+    if (measurement) element.style.transform = `translateY(${measurement.start}px)`;
+  }, [galleryVirtualizer]);
+  const activeLayoutRef = useRef(activeContentLayout);
+  useLayoutEffect(() => {
+    /* 两个虚拟化实例共用同一滚动容器。主消费点在各自 onChange（与测量同栈，
+       解码驱动的补偿不等 React render）；本 effect 是兜底消费 + 切换对齐：
+       晚于上方清除 effect，切换 commit 里 ref 阶段按陈旧 offset 产生的补偿
+       在消费守卫处被丢弃，不再把容器滚向上一布局的深滚位置。 */
+    if (activeContentLayout === 'image') {
+      syncGalleryGeometry(galleryVirtualizer);
+      /* virtual-core 重启用时会用内部 offset 回写元素 scrollTop（_willUpdate 末尾
+         的 _scrollToOffset(getScrollOffset())，无 adjustments、绕过补偿守卫）；
+         内部 offset 仅在 enabled=false 的 getScrollOffset 调用里被置空。停用方
+         主动调用一次，让对方重启用时从 0 开始，不再跳回上次深滚位置。 */
+      forceResetStaleScrollOffset(rowVirtualizer);
+    } else {
+      consumeDeferredScroll(rowPendingScrollRef, rowVirtualizer);
+      forceResetStaleScrollOffset(galleryVirtualizer);
+    }
+    /* TanStack 重新启用时不回读元素真实 scrollTop（observeElementOffset 没有初始回调），
+       内部 offset 可能停留在上次画廊滚动位置；首个真实 scroll 事件之前窗口按陈旧
+       offset 计算，会短暂挂载深部卡片并把懒加载判定引向屏外。布局变化时派发
+       scroll 让两个实例立即对齐元素真实位置；合成事件不带输入闩，不会被误判
+       为用户滚动。
+       Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-画廊重启用时虚拟化offset对齐.md */
+    if (activeLayoutRef.current === activeContentLayout) return;
+    activeLayoutRef.current = activeContentLayout;
+    scrollRef.current?.dispatchEvent(new Event('scroll'));
   });
 
   /* markReadOnScrollOut：滚动时，可视区起始 index 递增 → 之间的条目「滚出上方」，
@@ -238,7 +640,7 @@ export function Timeline() {
      scrollToIndex(align:'start') 把锚卡片顶对齐视口顶，再按锚记录的 offsetPx
      微调 scrollTop = 精确还原视口（长卡片中部的停留位置不再只能恢复卡片顶；
      动态测量下卡片起点可能微移，属既有估算行高误差量级，如实接受——见
-     timelineAnchor.ts 头注①）。px≤0 不产生额外滚动；补偏发生在程序性滚动
+     readingPosition.ts 头注①）。px≤0 不产生额外滚动；补偏发生在程序性滚动
      抑制窗口内，不会被误判为用户滚动。 */
   const applyAnchorOffsetPx = (px: number) => {
     if (px <= 0) return;
@@ -297,7 +699,7 @@ export function Timeline() {
        再沿用既有弃锚语义——先存后清，顺序不可换。任何 filterKey 变化都是
        「离开」（含切排序/筛选）：存档按锚自身 filterKey 记账，回到该上下文
        才可能命中；切排序的新语境查不到档，裁定「不恢复」自然成立（规则表见
-       timelineAnchor.ts 头注）。 */
+       readingPosition.ts 头注）。 */
     stashTopAnchorForReturn();
     clearTopAnchor();
   }, [filterKey]);
@@ -346,26 +748,9 @@ export function Timeline() {
     }
   }, [rowVirtualizer.range?.startIndex, items, timelineFilter]);
 
-  /* 选中文章（搜索/命令面板/J/K 导航）→ 滚动定位到该卡片。虚拟化下卡片
-     可能不在可视区（不渲染），不能用 scrollIntoView；改用 virtualizer 的
-     scrollToIndex。
-     align:'auto' 只在目标不完全可见时才滚动，点击可见卡片不会抖动。
-     只依赖 activeArticleId：定位是「选中文章变化」这个动作的副作用，必须
-     只在此时触发一次。此前依赖 totalSize/items（为了在动态测量后微调），
-     但副作用是——用户手动滚动列表时，滚动触发 measureElement → totalSize 变、
-     或滚动到底触发 loadMoreArticles → items 变，都会重新 scrollToIndex 把列表
-     拉回选中文章（「列表滚一会又跳回原位」的根因）。动态高度下首次定位的
-     少量误差可接受（估算行高），远好于「无法自由滚动」。 */
-  useEffect(() => {
-    if (!activeArticleId) return;
-    const idx = items.findIndex((a) => a.id === activeArticleId);
-    if (idx < 0) return; // 目标不在当前 items（如 anchorToArticle 异步窗口），跳过
-    /* 程序性定位（J/K / 搜索锚定 / focusIndex 跟随）：先开抑制窗口再滚——
-       K 在顶部回绕到末项时 startIndex 0→N，修前会被当成用户滚动整段标读 */
-    suppressNextScrollEvents();
-    rowVirtualizer.scrollToIndex(idx, { align: 'auto' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeArticleId]);
+  /* 选中后的入窗统一由上方 focusCardAt 完成，按当前布局选择虚拟器并先检查
+     浮层所有权。旧独立 effect 无条件调用 rowVirtualizer，会在画廊打开灯箱时
+     再次滚动并绕过浮层让路；不得重建第二条 activeArticleId → scroll 链。 */
 
   /* TASK-111②：后台刷新保位——消费顶条锚。reloadFromBackend 以
      keepReadingPosition 落地（feeds-updated / 手动同步 / 单源刷新路径）时
@@ -373,7 +758,7 @@ export function Timeline() {
      程序性滚动回其新索引（新文章插入头部场景，抵消整体替换 + 头部插入造成的
      视觉跳动）；无锚 / filterKey 已变 / 锚 id 不在快照 → 回落现状（不强制顶部）。
      分流语义：
-     - 锚与 filterKey 一起记账（timelineAnchor），消费时逐字比对——用户主动
+     - 锚与 filterKey 一起记账（readingPosition），消费时逐字比对——用户主动
        切范围/布局/视图/排序后锚已被 clearTopAnchor 丢弃且比对也不通过，
        导航路径的 reload 亦不 bump nonce（三重隔离）；
      - 复用 activeArticleId 定位 effect 的既有程序性滚动抑制机制
@@ -410,7 +795,7 @@ export function Timeline() {
      锚来源、消费路径三者全部分离（双向隔离由回归网 t115 断言钉住）。
      声明顺序：必须在本文件更早的 filterKey 归零 effect 之后（同批 passive
      effect 按声明序执行——先归零后恢复，恢复定位是最终落点）。
-     恢复成功后 rearmTopAnchor 把活锚重锚到落点（理由见 timelineAnchor.ts：
+     恢复成功后 rearmTopAnchor 把活锚重锚到落点（理由见 readingPosition.ts：
      防节流窗口把活锚滞留在恢复前位置，用户随即再离开时存档过期锚）。 */
   const switchRestoreNonce = useAppStore((s) => s.switchRestoreNonce);
   useEffect(() => {
@@ -451,6 +836,14 @@ export function Timeline() {
 
   /* 滚动到底部附近 → 按需加载下一批文章（分页，避免一次性全量拉取）。 */
   const handleScroll = () => {
+    if (activeContentLayout === 'image') {
+      // global range 两端可能被不同高度的列钉住；用户滚动仍须重评逐列可见并集。
+      const next = galleryWindowKey(galleryVirtualizer, scrollRef.current?.scrollTop ?? 0);
+      if (galleryWindowRef.current !== next) {
+        galleryWindowRef.current = next;
+        setGalleryWindowEpoch((epoch) => epoch + 1);
+      }
+    }
     /* P3[F5]/fix-2：判定收口在 scrollAwayRead.isUserScrollEvent——只有「近期有
        真实输入且不在程序性滚动抑制窗口内」的 scroll 事件才算用户滚动。
        保留既有结论（||）：一次拖拽会产生多个 scroll 事件，标读 effect 只消费
@@ -460,7 +853,7 @@ export function Timeline() {
       programmaticUntil: programmaticScrollUntilRef.current,
       now: performance.now(),
     });
-    /* TASK-111②：顶条锚记录（节流收口在 timelineAnchor.recordTopAnchor）——
+    /* TASK-111②：顶条锚记录（节流收口在 readingPosition.recordTopAnchor）——
        以当前可见首条目 id + filterKey 记账，供后台刷新落地后回位。程序性滚动
        （J/K / 回位）也照记：那是用户此刻的阅读位置。画廊不记录（列模型虚拟化
        与顶条锚的语义扩展不在本卡范围；回位消费侧同样回落，两侧口径一致）。
@@ -539,7 +932,7 @@ export function Timeline() {
      可 Tab 进入列表（判定单点在 GalleryLayout.galleryTabbableIndex）。 */
   const galleryVirtualItems = galleryVirtualizer.getVirtualItems();
   const galleryTabbable = activeContentLayout === 'image'
-    ? galleryTabbableIndex(galleryVirtualItems.map((vi) => vi.index), tabbableIndex)
+    ? galleryTabbableIndex(galleryVisibleIndexes(galleryVirtualItems, galleryVirtualizer.scrollOffset ?? 0, galleryVirtualizer.scrollRect?.height ?? 0), tabbableIndex)
     : tabbableIndex;
 
   /* 标题：布局名 [· 视图筛选] [(分类/源名称)] */
@@ -554,6 +947,38 @@ export function Timeline() {
       if (f) { base += ` (${f.name})`; break; }
     }
   }
+  const totalFeedCount = categories.reduce((count, cat) => count + cat.feeds.length, 0);
+  const selectedCategory = activeFeedFilter.startsWith('cat-')
+    ? categories.find((cat) => cat.id === activeFeedFilter)
+    : null;
+  const selectedFeedBinding = activeFeedFilter !== 'all' && !activeFeedFilter.startsWith('cat-')
+    ? categories
+      .flatMap((cat) => cat.feeds.map((feed) => ({ cat, feed })))
+      .find(({ feed }) => feed.id === activeFeedFilter)
+    : null;
+  const layoutHasFeeds = categories.some((cat) =>
+    cat.feeds.some((feed) => resolveFeedLayout(feed, cat.layout) === activeContentLayout));
+  const emptyCopy = (() => {
+    if (totalFeedCount === 0) return '还没有订阅源，先添加一个';
+    if (selectedCategory) {
+      if (selectedCategory.feeds.length === 0) return '此分类还没有订阅源';
+      if (!selectedCategory.feeds.some((feed) =>
+        resolveFeedLayout(feed, selectedCategory.layout) === activeContentLayout)) {
+        return '此分类没有绑定到当前布局的订阅源';
+      }
+    }
+    if (activeFeedFilter !== 'all' && !selectedCategory) {
+      if (!selectedFeedBinding) return '该订阅源已不存在';
+      if (resolveFeedLayout(selectedFeedBinding.feed, selectedFeedBinding.cat.layout) !== activeContentLayout) {
+        return '该订阅源未绑定到当前布局';
+      }
+    }
+    if (!layoutHasFeeds) return '当前布局还没有绑定订阅源';
+    if (activeViewFilter === 'starred') return '暂无收藏内容';
+    if (activeViewFilter === 'today') return '今天暂无新内容';
+    if (timelineFilter === 'unread') return '没有未读文章';
+    return '没有匹配的文章';
+  })();
 
   return (
     <section className="timeline-col">
@@ -561,7 +986,7 @@ export function Timeline() {
         <div className="control-bar-main-row">
           <h3 className="view-title-text">{base}</h3>
           <div className="filter-sort-group">
-            {activeViewFilter !== 'unread' && (
+            {activeViewFilter === 'all' && (
               <button className="toggle-action-btn" onClick={toggleTimelineFilter} title={timelineFilter === 'all' ? '显示全部' : '仅显示未读'}>
                 <Icons.unreadDot />
                 <span>{timelineFilter === 'all' ? '全部' : '未读'}</span>
@@ -581,28 +1006,37 @@ export function Timeline() {
 
       <div
         className="timeline-scroll-body"
+        style={activeContentLayout === 'image' ? { overflowAnchor: 'none' } : undefined}
         id="timelineContentScroll"
         ref={scrollRef}
         onScroll={handleScroll}
+        tabIndex={-1}
+        onFocusCapture={(e) => {
+          const focusedCard = focusedCardDescriptor(e.target as Element);
+          if (!focusedCard) return;
+          focusedCardRef.current = { ...focusedCard, filterKey };
+          setFocusIndex(focusedCard.index);
+        }}
       >
         {items.length === 0 && (
           /* 空态/加载态不混同（审计卡2-4）：装载在途且列表为空时不出
-             「暂无匹配内容」——数据未落地就宣判「没有内容」是假空态；改渲染
+             空态文案——数据未落地就宣判「没有内容」是假空态；改渲染
              加载形态，数据落地后按真值恢复（空且已到底 → 文案；有数据 → 列表）。
              此时哨兵同为 loading 形态，这里就不再重复渲染哨兵 spinner。 */
           /* 启动抢占期（bootstrapFromBackend → reloadFromBackend，及筛选视图
              的 reloadFilteredEntries）articlesLoading 尚未置真而 entries 仍是
-             旧快照/空数组，只看 articlesLoading 会闪「暂无匹配内容」假空态；
+             旧快照/空数组，只看 articlesLoading 会闪空态假文案；
              故并入后端 reload 在途计数。Note: 计数含兄弟窗口在途 reload，
              不能改用 isBackendReloadInFlight 之类的「有没有」判据 —
              见 .agents/notes/implemented/bug-fix/2026-11-02-启动抢占期假空态.md */
           articlesLoading || backendReloadsInFlight > 0 ? (
             <div className="timeline-empty-state" role="status" aria-label="加载中">
               <span className="load-more-spinner" aria-hidden="true" />
+              <span>加载中…</span>
             </div>
           ) : (
             <div className="timeline-empty-state">
-              {activeViewFilter === 'starred' ? '暂无收藏内容' : activeViewFilter === 'today' ? '今天暂无新内容' : '暂无匹配内容'}
+              {emptyCopy}
             </div>
           )
         )}
@@ -614,7 +1048,8 @@ export function Timeline() {
         {activeContentLayout === 'image' && (
           <div
             className="gallery-masonry-grid"
-            style={{ height: galleryVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}
+            ref={galleryVirtualizer.containerRef}
+            style={{ position: 'relative', width: '100%' }}
           >
             {galleryVirtualItems.map((vi) => {
               const img = items[vi.index];
@@ -626,9 +1061,9 @@ export function Timeline() {
                   data-index={vi.index}
                   data-card-id={img.id}
                   data-gallery-lane={vi.lane}
-                  ref={galleryVirtualizer.measureElement}
+                  ref={measureGalleryElement}
                   className="gallery-virtual-item"
-                  style={{ position: 'absolute', top: 0, left: placement.left, width: placement.width, transform: `translateY(${vi.start}px)` }}
+                  style={{ position: 'absolute', top: 0, left: placement.left, width: placement.width }}
                 >
                   <GalleryCard item={img} cardIndex={vi.index} tabbable={vi.index === galleryTabbable} lanes={galleryLanes} onMoveFocus={moveCardFocus} />
                 </div>
@@ -647,19 +1082,18 @@ export function Timeline() {
               const item = items[vi.index];
               if (!item) return null;
               return (
-                <div
+                <TimelineRowItem
                   key={vi.key}
-                  data-index={vi.index}
-                  ref={rowVirtualizer.measureElement}
-                  className="timeline-virtual-item"
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+                  vi={vi}
+                  item={item}
+                  measureRef={measureRowElement}
                 >
                   {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {/* TASK-114 X2：Social/Notif 卡补 onSelect（Enter/Space=选中，与 ArticleCard 同语义） */}
-                  {activeContentLayout === 'social' && <SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} />}
+                  {activeContentLayout === 'social' && <SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} onLayoutHeight={syncSocialItemHeight} />}
                   {activeContentLayout === 'podcast' && <PodcastCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {activeContentLayout === 'notification' && <NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} />}
-                </div>
+                </TimelineRowItem>
               );
             })}
           </div>
@@ -669,7 +1103,7 @@ export function Timeline() {
             TASK-052：此前整块被 `items.length > 0` 挡住——列表为空时哨兵不渲染，
             滚动事件无从触发，「该范围的老文章永远够不到」。列表为空但**批次已满**
             （articlesExhausted=false）时同样渲染：空列表 + 未到底 = 还有数据待取。
-            真正到底（空且已到底）时不渲染，避免「没有更多了」与「暂无匹配内容」重复。
+            真正到底（空且已到底）时不渲染，避免「没有更多了」与空态文案重复。
             TASK-094（REQ-107）：容器不可滚动时「滚动加载更多」不可执行，改为可点击的
             「加载更多」按钮（原生 button：键盘可聚焦，Enter/空格原生触发）。 */}
         {/* 空列表且装载在途时，加载形态已由空态区渲染（见上），这里让位避免同屏双 spinner。 */}
@@ -692,6 +1126,9 @@ export function Timeline() {
             )}
           </div>
         )}
+      </div>
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-live-region="timeline">
+        {liveMessage}
       </div>
     </section>
   );
@@ -733,7 +1170,7 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const activeArticleId = useAppStore((s) => s.activeArticleId);
-  const feedName = useAppStore((s) => s.feedIndex.get(art.feedId)?.feed.name ?? '');
+  const feedName = useAppStore((s) => (s.sourceIndex.get(art.feedId) ?? s.feedIndex.get(art.feedId))?.feed.name ?? '');
   const selected = activeArticleId === art.id;
 
   return (
@@ -743,7 +1180,9 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
       role="button"
       data-card-index={cardIndex}
       tabIndex={tabbable ? 0 : -1}
+      aria-current={selected ? 'true' : undefined}
       onKeyDown={(e) => {
+        if (activePlayerOwnsSpace(e)) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onSelect(art.id);
@@ -787,17 +1226,19 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
 
 /* ---------- 社交卡片 ---------- */
 
-const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbable, onMoveFocus }: {
+const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbable, onMoveFocus, onLayoutHeight }: {
   item: ArticleEntry;
   onSelect: (id: string) => void;
   cardIndex: number;
   tabbable: boolean;
   onMoveFocus: (from: number, delta: number) => void;
+  onLayoutHeight: (index: number, height: number) => void;
 }) {
+  const activeArticleId = useAppStore((s) => s.activeArticleId);
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const showToast = useAppStore((s) => s.showToast);
   const openLightbox = useAppStore((s) => s.openLightbox);
-  const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
+  const binding = useAppStore((s) => s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId));
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   /* TASK-122：正文/AI 读取单点——selectArticleBody（真值源 bodyById）。
      错误态/空正文终态/加载中都从记录 state 派生（原 hydrationErrors/hydratedIds
@@ -816,58 +1257,119 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   /* OPT-013 B3：译文五态（生成中/部分完成/失败/完整/已过期——切片单点判定）。
      partial 的分段进度同源取 aiStatusById（校验状态缓存）。 */
   const translationState = useAppStore((s) => selectAiProductState(s, item.id, 'translation'));
-  const translationSegments = useAppStore((s) => s.aiStatusById[item.id]?.translationSegments ?? null);
+  const translationSegments = useAppStore((s) => selectAiCacheStatus(s, item.id)?.translationSegments ?? null);
+  const aiStatusInput = useAppStore(useShallow((s) => selectAiStatusInput(s, item.id)));
   /* 社交卡片正文直接渲染 body.content（真值源 bodyById）：进入视口附近才懒加载
      水合（避免几百张卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
+  const cardRef = useRef<HTMLDivElement>(null);
+  useCenterDwellAi(item.id, cardRef);
+  const setCardNode = useCallback((node: HTMLDivElement | null) => {
+    hydrateRef.current = node;
+    cardRef.current = node;
+  }, [hydrateRef]);
   /* 派生值提取为局部变量：JSX 表达式内不放可选链（oxc 解析限制，且更易读） */
   const feedName = binding ? binding.feed.name : '';
+  const selected = activeArticleId === item.id;
   /* 三态：null=跟随 feed 配置，true=手动展开，false=手动收起 */
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   /* fix-8：跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但尚无译文时
-     按收起处理，不再渲染空壳译文块（自动生成本身只在 Reader 打开文章时触发，
-     卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「翻译」仍会就地触发生成。 */
-  const showTranslate = transOverride ?? autoAiBlockOpen(
+     按收起处理，不再渲染空壳译文块（自动生成仅在中心连续停顿后触发，
+     挂载/焦点本身不触发付费请求）；手动点「翻译」仍会就地触发生成。 */
+  const showTranslate = transOverride ?? (translationState === 'partial' || autoAiBlockOpen(
     feedConfig.autoTranslate,
     !!body.translatedContent,
     !!translatingCard,
     !!translateError,
-  );
-  /* 自动收起：渲染后测高，超过 260px 视为长内容（收起至 6 行 + 展开按钮）；
-     与通知卡不同，这里是 HTML（高度比字符数准确——图片/换行/引用都会撑高）。
-     ResizeObserver 而非一次性测量：正文里的图片懒加载完成后高度才真正
-     确定，一次性 useEffect 会把"短文本+多图"的卡片误判为短内容 */
+  ));
+  /* 折叠态正文区固定 150px：无论正文是否含图、行 imageUrl 是否存在、摘要多短，
+     占位与水合后的正文外高都相同。短文和空正文保留同一区域，测量只决定展开
+     按钮是否出现，不再参与高度决策。
+     Note: 折叠外高是不变量 — 见 .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
   const textRef = useRef<HTMLDivElement>(null);
-  const [isLong, setIsLong] = useState(false);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [measurement, setMeasurement] = useState<{ content: string; long: boolean } | null>(null);
   const [expanded, setExpanded] = useState(false);
-  /* 记录上次 isLong 值：ResizeObserver 频繁触发，只在值真正翻转时才 setState，
-     避免滚动/图片加载时每帧都重渲染（页面抖动的根因之一） */
-  const isLongRef = useRef(false);
-  useEffect(() => {
-    const el = textRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') {
-      if (el) setIsLong(el.scrollHeight > 260);
-      return;
+  /* 测量结果与正文逐字绑定：content 一变，旧结果立即失效 → 本次 render 先折叠，
+     随后 layout effect 在 paint 前写入新结果。 */
+  const currentMeasurement = measurement?.content === body.content ? measurement : null;
+  /* 内联 {__html} 每次 render 都是新对象，React 会据此重设 innerHTML，连带重建
+     正文里的 <video>。展开/收起等无关 render 一旦重设，视频就重新加载并把
+     自然高度打回零；按正文内容锁住对象引用，媒体节点才能跨 render 存活。
+     Note: 见 .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
+  const contentHtml = useMemo(() => ({ __html: body.content }), [body.content]);
+  const translatedHtml = useMemo(
+    () => ({ __html: body.translatedContent }),
+    [body.translatedContent],
+  );
+  const hydratingBody = !body.content && (body.state === 'unrequested' || body.state === 'loading');
+  const fixedCollapsedHeight = !expanded && !showTranslate;
+  useLayoutEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+    const content = body.content;
+    const measure = () => {
+      const long = el.scrollHeight > 150;
+      setMeasurement((prev) => (
+        prev?.content === content && prev.long === long ? prev : { content, long }
+      ));
+    };
+    let measureFrame = 0;
+    const scheduleMeasure = () => {
+      if (measureFrame) return;
+      measureFrame = requestAnimationFrame(() => {
+        measureFrame = 0;
+        measure();
+      });
+    };
+    /* 观察自然高度内层，而不是固定 150px 外框：图片/视频在 effect 后加载时，
+       内层尺寸才会变化；固定外框的 RO 不会触发。 */
+    measure();
+    const mediaEventNames = ['load', 'error', 'loadedmetadata', 'loadeddata', 'durationchange'];
+    const mediaNodes = Array.from(el.querySelectorAll<HTMLImageElement | HTMLVideoElement>('img, video'));
+    for (const node of mediaNodes) {
+      for (const eventName of mediaEventNames) node.addEventListener(eventName, scheduleMeasure);
     }
-    /* 折叠态下 scrollHeight 仍是完整内容高（overflow:hidden 不改变
-       scrollHeight）——测量不受折叠影响 */
-    const ro = new ResizeObserver(() => {
-      const next = el.scrollHeight > 260;
-      if (next !== isLongRef.current) {
-        isLongRef.current = next;
-        setIsLong(next);
+    for (const eventName of mediaEventNames) el.addEventListener(eventName, scheduleMeasure, true);
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleMeasure);
+    ro?.observe(el);
+    return () => {
+      if (measureFrame) cancelAnimationFrame(measureFrame);
+      ro?.disconnect();
+      for (const node of mediaNodes) {
+        for (const eventName of mediaEventNames) node.removeEventListener(eventName, scheduleMeasure);
       }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
+      for (const eventName of mediaEventNames) el.removeEventListener(eventName, scheduleMeasure, true);
+    };
   }, [body.content]);
 
-  /* OPT-013 B3：译文块展示且带产物时惰性补齐校验状态——stale/partial 才能在卡片
-     上如实呈现（每会话每篇至多一次 IPC；生成/操作路径仍各自走权威校验）。 */
+  /* 外层虚拟项高度变化时先同步虚拟化测量，再让父级在本次 paint 前重取位置；
+     否则 18 段长文/图片正文落地会晚一帧把后续卡片推到位。 */
+  const lastReportedLayoutRef = useRef({ index: -1, height: 0 });
+  useLayoutEffect(() => {
+    const outer = cardRef.current?.parentElement;
+    if (!outer) return;
+    const report = () => {
+      if (!outer.isConnected) return;
+      const height = outer.offsetHeight;
+      if (height === lastReportedLayoutRef.current.height
+        && cardIndex === lastReportedLayoutRef.current.index) return;
+      lastReportedLayoutRef.current = { index: cardIndex, height };
+      onLayoutHeight(cardIndex, height);
+    };
+    report();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(report);
+    ro.observe(outer);
+    return () => ro.disconnect();
+  }, [body.content, body.translatedContent, expanded, showTranslate, cardIndex, onLayoutHeight]);
+
+  /* 仅对虚拟窗口已挂载、正文已水合的卡片取只读状态；没有整篇产物时也能发现
+     重启前保留的片段。相同输入只查一次，不在卡片挂载时发起付费生成。 */
   useEffect(() => {
-    if (!showTranslate || rawTranslated || !body.translatedContent) return;
+    if (body.state === 'unrequested' || body.state === 'loading') return;
     useAppStore.getState().ensureAiStatus(item.id);
-  }, [showTranslate, rawTranslated, body.translatedContent, item.id]);
+  }, [body.state, aiStatusInput, item.id]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：社交/通知卡补 article 语义角色 + tabIndex，融入卡片级
@@ -879,14 +1381,17 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
        Enter/Space 只在焦点落卡片本体（e.target===e.currentTarget）时生效：嵌套
        按钮/链接的键盘激活语义（原生 click 合成）不得被卡片级选中劫持。 */
     <div
-      ref={hydrateRef}
-      className={`social-card ${item.isRead ? 'read' : ''}`}
+      ref={setCardNode}
+      className={`social-card ${fixedCollapsedHeight ? 'social-card-collapsed' : 'social-card-expanded'} ${item.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`}
+      style={fixedCollapsedHeight ? { height: `${SOCIAL_COLLAPSED_CARD_HEIGHT}px` } : undefined}
       data-ctx="article"
       data-id={item.id}
       role="article"
       data-card-index={cardIndex}
       tabIndex={tabbable ? 0 : -1}
+      aria-current={selected ? 'true' : undefined}
       onKeyDown={(e) => {
+        if (activePlayerOwnsSpace(e)) return;
         if (e.key === 'Enter' || e.key === ' ') {
           if (e.target === e.currentTarget) {
             e.preventDefault();
@@ -901,7 +1406,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
       <div className="social-avatar">{feedName.charAt(0) || '?'}</div>
       <div className="social-body">
         {/* 标题：社交布局此前漏显示——正文太长时一眼无法辨识内容主题 */}
-        {item.title && <div className="social-card-title">{item.title}</div>}
+        {item.title && <div className="social-card-title" title={item.title}>{item.title}</div>}
         <div className="social-author-row">
           <strong className="social-author-name">{item.author}</strong>
           <span className="social-handle">{feedName}</span>
@@ -914,44 +1419,53 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
             影响）=「暂无正文」；其余（loading/未请求）=加载占位。 */}
         <div
           ref={textRef}
-          className={`social-text ${isLong && !expanded ? 'collapsed' : ''}`}
+          id={`social-text-${item.id}`}
+          className={`social-text ${expanded ? '' : 'collapsed'} ${hydratingBody ? 'social-text-loading' : ''} ${currentMeasurement?.long && !expanded ? 'social-text-clipped' : ''}`}
+          style={expanded ? undefined : { height: `${SOCIAL_COLLAPSED_BODY_HEIGHT}px` }}
           onClick={(e) => {
             const target = e.target as HTMLElement;
             if (target.tagName === 'IMG') {
               const src = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
-              if (src && !src.startsWith('data:')) {
+              if (src && /^https?:\/\//.test(src)) {
                 e.preventDefault();
-                openLightbox(src);
+                openLightbox(src, undefined, item.url);
               }
               return;
             }
             handleArticleLinkClick(e);
           }}
         >
-          {body.content ? (
-            <div dangerouslySetInnerHTML={{ __html: body.content }} />
-          ) : body.state === 'failed' ? (
+          <div ref={innerRef} className="social-text-inner">
+            {body.content ? (
+              <div dangerouslySetInnerHTML={contentHtml} />
+            ) : body.state === 'failed' ? (
+              <HydrateFailure
+                message={body.message}
+                onRetry={() => useAppStore.getState().retryHydration(item.id)}
+              />
+            ) : body.state === 'missing' ? (
+              <span className="hydrate-placeholder">{body.message}</span>
+            ) : body.state === 'ready' || body.state === 'cleared' ? (
+              /* TASK-100：占位透明度并入 .hydrate-placeholder 类（此前内联 opacity 两处） */
+              <span className="hydrate-placeholder">暂无正文</span>
+            ) : (
+              <span className="hydrate-placeholder">加载正文…</span>
+            )}
+          </div>
+        </div>
+        <div className="social-expand-slot">
+          {currentMeasurement?.long && (
             <button
-              className="hydrate-retry"
-              onClick={() => useAppStore.getState().retryHydration(item.id)}
+              className="notif-expand-btn social-expand-btn"
+              aria-expanded={expanded}
+              aria-controls={`social-text-${item.id}`}
+              onClick={() => setExpanded(!expanded)}
             >
-              正文加载失败：{body.message}（点击重试）
+              {expanded ? '收起内容 ▲' : '展开更多 ▼'}
             </button>
-          ) : body.state === 'missing' ? (
-            <span className="hydrate-placeholder">{body.message}</span>
-          ) : body.state === 'ready' || body.state === 'cleared' ? (
-            /* TASK-100：占位透明度并入 .hydrate-placeholder 类（此前内联 opacity 两处） */
-            <span className="hydrate-placeholder">暂无正文</span>
-          ) : (
-            <span className="hydrate-placeholder">加载正文…</span>
           )}
         </div>
-        {isLong && (
-          <button className="notif-expand-btn social-expand-btn" onClick={() => setExpanded(!expanded)}>
-            {expanded ? '收起内容 ▲' : '展开更多 ▼'}
-          </button>
-        )}
-        <div className={"social-translated-block" + (showTranslate ? " show" : "")}>
+        <div className={"social-translated-block" + (showTranslate ? " show" : "")} onClick={handleArticleLinkClick}>
           {/* TASK-065 N8/N11：未消毒流式产物按纯文本渲染；消毒后与 Reader 同口径按 HTML 渲染。
               TASK-122：cleared 判别态呈现「已清空」（与「从未生成过」的空白区分） */}
           {rawTranslated ? (
@@ -959,7 +1473,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
           ) : body.state === 'cleared' && !body.translatedContent ? (
             <span className="hydrate-placeholder">AI 缓存已清空，可重新生成</span>
           ) : (
-            <span dangerouslySetInnerHTML={{ __html: body.translatedContent }} />
+            <span dangerouslySetInnerHTML={translatedHtml} />
           )}
           {translatingCard ? <span>翻译中…</span> : null}
           {/* fix-5：翻译失败内联错误行 + 重试（此前失败只有 toast 一闪，半截译文无恢复入口） */}
@@ -987,7 +1501,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
               <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>继续</button>
               <button
                 className="ai-retry-btn"
-                title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                title="删除本机保存的全部分段进度与整篇译文，之后重新生成从零开始"
                 onClick={() => void useAppStore.getState().clearAiProduct(item.id, 'translation')}
               >
                 清除
@@ -1030,7 +1544,6 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
                 useAppStore.getState().translateEntry(item.id);
               } else if (body.translatedContent) {
                 if (next) useAppStore.getState().translateEntry(item.id);
-                showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
               }
               setTransOverride(next);
             }}
@@ -1042,7 +1555,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
             className="social-act-item"
             onClick={() => {
               if (!item.url) { showToast('该条目没有原文链接'); return; }
-              void openExternal(item.url).catch(() => showToast('打开失败'));
+              void openExternalWithFeedback(item.url);
             }}
           >
             <Icons.externalLink />
@@ -1064,66 +1577,44 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
-  const openLightbox = useAppStore((s) => s.openLightbox);
+  const openGalleryLightbox = useAppStore((s) => s.openGalleryLightbox);
   const selectArticle = useAppStore((s) => s.selectArticle);
-  const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
-  /* 封面图防盗链代理：需要代理的图床（如 doubanio.com）走后端 fetch_image 拿
-     bytes 转 data: URL；不需要的图原样直连。空 imageUrl（源没给图）则 src 为空，
-     由 CSS 的 object 兜底显示。 */
-  const [proxiedSrc, setProxiedSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const src = item.imageUrl;
-    if (!src) return; // 无图：proxiedSrc 保持初始 null，走「无图」占位分支
-    void proxyImageUrl(src, item.url).then((dataUrl) => {
-      if (!alive) return;
-      setProxiedSrc(dataUrl); // data: URL 或 null（不需要代理/失败）
-    });
-    return () => { alive = false; };
-  }, [item.imageUrl, item.url]);
-  /* fix-9（自检 UI-P2-1）：直连再失败不再留浏览器破图——记入共享封面失败态
-     （lib/coverImage 的 onCoverError，与另四处同源）并就地出 cover-fallback 占位，
-     五个封面位的失败视觉语言统一。 */
-  const [imgFailed, setImgFailed] = useState(false);
-  /* 换图源（imageUrl 变化）时清失败态：渲染期对比上一渲染的派生调整
-     （React 官方模式，避免 set-state-in-effect 警告） */
-  const [prevImageUrl, setPrevImageUrl] = useState(item.imageUrl);
-  if (prevImageUrl !== item.imageUrl) {
-    setPrevImageUrl(item.imageUrl);
-    setImgFailed(false);
-  }
-  const imgSrc = proxiedSrc ?? item.imageUrl;
-  /* 打开灯箱 = 用户"看到"了这张图；画廊布局下无阅读器列，
-     以灯箱打开作为已读触发点（与 markReadOnOpen 设置解耦——
-     点开大图本身就是"阅读完成"，不标读会出现永远未读的幽灵项） */
-  const openImage = () => {
-    /* 灯箱用代理后的 data: URL（若有）：豆瓣等防盗链图，原始 URL 在灯箱里
-       no-referrer 也会 418；代理成功则用 data: URL 放大。 */
-    const lightboxSrc = proxiedSrc ?? item.imageUrl;
-    if (lightboxSrc) openLightbox(lightboxSrc, item.id);
-    if (!item.isRead) {
-      useAppStore.getState().markEntriesReadBulk([item.id]);
-    } else {
-      selectArticle(item.id);
-    }
+  const activeArticleId = useAppStore((s) => s.activeArticleId);
+  const selected = activeArticleId === item.id;
+  const feedName = useAppStore((s) => (s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId))?.feed.name ?? '');
+  const pendingGallery = useAppStore((s) => s.lightboxGallery?.entryId === item.id && !s.lightboxUrl
+    ? s.lightboxGallery.status : null);
+  const mediaKey = galleryMediaKey(item);
+  const busy = useAppStore(s => s.libraryRestoreBusy);
+  const generation = useAppStore(s => s.libraryGeneration);
+  const { lease, snapshot, retry } = useImageResource(item.imageUrl, item.url, !busy, 1, `${generation}:${mediaKey}`);
+  const direct = !item.imageUrl || !canProxyImages() || !needsImageProxy(item.imageUrl);
+  const imgSrc = snapshot.status === 'ready' ? snapshot.src : direct ? item.imageUrl : null;
+  const imgFailed = snapshot.status === 'failed';
+  const openImage = (target: HTMLElement) => {
+    // 图片失败/换源时触发节点也不卸载；useFocusTrap 归还同一卡片且 preventScroll。
+    target.focus({ preventScroll: true });
+    if (imgFailed) retry();
+    selectArticle(item.id);
+    openGalleryLightbox(item.id);
   };
-  const onImgError = () => {
-    if (imgSrc) onCoverError(imgSrc);
-    setImgFailed(true);
-  };
+  const onImgError = () => lease?.failDecode();
+  const imageCount = item.imageCount ?? (item.imageUrl ? 1 : 0);
   return (
-    <div className={`gallery-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
-      {imgSrc && !imgFailed ? (
-        <img
-          src={imgSrc}
-          loading="lazy"
-          onClick={openImage}
-          onError={onImgError}
+    <div className={`gallery-card ${item.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`} data-ctx="article" data-id={item.id}>
+      <div className="gallery-media">
+        <div
+          className="gallery-media-trigger"
+          onClick={(e) => openImage(e.currentTarget)}
           role="button"
           data-card-index={cardIndex}
           tabIndex={tabbable ? 0 : -1}
+          aria-label={`预览${item.title}，${imageCount} 张图片`}
+          aria-busy={pendingGallery === 'loading'}
+          aria-current={selected ? 'true' : undefined}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
+            if (activePlayerOwnsSpace(e)) return;
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(e.currentTarget); return; }
             /* 行优先 lanes 的几何语义（C-P2-2）：Right/Left = 同排相邻 ±1、
                Down/Up = 同列跨排 ±列数。边界 clamp：目标越界（首尾卡）不动——
                不跳列、不回绕（moveCardFocus 的越界 no-op 即 clamp，最小惊讶）。
@@ -1134,27 +1625,25 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
             else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }
             else if (e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -lanes); }
           }}
-          alt={item.title}
-          referrerPolicy="no-referrer"
-        />
-      ) : (
-        <div
-          className={`gallery-no-image${imgFailed ? ' cover-fallback' : ''}`}
-          onClick={openImage}
-          role="button"
-          data-card-index={cardIndex}
-          tabIndex={tabbable ? 0 : -1}
-          data-cover-state={imgFailed ? 'failed' : 'empty'}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
-            /* 同上：行优先 lanes 几何语义 + 越界 clamp（见本组件 img 分支注释） */
-            if (e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
-            else if (e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
-            else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }
-            else if (e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -lanes); }
-          }}
-        >{imgFailed ? <Icons.image /> : '无图'}</div>
-      )}
+        >
+          {imgSrc && !imgFailed ? (
+            <img key={`${mediaKey}:${imgSrc}`} src={imgSrc} loading="lazy" onError={onImgError}
+              alt={item.title} referrerPolicy="no-referrer" />
+          ) : (
+            <div className={`gallery-no-image${imgFailed ? ' cover-fallback' : ''}`}
+              data-cover-state={imgFailed ? 'failed' : 'empty'}>
+              {pendingGallery === 'loading' || (!direct && !imgFailed && !imgSrc) ? '加载图片…'
+                : pendingGallery === 'error' ? '图片加载失败，点击重试'
+                : pendingGallery === 'empty' ? '暂无图片，点击重试'
+                : imgFailed ? <span>图片加载失败，点击重试</span> : '无图'}
+            </div>
+          )}
+        </div>
+        <button className="gallery-image-count" tabIndex={tabbable ? 0 : -1}
+          aria-label={`查看全部 ${imageCount} 张图片`} onClick={(e) => openImage(e.currentTarget)}>
+          <Icons.image /><span>{imageCount}</span>
+        </button>
+      </div>
       <div className="gallery-meta">
         {/* TASK-100 U5：截断的画廊标题补 title（=未截断全文） */}
         <div className="gallery-title" title={item.title}>{item.title}</div>
@@ -1164,6 +1653,7 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
             <button
               className={`toggle-action-btn notif-act ${item.isStarred ? 'act-on' : ''}`}
               onClick={(e) => { e.stopPropagation(); toggleEntryFlag(item.id, 'isStarred'); }}
+              tabIndex={tabbable ? 0 : -1}
               title={item.isStarred ? '取消收藏' : '收藏'}
             >
               {/* TASK-100 U3：星号/空心星字符改 Icons SVG（收藏态 starFilled），颜色仍走 --star-color */}
@@ -1174,6 +1664,7 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
             <button
               className={`toggle-action-btn notif-act ${item.isRead ? 'act-on' : ''}`}
               onClick={(e) => { e.stopPropagation(); toggleEntryFlag(item.id, 'isRead'); }}
+              tabIndex={tabbable ? 0 : -1}
             >
               <span>{item.isRead ? '标为未读' : '标为已读'}</span>
             </button>
@@ -1194,7 +1685,9 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
 }) {
   const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
   const togglePlayerPlay = useAppStore((s) => s.togglePlayerPlay);
-  const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  const activeArticleId = useAppStore((s) => s.activeArticleId);
+  const selected = activeArticleId === item.id;
+  const feedName = useAppStore((s) => (s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId))?.feed.name ?? '');
   const play = () => {
     const audioUrl = item.enclosureUrl ?? '';
     const cur = useAppStore.getState().player;
@@ -1213,12 +1706,14 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
   };
   return (
     <div
-      className={`podcast-card ${item.isRead ? 'read' : ''}`}
+      className={`podcast-card ${item.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`}
       onClick={play}
       role="button"
       data-card-index={cardIndex}
       tabIndex={tabbable ? 0 : -1}
+      aria-current={selected ? 'true' : undefined}
       onKeyDown={(e) => {
+        if (activePlayerOwnsSpace(e)) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); return; }
         if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
         else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
@@ -1261,15 +1756,18 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
+  const activeArticleId = useAppStore((s) => s.activeArticleId);
+  const selected = activeArticleId === item.id;
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const summarizeEntry = useAppStore((s) => s.summarizeEntry);
-  const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  const feedName = useAppStore((s) => (s.sourceIndex.get(item.feedId) ?? s.feedIndex.get(item.feedId))?.feed.name ?? '');
   const summaryGenerating = useAppStore((s) => s.summarizingIds[item.id]);
   const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
   /* OPT-013 B3：摘要与译文五态（卡片入口与 Reader 同一单点判定）。 */
   const summaryState = useAppStore((s) => selectAiProductState(s, item.id, 'summary'));
   const translationState = useAppStore((s) => selectAiProductState(s, item.id, 'translation'));
-  const translationSegments = useAppStore((s) => s.aiStatusById[item.id]?.translationSegments ?? null);
+  const translationSegments = useAppStore((s) => selectAiCacheStatus(s, item.id)?.translationSegments ?? null);
+  const aiStatusInput = useAppStore(useShallow((s) => selectAiStatusInput(s, item.id)));
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
@@ -1281,6 +1779,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
   const hydrateRef = useLazyHydrate(item.id);
+  useCenterDwellAi(item.id, hydrateRef);
   /* TASK-114 X1 → TASK-122：水合三态从 selectArticleBody 派生（对齐 SocialCard）
      ——useLazyHydrate 内部已按 entryNeedsHydration 触发请求，这里消费记录状态
      把结果呈现出来：失败=内联重试（不再静默回退 snippet）、missing=文章不存在、
@@ -1296,8 +1795,8 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   const displayText = expanded && fullText ? fullText : item.snippet;
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
   /* fix-8：摘要框跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但
-     尚无摘要时按收起处理，不再渲染空壳摘要框（自动生成只在 Reader 打开文章
-     时触发，卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「摘要」仍会就地
+     尚无摘要时按收起处理，不再渲染空壳摘要框（自动生成仅在中心连续停顿
+     时触发，卡片挂载本身不发起）；手动点「摘要」仍会就地
      触发生成并展开。 */
   const summaryOpen = summaryOverride ?? autoAiBlockOpen(
     feedConfig.autoSummary,
@@ -1306,36 +1805,36 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
     !!summaryError,
   );
   /* fix-8：译文块同口径（见上） */
-  const transShow = transOverride ?? autoAiBlockOpen(
+  const transShow = transOverride ?? (translationState === 'partial' || autoAiBlockOpen(
     feedConfig.autoTranslate,
     !!body.translatedContent,
     !!translatingCard,
     !!translateError,
-  );
+  ));
   /* 自动收起：按展示源文本判定（全文可得时按全文长度，否则按 snippet），
      短内容直接全文展示、不渲染展开按钮 */
   const isLong = (fullText || item.snippet || '').length > 120;
 
-  /* OPT-013 B3：摘要框/译文块展示且带产物时惰性补齐校验状态（同 SocialCard）。 */
+  /* 与社交卡共用输入资格；仅片段重启也能发现 partial，不依赖先显示整篇产物。 */
   useEffect(() => {
-    const showSummaryWithProduct = summaryOpen && !!body.aiSummary;
-    const showTransWithProduct = transShow && !!body.translatedContent && !rawTranslated;
-    if (!showSummaryWithProduct && !showTransWithProduct) return;
+    if (body.state === 'unrequested' || body.state === 'loading') return;
     useAppStore.getState().ensureAiStatus(item.id);
-  }, [summaryOpen, transShow, rawTranslated, body.aiSummary, body.translatedContent, item.id]);
+  }, [body.state, aiStatusInput, item.id]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：同 SocialCard——补 role/tabIndex 融入 roving 体系。
        TASK-114 X2：Enter/Space=选中，e.target 守卫与 role 裁定同 SocialCard 注释。 */
     <div
       ref={hydrateRef}
-      className={`notif-card ${item.isRead ? 'read' : ''}`}
+      className={`notif-card ${item.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`}
       data-ctx="article"
       data-id={item.id}
       role="article"
       data-card-index={cardIndex}
       tabIndex={tabbable ? 0 : -1}
+      aria-current={selected ? 'true' : undefined}
       onKeyDown={(e) => {
+        if (activePlayerOwnsSpace(e)) return;
         if (e.key === 'Enter' || e.key === ' ') {
           if (e.target === e.currentTarget) {
             e.preventDefault();
@@ -1435,12 +1934,10 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
       {fullText ? (
         <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
       ) : body.state === 'failed' ? (
-        <button
-          className="hydrate-retry"
-          onClick={() => useAppStore.getState().retryHydration(item.id)}
-        >
-          正文加载失败：{body.message}（点击重试）
-        </button>
+        <HydrateFailure
+          message={body.message}
+          onRetry={() => useAppStore.getState().retryHydration(item.id)}
+        />
       ) : item.snippet ? (
         <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
       ) : body.state === 'missing' ? (
@@ -1451,7 +1948,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
         <div className="notif-body-text"><span className="hydrate-placeholder">加载正文…</span></div>
       )}
 
-      <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>
+      <div className={`notif-translated-block ${transShow ? 'show' : ''}`} onClick={handleArticleLinkClick}>
         {/* TASK-065 N8/N11：同 SocialCard——未消毒按纯文本，消毒后按 HTML */}
         {rawTranslated ? (
           <span>{body.translatedContent}</span>
@@ -1486,7 +1983,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
             <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>继续</button>
             <button
               className="ai-retry-btn"
-              title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+              title="删除本机保存的全部分段进度与整篇译文，之后重新生成从零开始"
               onClick={() => void useAppStore.getState().clearAiProduct(item.id, 'translation')}
             >
               清除
@@ -1508,3 +2005,5 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
     </div>
   );
 });
+
+

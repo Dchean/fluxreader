@@ -38,6 +38,7 @@ export const OVERLAY_YIELD_KEYS: readonly string[] = ['s', 'S', 'm', 'M', 'j', '
    与 OVERLAY_YIELD_KEYS 的既有做法一致。 */
 export interface OverlayState {
   searchOpen: boolean;
+  contextMenuOpen?: boolean;
   settingsOpen: boolean;
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
@@ -60,6 +61,7 @@ export const OVERLAY_SOURCES: readonly {
   isOpen: (s: OverlayState) => boolean;
 }[] = [
   { name: 'search', isOpen: (s) => s.searchOpen },
+  { name: 'contextMenu', isOpen: (s) => !!s.contextMenuOpen },
   { name: 'settings', isOpen: (s) => s.settingsOpen },
   { name: 'newCategory', isOpen: (s) => s.newCategoryModalOpen },
   { name: 'addFeed', isOpen: (s) => s.addFeedModalOpen },
@@ -68,7 +70,8 @@ export const OVERLAY_SOURCES: readonly {
   { name: 'lightbox', isOpen: (s) => !!s.lightboxUrl },
   /* Full Player 大浮层：仅在播放器激活时才算浮层 */
   { name: 'playerExpanded', isOpen: (s) => s.playerExpanded && s.playerActive },
-  /* 关闭确认框（closeAsk）：视觉层级最高（3000），单键必须让路 */
+  /* 关闭确认框（closeAsk）：走普通 modal-overlay（z-index 150），不是
+     ConfirmDialog 的 3000；打开时单键必须让路 */
   { name: 'closeAsk', isOpen: (s) => s.closeAskVisible },
   /* 错误中心（errorCenter，OPT-017E）：面板打开时单键让路 */
   { name: 'errorCenter', isOpen: (s) => s.errorCenterOpen },
@@ -89,4 +92,47 @@ export function shouldYieldToOverlay(
   if (!overlayOpen) return 'proceed';
   if (hasModifier) return 'proceed';
   return OVERLAY_YIELD_KEYS.includes(key) ? 'yield' : 'proceed';
+}
+
+/* ============================================================
+   播放器 Space 的原生控件让路清单。
+
+   播放器激活时，Space 默认切换播放/暂停；但焦点在原生表单控件、链接、菜单项
+   等交互节点上时，Space 属于该控件自身（button 的 click 合成、select 展开、
+   菜单项激活等），全局快捷键不得吞掉。
+
+   刻意不包含 [role="button"]：Timeline 的卡片用 role=button/article 承载
+   roving 焦点，播放器激活时卡片上的 Space 仍应走全局播放切换；卡内真实
+   button 会先命中本清单并让路。 */
+const SPACE_INTERACTIVE_SELECTOR = [
+  'button',
+  'a[href]',
+  'input',
+  'select',
+  'textarea',
+  'summary',
+  'audio[controls]',
+  'video[controls]',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="menuitem"]',
+  '[role="menuitemcheckbox"]',
+  '[role="menuitemradio"]',
+  '[role="option"]',
+  '[role="checkbox"]',
+  '[role="radio"]',
+  '[role="switch"]',
+  '[role="slider"]',
+  '[role="combobox"]',
+  '[role="searchbox"]',
+  '[role="textbox"]',
+  '[role="tab"]',
+  '[role="treeitem"]',
+  '[role="gridcell"]',
+].join(', ');
+
+/** Space 是否应交给当前焦点控件，而不是播放器全局快捷键。 */
+export function isInteractiveSpaceTarget(target: Element | null): boolean {
+  if (!target) return false;
+  if ((target as HTMLElement).isContentEditable) return true;
+  return Boolean(target.closest(SPACE_INTERACTIVE_SELECTOR));
 }

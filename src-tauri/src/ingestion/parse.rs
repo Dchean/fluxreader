@@ -17,7 +17,37 @@ pub struct ParsedFeed {
     pub title: Option<String>,
     pub site_url: Option<String>,
     pub icon: Option<String>,
-    pub articles: Vec<NewArticle>,
+    pub articles: Vec<ParsedArticle>,
+}
+
+impl ParsedFeed {
+    pub fn push_article(&mut self, article: NewArticle) {
+        self.articles.push(article.into());
+    }
+}
+
+/// 单条直连条目及其日期来源元数据。未来日期被钳制后，值不再是源发布时间；
+/// 该标记必须随条目一起进入 DB，不能靠比较 `published_at` 与当前时间反推。
+pub struct ParsedArticle {
+    pub article: NewArticle,
+    pub published_at_clamped: bool,
+}
+
+impl std::ops::Deref for ParsedArticle {
+    type Target = NewArticle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.article
+    }
+}
+
+impl From<NewArticle> for ParsedArticle {
+    fn from(article: NewArticle) -> Self {
+        Self {
+            article,
+            published_at_clamped: false,
+        }
+    }
 }
 
 pub fn parse_feed(bytes: &[u8], base_url: &str) -> AppResult<ParsedFeed> {
@@ -71,7 +101,7 @@ fn clamp_publish_date(date: DateTime<Utc>) -> DateTime<Utc> {
     }
 }
 
-fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
+fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
     let url = e
         .links
         .iter()
@@ -85,26 +115,7 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         .map(|t| t.content.trim().to_string())
         .filter(|t| !t.is_empty());
 
-    // 发布时间：源未提供 pubDate/updated 时，回退为抓取时间（否则 published_at
-    // 为 NULL，前端 publishedAt=0 显示成 1970-01-01，且「今天」过滤/排序都失准）。
-    // 有真实 guid 的条目去重键不依赖时间，兜底不影响去重。
-    let published_at = e
-        .published
-        .or(e.updated)
-        .map(clamp_publish_date)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339();
-    let published_at = Some(published_at);
-
-    // 去重键优先级：真实 guid → title+日期 → URL
-    let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {
-        e.id.clone()
-    } else if let Some(t) = title.as_deref() {
-        format!("{t}\u{1f}{}", published_at.as_deref().unwrap_or(""))
-    } else {
-        url.clone()?
-    };
-
+    let title_text = title.unwrap_or_else(|| "(untitled)".into());
     let raw_html = e
         .content
         .as_ref()
@@ -119,6 +130,26 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
     };
     let body_text = crate::sanitize::html_to_text(&raw_html);
 
+    // 源日期与「是否缺失」是两件事：缺失时 published_at 保持 None，由 DB 用
+    // first_seen_at 兜底并把来源标为 inferred_fetch；不能在这里写 Utc::now()，
+    // 否则每次刷新都会把抓取时间伪装成发布时间、并污染无 id 条目的身份。
+    let source_date = e.published.or(e.updated);
+    let is_future = source_date
+        .as_ref()
+        .is_some_and(|d| *d > Utc::now() + chrono::Duration::hours(24));
+    // 观察保留源的原始 UTC 日期。显示仍按旧规则 clamp，但 clamp/fetch 时刻
+    // 不能替代原始日期进入空候选；DB 非空内容键不消费该观察 token。
+    let observed_date = source_date.as_ref().map(|d| d.to_rfc3339());
+    let published_at = source_date.map(|d| clamp_publish_date(d).to_rfc3339());
+
+    // Note: 弱观察须同时保留URL和原始源日期，空字节不提供内容证明 — 见
+    // .agents/notes/proposed/architecture/2026-11-09-源内等价组与持久条目状态.md
+    let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {
+        e.id.clone()
+    } else {
+        crate::db::weak_observation_guid(url.as_deref(), &title_text, observed_date.as_deref())
+    };
+
     let summary = e
         .summary
         .as_ref()
@@ -131,7 +162,15 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         .iter()
         .find_map(|m| {
             m.thumbnails
-                .first()
+                .iter()
+                .find(|thumbnail| {
+                    crate::sanitize::cover_image_candidate(
+                        &thumbnail.image.uri,
+                        thumbnail.image.width,
+                        thumbnail.image.height,
+                        "",
+                    )
+                })
                 .map(|t| t.image.uri.clone())
                 .or_else(|| {
                     m.content.iter().find_map(|c| {
@@ -140,7 +179,16 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
                             .as_ref()
                             .map(|t| t.ty().as_str() == "image")
                             .unwrap_or(false);
-                        if is_img {
+                        if is_img
+                            && c.url.as_ref().is_some_and(|url| {
+                                crate::sanitize::cover_image_candidate(
+                                    url.as_str(),
+                                    c.width,
+                                    c.height,
+                                    "",
+                                )
+                            })
+                        {
                             c.url.as_ref().map(|u| u.to_string())
                         } else {
                             None
@@ -149,9 +197,12 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
                 })
         })
         .or_else(|| {
-            content_html
-                .as_deref()
-                .and_then(crate::sanitize::first_image)
+            crate::sanitize::first_image(&raw_html).and_then(|raw| {
+                let resolved = url::Url::parse(&raw)
+                    .or_else(|_| url::Url::parse(base).and_then(|base| base.join(&raw)))
+                    .ok()?;
+                matches!(resolved.scheme(), "http" | "https").then(|| resolved.to_string())
+            })
         });
 
     // 播客 enclosure：音频/视频媒体（type 缺失时按扩展名推断）
@@ -182,20 +233,23 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
         .filter(|d| *d > 0);
 
-    Some(NewArticle {
-        guid,
-        url,
-        title: title.unwrap_or_else(|| "(untitled)".into()),
-        author: e.authors.first().map(|p| p.name.clone()),
-        summary,
-        content_html,
-        body_text,
-        image_url,
-        enclosure_url: enclosure.as_ref().map(|(u, _, _)| u.clone()),
-        enclosure_mime: enclosure.as_ref().and_then(|(_, m, _)| m.clone()),
-        duration_sec,
-        published_at,
-        source: "direct".into(),
+    Some(ParsedArticle {
+        article: NewArticle {
+            guid,
+            url,
+            title: title_text,
+            author: e.authors.first().map(|p| p.name.clone()),
+            summary,
+            content_html,
+            body_text,
+            image_url,
+            enclosure_url: enclosure.as_ref().map(|(u, _, _)| u.clone()),
+            enclosure_mime: enclosure.as_ref().and_then(|(_, m, _)| m.clone()),
+            duration_sec,
+            published_at,
+            source: "direct".into(),
+        },
+        published_at_clamped: is_future,
     })
 }
 
@@ -213,5 +267,150 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
         "webm" => Some("video/webm"),
         "mov" => Some("video/quicktime"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_selection_rejects_tiny_media_and_decorative_body_before_normal_photo() {
+        let xml = r#"<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>F</title><link>https://example.com</link><description>F</description><item><guid>x</guid><title>T</title><link>https://example.com/post</link><media:thumbnail url="https://example.com/tiny.jpg" width="1" height="1"/><media:content url="https://example.com/tiny-content.jpg" type="image/jpeg" width="32" height="32"/><description><![CDATA[<img class="author-avatar" src="https://example.com/avatar.jpg" width="120" height="120"><img src="/photo.jpg">]]></description></item></channel></rss>"#;
+        let feed = parse_feed(xml.as_bytes(), "https://example.com/feed").unwrap();
+        assert_eq!(
+            feed.articles[0].image_url.as_deref(),
+            Some("https://example.com/photo.jpg")
+        );
+        let xml = xml.replace("width=\"1\" height=\"1\"", "width=\"640\" height=\"360\"");
+        assert_eq!(
+            parse_feed(xml.as_bytes(), "https://example.com/feed")
+                .unwrap()
+                .articles[0]
+                .image_url
+                .as_deref(),
+            Some("https://example.com/tiny.jpg"),
+            "正常媒体缩略图仍优先"
+        );
+    }
+
+    fn feed(items: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>F</title><link>https://feed.example/</link><description>d</description>
+{items}
+</channel></rss>"#
+        )
+    }
+
+    #[test]
+    fn missing_date_is_none_and_observation_is_repeatable() {
+        let xml = feed(r#"<item><title>Same</title><description>same body</description></item>"#);
+        let first = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        let second = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        assert!(first.articles[0].published_at.is_none());
+        assert_eq!(first.articles[0].guid, second.articles[0].guid);
+        assert!(first.articles[0].guid.starts_with('\u{1}'));
+    }
+
+    #[test]
+    fn future_date_observation_keeps_original_date_instead_of_clamp_time() {
+        let xml = feed(
+            r#"<item>
+                 <title>Future</title>
+                 <description>future body</description>
+                 <pubDate>Wed, 24 Aug 2033 11:00:00 GMT</pubDate>
+               </item>"#,
+        );
+        let first = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let second = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        assert_eq!(
+            first.articles[0].guid, second.articles[0].guid,
+            "钳制后的当前时间不得进入持久身份"
+        );
+        let published = first.articles[0]
+            .published_at
+            .as_deref()
+            .expect("源日期存在（已钳制）");
+        assert!(published.starts_with("20"));
+        assert!(
+            first.articles[0].published_at_clamped,
+            "钳制后的值必须携带独立来源标记"
+        );
+    }
+
+    #[test]
+    fn real_id_precedes_url_and_url_identity_is_synthetic() {
+        let xml = feed(
+            r#"<item>
+                 <title>With id</title>
+                 <guid isPermaLink="false">real-id</guid>
+                 <link>https://e.example/a</link>
+               </item>
+               <item>
+                 <title>URL only</title>
+                 <link>https://e.example/a</link>
+               </item>"#,
+        );
+        let parsed = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        assert_eq!(parsed.articles[0].guid, "real-id");
+        assert!(parsed.articles[1].guid.starts_with('\u{1}'));
+        assert_ne!(parsed.articles[0].guid, parsed.articles[1].guid);
+    }
+
+    #[test]
+    fn empty_observations_keep_raw_dates_with_and_without_urls() {
+        for link in ["", "<link>https://e.example/shared</link>"] {
+            let parse = |date: &str| {
+                let xml = feed(&format!("<item><title>empty</title>{link}{date}</item>"));
+                parse_feed(xml.as_bytes(), "https://feed.example/rss")
+                    .unwrap()
+                    .articles
+                    .remove(0)
+            };
+            let absent = parse("");
+            assert!(absent.published_at.is_none());
+            assert_eq!(absent.guid, parse("").guid);
+            let first = parse("<pubDate>Sat, 01 Jan 2000 00:00:00 GMT</pubDate>");
+            let same_utc = parse("<pubDate>Sat, 01 Jan 2000 08:00:00 +0800</pubDate>");
+            let second = parse("<pubDate>Sun, 02 Jan 2000 00:00:00 GMT</pubDate>");
+            assert_eq!(first.guid, same_utc.guid);
+            assert_ne!(first.guid, second.guid);
+            assert_ne!(first.guid, absent.guid);
+            assert!(
+                first.content_html.as_deref().unwrap_or("").is_empty()
+                    && first.body_text.is_empty()
+            );
+            let future = parse("<pubDate>Wed, 24 Aug 2033 11:00:00 GMT</pubDate>");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let replay = parse("<pubDate>Wed, 24 Aug 2033 11:00:00 GMT</pubDate>");
+            assert!(future.published_at_clamped && replay.published_at_clamped);
+            assert_ne!(future.published_at, replay.published_at);
+            assert_eq!(future.guid, replay.guid);
+            assert_ne!(
+                future.guid,
+                parse("<pubDate>Thu, 25 Aug 2033 11:00:00 GMT</pubDate>").guid
+            );
+            assert_ne!(future.guid, absent.guid);
+        }
+    }
+
+    #[test]
+    fn atom_updated_fallback_is_observed_before_clamping() {
+        let parse = |updated: &str| {
+            let xml = format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>F</title><id>feed</id><updated>2000-01-01T00:00:00Z</updated><entry><title>empty</title><link href="https://e.example/shared"/><updated>{updated}</updated></entry></feed>"#
+            );
+            parse_feed(xml.as_bytes(), "https://feed.example/rss")
+                .unwrap()
+                .articles
+                .remove(0)
+        };
+        let first = parse("2033-08-24T11:00:00Z");
+        assert!(first.published_at_clamped);
+        assert_eq!(first.guid, parse("2033-08-24T19:00:00+08:00").guid);
+        assert_ne!(first.guid, parse("2033-08-25T11:00:00Z").guid);
     }
 }

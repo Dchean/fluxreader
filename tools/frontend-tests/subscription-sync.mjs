@@ -77,7 +77,16 @@ export async function run(ctx) {
         const added = B.feeds.find((f) => f.id === B.lastAddedId);
         if (added) added.title = '远端回填标题';
         B.feeds.push(remoteRow(502, '远端导入源'));
-        return Promise.resolve('已同步 2 个订阅');
+        return Promise.resolve({
+          ok: true,
+          protocol: 'greader',
+          writeBack: true,
+          queued: 2,
+          pushed: 2,
+          failed: 0,
+          errors: [],
+          message: '已同步 2 个订阅',
+        });
       }
       case 'sync_status':
         return Promise.resolve({ connected: be.connected });

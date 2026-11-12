@@ -1,16 +1,5 @@
-//! OPT-008B 第一阶段（条目身份与实际消费者）：跨源同 URL 独立条目身份回归。
-//!
-//! 目标语义（OPT-008B 卡片第一阶段）：
-//! - 条目是「订阅源 / 远端 ID」的独立实体：两个源推送同一 URL、远端 entry id
-//!   不同时，本地必须各有持久条目（不因 URL 相同被吞掉/借位绑定）；
-//! - 精确协议 entry ID 优先；URL 兜底只在同一订阅源内选行；
-//! - 读广播（同文副本跨源传播）保留：本地标读 → 推送广播到同文副本的 remote_id；
-//!   远端任一副本已读 → 拉取合并广播到同文其它条目；
-//! - unread / star / unstar 只作用于当前条目（收藏隔离）；
-//! - 重复 pull 幂等；删除/断开一个源不污染另一个同 URL 条目。
-//!
-//! 本文件先于实现编写（反例驱动）：实现前同 URL 跨源 entry 只有一行（或落在
-//! CSV 记账里），断言必红；实现后两协议都必须各留两行并各自收敛。
+//! 真实GUID与远端ID独立持久身份、源内内容证明首绑、跨源状态隔离回归。
+//! 原跨源广播用例已按2026-11-09确认契约改为隔离反例；版本与pending保护继续保留。
 
 mod common;
 mod mock_greader;
@@ -133,21 +122,6 @@ async fn greader_cross_feed_same_url_keeps_independent_entries() {
         assert_eq!(bound_a, Some(eid_a), "源A 条目绑定自己的 remote id");
         assert_eq!(bound_b, Some(eid_b), "源B 条目绑定自己的 remote id");
         assert_ne!(aid_a, aid_b, "两行是不同的持久条目");
-
-        // 不再需要 CSV 记账（两源都已绑定 → 各自成行）
-        let dups: (String, String) = conn
-            .query_row(
-                "SELECT (SELECT remote_dup_ids FROM articles WHERE id = ?1),
-                        (SELECT remote_dup_ids FROM articles WHERE id = ?2)",
-                [aid_a, aid_b],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            dups,
-            (String::new(), String::new()),
-            "两源都已绑定后不得再走 CSV 记账"
-        );
     }
 
     // ---- 收藏隔离：远端只收藏 B，对账不得碰 A ----
@@ -194,8 +168,8 @@ async fn greader_cross_feed_same_url_keeps_independent_entries() {
         );
         assert_eq!(
             updates.get(&eid_b).map(String::as_str),
-            Some("read"),
-            "读广播必须覆盖同文副本的 remote_id（双端：手机侧副本也已读）"
+            None,
+            "标读 A 不得向其他源 B 推送状态"
         );
         let toggles = server.bookmark_toggles.lock().unwrap().clone();
         assert!(
@@ -223,7 +197,7 @@ async fn greader_cross_feed_same_url_keeps_independent_entries() {
         assert_eq!(bound_a, Some(eid_a), "重复 pull 不得换绑");
         assert_eq!(bound_b, Some(eid_b), "重复 pull 不得换绑");
         assert!(state_of(&conn, aid_a).0, "已读状态在幂等重拉后保持");
-        assert!(state_of(&conn, aid_b).0, "推送广播后的副本保持已读");
+        assert!(!state_of(&conn, aid_b).0, "其他源 B 保持自己的远端未读");
     }
 
     // ---- 删除一个源不污染另一个同 URL 条目 ----
@@ -257,11 +231,11 @@ async fn greader_full_pull_binds_each_same_url_row_to_its_own_entry() {
         let article = |guid: &str| db::NewArticle {
             guid: guid.into(),
             url: Some(URL_SHARED.into()),
-            title: "direct copy".into(),
+            title: if guid == "g-da" { "copy-10" } else { "copy-11" }.into(),
             author: None,
             summary: None,
-            content_html: Some("<p>c</p>".into()),
-            body_text: "c".into(),
+            content_html: Some("<p>Mock fetched content</p>".into()),
+            body_text: "Mock fetched content".into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -299,7 +273,7 @@ async fn greader_full_pull_binds_each_same_url_row_to_its_own_entry() {
 /// 一并标读（read-anywhere-wins 广播）；远端未读只作用于自己的条目
 /// （unread 不广播给兄弟）。
 #[tokio::test]
-async fn greader_pull_read_broadcasts_to_sibling_entries_only_for_read() {
+async fn greader_pull_read_and_unread_stay_with_their_source() {
     let (dbm, http, server) = setup("gr_broadcast").await;
     let (feed_a, feed_b, ..) = {
         let conn = dbm.lock().await;
@@ -320,10 +294,7 @@ async fn greader_pull_read_broadcasts_to_sibling_entries_only_for_read() {
         let (aid_a, _) = row_of_feed(&conn, feed_a, URL_SHARED);
         let (aid_b, _) = row_of_feed(&conn, feed_b, URL_SHARED);
         assert!(state_of(&conn, aid_b).0, "远端已读的副本落地已读");
-        assert!(
-            state_of(&conn, aid_a).0,
-            "同文兄弟必须被已读广播（读到哪算读）"
-        );
+        assert!(!state_of(&conn, aid_a).0, "另一源的未读不得被跨源已读覆盖");
     }
 
     // 反向：远端 B 拨回未读、A 保持已读 → **读优先**（政策单点，读到哪算读）：
@@ -350,10 +321,7 @@ async fn greader_pull_read_broadcasts_to_sibling_entries_only_for_read() {
             state_of(&conn, aid_a).0,
             "unread 不得广播：已读兄弟不得被 B 的未读翻回"
         );
-        assert!(
-            state_of(&conn, aid_b).0,
-            "读优先：A 的已读广播覆盖 B 的 own 远端未读（读到哪算读）"
-        );
+        assert!(!state_of(&conn, aid_b).0, "B 自己的远端未读应独立收敛");
     }
 }
 
@@ -447,7 +415,7 @@ fn purge_remote_source_keeps_local_entry_of_same_url() {
 /// 插入顺序漂移。对照：无任何已读信号的独立条目（不与已读副本同组）远端 unread
 /// 照常作用（unread 只认绑定同源 entry 的边界仍立）。
 #[tokio::test]
-async fn same_round_read_broadcast_and_explicit_unread_is_order_independent() {
+async fn different_source_read_and_unread_are_order_independent() {
     // 排列一：A（read）先处理，B（unread）后处理；排列二：B 先、A 后。
     for (name, read_first) in [("read_first", true), ("unread_first", false)] {
         let (dbm, http, server) = setup(&format!("order_{name}")).await;
@@ -480,8 +448,8 @@ async fn same_round_read_broadcast_and_explicit_unread_is_order_independent() {
             assert_eq!(bound_b, Some(eid_b));
             assert!(state_of(&conn, aid_a).0, "[{name}] A 远端已读 → 本地已读");
             assert!(
-                state_of(&conn, aid_b).0,
-                "[{name}] 读优先：B 的远端未读不得翻转同轮已读广播（顺序无关，两排列同结果）"
+                !state_of(&conn, aid_b).0,
+                "[{name}] B 自己的未读在两种顺序下都保留"
             );
             let solo_read: i64 = conn
                 .query_row(
@@ -518,11 +486,11 @@ async fn same_round_order_conflict_keeps_pending_local_intent() {
             &db::NewArticle {
                 guid: "g-pending-b".into(),
                 url: Some(URL_SHARED.into()),
-                title: "t".into(),
+                title: "copy-11".into(),
                 author: None,
                 summary: None,
-                content_html: None,
-                body_text: "b".into(),
+                content_html: Some("<p>Mock fetched content</p>".into()),
+                body_text: "Mock fetched content".into(),
                 image_url: None,
                 enclosure_url: None,
                 enclosure_mime: None,
@@ -600,15 +568,15 @@ async fn same_feed_distinct_remote_ids_keep_own_identity() {
 
     {
         let conn = dbm.lock().await;
-        let rows: Vec<(i64, Option<i64>, String)> = conn
+        let rows: Vec<(i64, Option<i64>)> = conn
             .prepare(
-                "SELECT id, remote_id, remote_dup_ids FROM articles
+                "SELECT id, remote_id FROM articles
                  WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id",
             )
             .unwrap()
             .query_map(
                 rusqlite::params![feed, db::normalize_url(URL_SHARED)],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
@@ -620,8 +588,6 @@ async fn same_feed_distinct_remote_ids_keep_own_identity() {
         );
         assert_eq!(rows[0].1, Some(eid1));
         assert_eq!(rows[1].1, Some(eid2));
-        assert_eq!(rows[0].2, "", "不再以 CSV 记账充当新条目实体");
-        assert_eq!(rows[1].2, "");
     }
 
     // 收藏隔离：远端只收藏 entry-2
@@ -963,28 +929,31 @@ async fn same_feed_distinct_remote_ids_survive_real_direct_refresh() {
     );
 
     // 真实 direct refresh（生产入口）：RSS 与两行同 URL、guid 不同。
-    let (new_articles, failed) = app_lib::scheduler::refresh_all(&dbm, &http).await;
+    let (new_articles, failed) = app_lib::scheduler::refresh_all(&dbm, &http).await.unwrap();
     assert_eq!(failed, 0, "direct refresh 不得失败");
-    assert_eq!(new_articles, 0, "同 feed 同 URL 已有行 → 不新增第三行");
+    assert_eq!(
+        new_articles, 1,
+        "新真实 GUID 且内容不同，必须建立第三个实体"
+    );
 
     let conn = dbm.lock().await;
-    let rows_after: Vec<(i64, Option<i64>, i64, String, String)> = conn
+    let rows_after: Vec<(i64, Option<i64>, i64, String)> = conn
         .prepare(
-            "SELECT id, remote_id, is_starred, title, remote_dup_ids FROM articles
+            "SELECT id, remote_id, is_starred, title FROM articles
              WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id",
         )
         .unwrap()
         .query_map(
             rusqlite::params![feed, db::normalize_url(URL_SHARED)],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         rows_after.len(),
-        2,
-        "direct refresh 后仍必须两行（不得吞并/复制）：{rows_after:?}"
+        3,
+        "direct refresh 为新 GUID 保留独立实体：{rows_after:?}"
     );
     assert_eq!(
         (rows_after[0].1, rows_after[1].1),
@@ -999,11 +968,6 @@ async fn same_feed_distinct_remote_ids_survive_real_direct_refresh() {
     assert_eq!(
         rows_after.iter().filter(|r| r.3 == "直连刷新标题").count(),
         1,
-        "刷新必须真实发生（URL 稳定复用命中一行做内容更新）：{rows_after:?}"
-    );
-    assert_eq!(
-        (rows_after[0].4.as_str(), rows_after[1].4.as_str()),
-        ("", ""),
-        "不得退回 CSV 记账充当条目实体"
+        "刷新必须真实发生且只有新 GUID 使用新标题：{rows_after:?}"
     );
 }

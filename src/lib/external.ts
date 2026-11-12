@@ -3,7 +3,30 @@
    浏览器开发环境降级 window.open。正文内 <a> 点击拦截也走这里。
    ============================================================ */
 
+import { EXTERNAL_OPEN_FAILURE } from './copyPolicy';
+
+// Note: 完成态正文/译文共用单次外开与协议拒绝边界 — 见 .agents/notes/implemented/architecture/2026-11-05-主页面导航与外链边界.md
+
 let openUrlFn: ((url: string) => Promise<void>) | null = null;
+const OPEN_FAILURE_HANDLER_KEY = '__FLUXREADER_EXTERNAL_OPEN_FAILURE__';
+
+/** 原网页动作共用的协议边界；无效地址不显示必然失败的恢复入口。 */
+export function isHttpUrl(url: string | null | undefined): boolean {
+  try {
+    const parsed = new URL((url ?? '').trim());
+    return /^https?:$/.test(parsed.protocol) && !!parsed.hostname;
+  } catch { return false; }
+}
+
+/** 由 store 注入 toast 单点；经 globalThis 共享，避免测试/生产出现第二份模块实例。 */
+export function bindExternalOpenFailureHandler(handler: (message: string) => void): void {
+  (globalThis as Record<string, unknown>)[OPEN_FAILURE_HANDLER_KEY] = handler;
+}
+
+function reportOpenFailure(message: string): void {
+  const handler = (globalThis as Record<string, unknown>)[OPEN_FAILURE_HANDLER_KEY];
+  if (typeof handler === 'function') (handler as (text: string) => void)(message);
+}
 
 /** 懒加载 opener（浏览器环境无 Tauri IPC，动态 import 不会进 bundle） */
 async function getOpener(): Promise<((url: string) => Promise<void>) | null> {
@@ -18,18 +41,38 @@ async function getOpener(): Promise<((url: string) => Promise<void>) | null> {
   }
 }
 
-/** 打开外部 URL（文章源网页/查看原文/正文内链接） */
-export async function openExternal(url: string | null | undefined): Promise<void> {
+async function openExternalRaw(url: string | null | undefined): Promise<void> {
   const target = (url ?? '').trim();
-  if (!target) return;
-  /* 只放行 http/https，防止外部内容注入 file:// 或自定义协议 */
-  if (!/^https?:\/\//i.test(target)) return;
+  const parsed = new URL(target);
+  if (!/^https?:$/.test(parsed.protocol)) throw new Error('仅支持 HTTP/HTTPS 链接');
   const opener = await getOpener();
   if (opener) {
     await opener(target);
     return;
   }
-  window.open(target, '_blank', 'noopener,noreferrer');
+  if (!window.open(target, '_blank', 'noopener,noreferrer')) {
+    throw new Error('浏览器未接受打开请求');
+  }
+}
+
+type OpenExternalOptions = {
+  reportFailure?: boolean;
+  rethrow?: boolean;
+};
+
+/** 所有用户入口的唯一封装：失败统一提示；需要保留原始错误语义的流程可 rethrow。 */
+export async function openExternalWithFeedback(
+  url: string | null | undefined,
+  options: OpenExternalOptions = {},
+): Promise<boolean> {
+  try {
+    await openExternalRaw(url);
+    return true;
+  } catch (error) {
+    if (options.reportFailure !== false) reportOpenFailure(EXTERNAL_OPEN_FAILURE);
+    if (options.rethrow) throw error;
+    return false;
+  }
 }
 
 /**
@@ -38,10 +81,10 @@ export async function openExternal(url: string | null | undefined): Promise<void
  * 在正文容器 onClick 调用：`onClick={(e) => handleArticleLinkClick(e)}`。
  */
 export function handleArticleLinkClick(e: React.MouseEvent<HTMLDivElement>): void {
-  const anchor = (e.target as HTMLElement).closest('a');
-  if (!anchor) return;
+  if (e.defaultPrevented) return;
+  const anchor = (e.target as Element).closest?.('a[href]');
+  if (!anchor || !e.currentTarget.contains(anchor)) return;
   const href = anchor.getAttribute('href');
-  if (!href) return;
   e.preventDefault();
-  void openExternal(href);
+  void openExternalWithFeedback(href);
 }

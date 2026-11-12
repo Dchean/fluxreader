@@ -1,6 +1,6 @@
 //! AI 引擎无头集成测试：mock OpenAI 兼容 SSE 服务器（模拟 newapi 协议）。
 //! 覆盖：流式摘要生成、落库缓存、缓存命中短路、翻译路径、错误传递。
-//! 运行：cargo test --test ai_e2e -- --ignored --nocapture
+//! 运行：cargo test --test ai_e2e -- --include-ignored --nocapture
 
 use app_lib::ai::{self, AiConfig};
 use app_lib::db;

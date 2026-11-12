@@ -1,39 +1,41 @@
 # 文档索引
 
-`docs/` 只放需要长期与代码同步维护的事实。判断一段内容该不该写在这里，先看它属于哪一类：
+本目录保存需要长期与产品同步维护的事实；决定理由归 `.agents/notes/`，未解决的问题集中在 `roadmap.md`。文档状态和历史通过数不代替当前行为证据。
 
-| 类别 | 文件 | 什么时候更新 | 不该放什么 |
-| --- | --- | --- | --- |
-| 长期事实 | [performance.md](performance.md) | 代码、数据或测量方法变化使结论失效时同批更新；每条结论必须带构建、语料、日期与测量范围 | 一次性审计结论、任务进度、未经验证的收益 |
-| 长期事实 | [sync-compat-matrix.md](sync-compat-matrix.md) | 协议行为、客户端策略或测试锁定变化时同批更新（政策点、本文、锁定测试三处一致） | 把「客户端未实现」写成「协议不支持」；把未实机验收的版本写成已验证 |
-| 长期事实 | [release.md](release.md) | 分支流向、CI/Release 工作流、tag 附注结构或版本策略变化时更新 | 发布当次的进度播报、临时排障记录 |
-| 现状与限制 | [roadmap.md](roadmap.md) | 缺口修复后删除；新限制经代码或审计确认后加入 | 已收口事项、修复步骤、逐条证据 |
-| 历史材料（待决策） | [audit-2026-10-08.md](audit-2026-10-08.md)、[optimization/](optimization/) | 只读留存，不再追加长期事实 | 当前验收结论、需要持续维护的协议或性能事实 |
+| 文档 | 内容与维护时机 |
+| --- | --- |
+| [同步兼容矩阵](sync-compat-matrix.md) | 协议/服务端能力、客户端政策和验证边界分别列出；政策或协议行为变化时同步 |
+| [性能基线与方法](performance.md) | 带日期、构建、语料和测量范围的结果，以及不能外推的限制 |
+| [备份与恢复](backup.md) | 快照触发、保留策略、内容和应用外恢复步骤；生命周期变化时同步 |
+| [发布流程](release.md) | 分支、CI、tag 附注与 Release 正文的关系；流程变化时同步 |
+| [当前缺口与已知限制](roadmap.md) | 仍成立的问题、接受的取舍及未验收范围；问题修复或证据改变时更新 |
 
-## 长期事实
+## 决定记录
 
-- **[performance.md](performance.md)**：大库性能基线、测量方法与数据安全纪律。判定线、受测条件、失效条件与未测边界都在文内；引用数字时必须连同构建、语料与范围一起引用。
-- **[sync-compat-matrix.md](sync-compat-matrix.md)**：Google Reader / Fever 的协议 × 服务端兼容矩阵，以及冲突政策、增量游标和已知实现差异。用户可见对照表；政策的代码单点在 `src-tauri/src/sync/conflict_policy.rs`。
-- **[release.md](release.md)**：发布序列、tag 附注结构、存量版本说明与提交信息约定。
+`.agents/notes/` 只保留难以从代码和测试恢复、未来仍需重访的重要理由、约束与取舍。普通局部修复不必新增笔记；既有决定事实失实则更新归属篇。每篇按项目现有 lifecycle/class 路径保存，结构见 [AGENTS.md](../AGENTS.md)。
 
-## 现状与限制
+- [架构与跨模块契约](../.agents/notes/implemented/architecture/)
+- [功能取舍](../.agents/notes/implemented/feature/)
+- [缺陷原因与防重引入边界](../.agents/notes/implemented/bug-fix/)
+- [简化理由](../.agents/notes/implemented/simplification/)
+- [测试策略与证据边界](../.agents/notes/implemented/testing/)
+- [流程选择](../.agents/notes/implemented/process/)
 
-- **[roadmap.md](roadmap.md)**：当前仍成立的缺口、已知限制与已评估不修的边界。它不是任务队列，也不展开修复方案。
+关键实现的 `Note:` 注释指向实际归属。`implemented` 表示所记决定落地，不表示整篇事实永久有效、全部测试通过或产品已发布。当前轮次交付状态只在[现有验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)维护简短摘要；专题篇不复制临时进度。
 
-## 历史材料（待决策）
+## 历史材料
 
-- **[audit-2026-10-08.md](audit-2026-10-08.md)**：2026-10-08 的独立审计快照，按用户当时要求留在 `docs/`。它记录的是当时的发现与建议，不是当前修复验收。
-- **[optimization/](optimization/)**：2026-10 优化重构的任务卡与逐卡证据。属于执行记录，不是长期事实；是否归档到 `archive/tooling-and-reports` 或删除待决策。
+2026-11-06 整理将旧审计及优化任务卡清出当前工作树。原文完整保留于固定提交 `91ece562d79fd909642cd6d570d636e884b7387e`，不改写其中的历史结论、失败或当时授权：
 
-历史材料不删除、不移动，直到有明确决策。一次性探针、测量工具与更早的调研报告原文在存档分支 `archive/tooling-and-reports`；其中 `archive/reports/BASELINE.md` 的提交号对照表是解读 2026-09-16 历史重写前后旧提交号的唯一线索。
+- [2026-10-08 审计快照](https://github.com/Dchean/fluxreader/blob/91ece562d79fd909642cd6d570d636e884b7387e/docs/audit-2026-10-08.md)
+- [优化执行记录与任务卡](https://github.com/Dchean/fluxreader/tree/91ece562d79fd909642cd6d570d636e884b7387e/docs/optimization)
 
-## 决定与取舍写在哪
+本地也可用 `git show 91ece562:docs/optimization/OPT-010.md` 等命令读取原文件。仍有效的产品约束由当前文档与活跃 Note 承接；旧派发、模型选择、临时写集和当时状态不再作为执行指令。
 
-`.agents/notes/` 记录「为什么这样做、当时放弃了什么」，一篇一个决定；`docs/` 只记录需要长期与代码同步维护的事实，`roadmap.md` 只记录还没做的事与已知限制。路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 取 `proposed` / `implemented` / `rejected` / `archived`，class 取 `feature` / `bug-fix` / `simplification` / `architecture` / `process` / `testing`。
+更早的一次性探针与测量工具位于既有分支 `archive/tooling-and-reports`；它不包含上述新清出的材料。其中 `archive/reports/BASELINE.md` 保存 2026-09-16 历史重写前后的提交号对照。两处历史来源不能混称。
 
-- 找架构与结构决策 → [`architecture/`](../.agents/notes/implemented/architecture/)
-- 找「为什么放弃方案 B」 → 各篇的 `## Alternatives considered` 节
-- 找测试与门禁口径 → [`testing/`](../.agents/notes/implemented/testing/)
-- 找门禁、发布、协作流程 → [`process/`](../.agents/notes/implemented/process/)
+2026-11-05/06 只读审计原始报告、日志、截图和探针保留在本机忽略目录 `tmp/audit-2026-11-05/` 与 `tmp/audit-2026-11-06/`。它们不是每次克隆都会获得的附件；需复核对应本地证据时应保留整目录。长期事实在各主题文档中说明证据时点及上限，不把旧运行结果拼成当前全量通过。
 
-每篇 Note 的关键实现点在源码入口留了一行 `// Note: … 见 .agents/notes/…` 反向注释，从代码可以走回决定。文档约定见 [AGENTS.md](../AGENTS.md)。
+本轮修复与独立复审证据在本机 `tmp/repair-2026-11-06/`：`environment/evidence/` 保存限定真实服务端运行（`live-cd-final-summary.json`）、云备份 WebDAV 生产往返（`cloud-backup-r1/`）与原生隔离实机验证（`native-verify-r1/`，17 项结果与数据边界对照），`integration-rust/` 保存最终 Rust 五项整合门禁，`maintenance/` 保存依赖整合与目标平台静态分析，后端整合独审在 `audit-backend/cloud-integration-final/`；前端画廊/焦点批证据在 `tmp/frontend/gallery-ui-r1/final-r1/`（`ui-layout-r8/` 全量指标、`gates-r3/` 门禁摘录、`audit-row-root/` 独立诊断与定向复审）；AF1 根因诊断及最终投影证据另在 `tmp/frontend/diagnosis-af1-r2/`。限定通过范围、未关闭项与发布状态沿用上方验收入口；这些目录不入库，也没有被转存为线上归档。
+
+已封印的 `.agents/notes/archived/` 是历史快照，正文与既有 manifest 条目冻结。新解释和后继关系写在活跃篇；旧快照中的过去时结论不指导当前实现。

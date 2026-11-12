@@ -13,13 +13,13 @@
 
    估算与真实高度的关系：estimateGalleryCardHeight 只服务**未挂载**条目的窗口定位
    与滚动总高；挂载后的真实高度由 measureElement（offsetHeight/ResizeObserver）
-   修正。估偏方向的安全性由截断窗口上界 + overscan 缓冲承担（见
+   修正。窗口按各列真实测量范围取并集，overscan 缓冲分列（见
    galleryMountBound / GALLERY_MOUNT_BOUND_REF 推导）。
 
    窗口上界（对交付「最大同时挂载卡片数」的回答）：
-   - 渲染集 = 虚拟化可见范围（lanes × 每列可见条数）+ 两端 overscan，
+   - 渲染集 = 各列可见项并集 + 分列的两端 overscan，
      每列可见条数由 视口高 / 卡片高 决定，与条目总数无关；
-   - **通用式**（任何视口高/卡片高都成立，galleryMountBound 单点实现）：
+   - **逐列检查式**（cardHeight 必须是当前测量中的有效最小高度）：
      lanes × (⌈视口高 / 卡片高度⌉ + 3 行边界余量) + 2×overscan；
    - **参考口径上界** GALLERY_MOUNT_BOUND_REF = 48：参考视口（1024×768、四列）
      × 卡片高度 ≥ GALLERY_CARD_MIN_HEIGHT（150px）前提下通用式 = 44，取整到 48。
@@ -64,7 +64,7 @@ export const GALLERY_REF_VIEWPORT_HEIGHT = 768;
     galleryMountBound）。 */
 export const GALLERY_CARD_MIN_HEIGHT = 150;
 
-/** 窗口上界**通用式**（任何视口高/卡片高都成立，与条目总数无关）：
+/** 逐列可见并集的挂载检查式（cardHeight 是对应测量的有效最小高度）：
     lanes × (⌈viewportHeight / cardHeight⌉ + 3 行边界余量) + 2 × overscan。
     3 = 跨视口上/下边界的行 + 贪心列错落再留 1 行；overscan 按条目计。
     这是「有界渲染」的可验证含义：上界随视口高与卡片高表达，条目总数不出现。 */
@@ -122,10 +122,57 @@ export function galleryItemPlacement(lane: number, lanes: number): { left: strin
   };
 }
 
-/* roving tabindex 的窗口内回落：成组卡片只保留一张 tabIndex=0，否则 Tab 会逐张
-   走过全部卡片。虚拟化下焦点卡可能不在窗口内（用户用鼠标滚到别处后按 Tab）——
-   此时回落给窗口首卡，保证「任何滚动位置下 Tab 都能进入列表」；焦点卡在窗口内
-   则保持原语义（回落到它）。窗口空（无挂载）→ -1（无卡可 Tab）。 */
+/** 只消费已安装虚拟器的测量结果，不另建列分配或测量真值。
+    默认全局连续下标会夹入高低列间的大量屏外项；这里取各列实际可见段的并集，
+    再把全局 overscan 预算均分到各列。返回仍按条目下标排序，保留 DOM 阅读顺序。 */
+export function galleryWindowIndexes(
+  measurements: readonly { index: number; lane: number; start: number; end: number }[],
+  scrollOffset: number,
+  viewportHeight: number,
+  lanes: number,
+  overscan = GALLERY_OVERSCAN,
+): number[] {
+  const columns = Array.from({ length: Math.max(1, lanes) }, () => [] as typeof measurements[number][]);
+  for (const item of measurements) columns[item.lane]?.push(item);
+  const buffer = Math.floor(overscan / Math.max(1, lanes));
+  const remainder = overscan % Math.max(1, lanes);
+  const end = scrollOffset + viewportHeight;
+  const indexes: number[] = [];
+  columns.forEach((column, lane) => {
+    let low = 0;
+    let high = column.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (column[mid].end < scrollOffset) low = mid + 1;
+      else high = mid;
+    }
+    const first = low;
+    while (low < column.length && column[low].start <= end) low++;
+    const extra = buffer + (lane < remainder ? 1 : 0);
+    for (let i = Math.max(0, first - extra); i < Math.min(column.length, low + extra); i++) {
+      indexes.push(column[i].index);
+    }
+  });
+  return indexes.sort((a, b) => a - b);
+}
+
+/** Tab 回落只认几何可见项；overscan 挂载不等于可见。完整可见项优先，
+    超高卡没有完整可见项时仍允许落到与视口相交的卡。 */
+export function galleryVisibleIndexes(
+  items: readonly { index: number; start: number; end: number }[],
+  offset: number,
+  height: number,
+): number[] {
+  const visible = items.filter((item) => item.end > offset && item.start < offset + height);
+  const fullyVisible = visible.filter((item) => item.start >= offset && item.end <= offset + height);
+  return (fullyVisible.length ? fullyVisible : visible)
+    .toSorted((a, b) => a.start - b.start || a.index - b.index)
+    .map((item) => item.index);
+}
+
+/* roving 的候选集回落：调用方先按几何可见性过滤，不能把屏外overscan传进来。
+   成组卡片只保留一张 tabIndex=0；原焦点卡仍在可见候选中则保留，否则首候选。
+   空集 → -1。 */
 export function galleryTabbableIndex(mountedIndexes: readonly number[], tabbableIndex: number): number {
   if (mountedIndexes.length === 0) return -1;
   if (tabbableIndex >= 0 && mountedIndexes.includes(tabbableIndex)) return tabbableIndex;

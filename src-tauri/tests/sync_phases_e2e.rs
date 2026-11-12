@@ -65,11 +65,11 @@ async fn seed_local_article(
     let a = db::NewArticle {
         guid: format!("guid-{url}"),
         url: Some(url.into()),
-        title: "Local Article".into(),
+        title: "Remote version".into(),
         author: None,
         summary: None,
-        content_html: Some("<p>local</p>".into()),
-        body_text: "local".into(),
+        content_html: Some("<p>Mock fetched content</p>".into()),
+        body_text: "Mock fetched content".into(),
         image_url: None,
         enclosure_url: None,
         enclosure_mime: None,
@@ -132,7 +132,7 @@ async fn instant_push_only_pushes_and_drains_queue() {
 }
 
 #[tokio::test]
-async fn instant_push_read_broadcasts_dup_entries() {
+async fn instant_push_read_does_not_target_another_source() {
     let (db, http, server) = setup("broadcast").await;
     let (aid, _mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
     sync::states_phase(&db, &http, true)
@@ -156,8 +156,8 @@ async fn instant_push_read_broadcasts_dup_entries() {
     let updates = mock_greader::status_updates_map(&server);
     assert_eq!(
         updates.get(&dup_id).map(|s| s.as_str()),
-        Some("read"),
-        "read must broadcast to the cross-feed dup entry"
+        None,
+        "read must remain on its exact source identity"
     );
 }
 
@@ -213,7 +213,9 @@ async fn stale_remote_read_converges_via_full_reconcile() {
     // light 增量：此前 changed_after 增量拉不到这条旧变更（changed_at 早于游标），
     // 导致「Miniflux 已读但本地未读」漂移。修复后 light 同步末尾有未读状态精确
     // 对账（GET /v1/entries/ids?status=unread），即使增量漏掉也能收敛。
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
     {
         let conn = db.lock().await;
         let is_read: bool = conn
@@ -393,11 +395,11 @@ async fn seed_backfill_fixture(
         let a = db::NewArticle {
             guid: format!("direct-{direct_url}"),
             url: Some(direct_url.into()),
-            title: "Direct article".into(),
+            title: "Backfill entry".into(),
             author: None,
             summary: None,
-            content_html: Some("<p>direct body</p>".into()),
-            body_text: "direct body".into(),
+            content_html: Some("<p>Mock fetched content</p>".into()),
+            body_text: "Mock fetched content".into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,

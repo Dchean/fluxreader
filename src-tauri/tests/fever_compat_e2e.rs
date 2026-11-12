@@ -7,7 +7,7 @@
 //!   `id < max_id ORDER BY id DESC LIMIT 50`；`unread_item_ids`/`saved_item_ids`
 //!   为逗号分隔字符串全集；`mark=item` 只接受单个 `ctype_digit` 的 id。
 //! - Miniflux `internal/fever/handler.go`：同一能力，`id`/`feed_id` 为 JSON 数字，
-//!   条目升序返回（夹具用 `max_id_asc` 模拟，锁「游标与页内顺序无关」）。
+//!   max_id 页同为降序；`max_id_asc_page` 仅作升序兼容变体，锁「游标与页内顺序无关」。
 //!
 //! 夹具只记录与校验请求；断言对象是**生产代码**（`FeverClient` / `sync::sync_now` /
 //! `sync::sync_light`）发出的请求与产生的结果。本文件只声称「严格夹具 × 固定源码
@@ -51,14 +51,13 @@ enum IdStyle {
     JsonNumber,
 }
 
-/// mark=item&as=saved/unsaved 的星标语义（2026-10-31 审计对齐）。
+/// mark=item&as=saved/unsaved 的兼容夹具语义；版本号不编码此行为。
 #[derive(Clone, Copy, Default, PartialEq)]
 enum StarMark {
-    /// FreshRSS（及 Fever 规范字面义）：绝对赋值（saved→收藏、unsaved→取消）。
+    /// 绝对赋值（saved→收藏、unsaved→取消），与已核对的 FreshRSS 和 Miniflux faecfa2 一致。
     #[default]
     Absolute,
-    /// Miniflux 固定源码（internal/fever/handler.go:443-467）：saved 与 unsaved
-    /// 都走 storage.ToggleStarred——语义由条目当前状态决定。
+    /// Toggle 兼容变体：saved 与 unsaved 都取反，不代表所有 api_version 3 服务端。
     Toggle,
 }
 
@@ -105,7 +104,7 @@ struct RawResponse {
 
 /// 一条被夹具记录下来的请求。夹具用它做校验（拒绝不合法请求），
 /// 测试用它断言生产客户端「发了什么」。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Hit {
     method: String,
     path: String,
@@ -148,6 +147,8 @@ struct Fixture {
     since_id_calls: AtomicUsize,
     /// 响应中省略 `items` 字段（协议错误用例）。
     omit_items: AtomicBool,
+    /// 响应中的条目省略 `is_read` / `is_saved`（状态三态/写回验证用例）。
+    omit_item_state_fields: AtomicBool,
     /// 响应中省略 `unread_item_ids` / `saved_item_ids` 字段（协议错误用例）。
     omit_unread: AtomicBool,
     omit_saved: AtomicBool,
@@ -210,6 +211,7 @@ impl Fixture {
             since_id_fail_at: Mutex::new(None),
             since_id_calls: AtomicUsize::new(0),
             omit_items: AtomicBool::new(false),
+            omit_item_state_fields: AtomicBool::new(false),
             omit_unread: AtomicBool::new(false),
             omit_saved: AtomicBool::new(false),
             omit_feeds: AtomicBool::new(false),
@@ -293,6 +295,10 @@ impl Fixture {
 
     fn set_omit_items(&self, v: bool) {
         self.omit_items.store(v, Ordering::SeqCst);
+    }
+
+    fn set_omit_item_state_fields(&self, v: bool) {
+        self.omit_item_state_fields.store(v, Ordering::SeqCst);
     }
 
     fn set_omit_unread(&self, v: bool) {
@@ -434,7 +440,7 @@ impl Fixture {
         } else {
             format!("<p>{}</p>", e.title)
         };
-        serde_json::json!({
+        let mut item = serde_json::json!({
             "id": id_value,
             "feed_id": self.render_feed_id(e.feed_id),
             "title": e.title,
@@ -444,7 +450,14 @@ impl Fixture {
             "is_saved": if e.saved { 1 } else { 0 },
             "is_read": if e.read { 1 } else { 0 },
             "created_on_time": 1_700_000_000 + (e.id % 1000),
-        })
+        });
+        if self.omit_item_state_fields.load(Ordering::SeqCst) {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("is_read");
+                obj.remove("is_saved");
+            }
+        }
+        item
     }
 
     /// 权威未读集合（CSV，十进制字面值）。
@@ -714,8 +727,7 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
                 match as_.as_str() {
                     "read" => e.read = true,
                     "unread" => e.read = false,
-                    // 星标语义按服务端变体：FreshRSS 绝对赋值；Miniflux 对
-                    // saved/unsaved 都取反（ToggleStarred）。
+                    // 星标语义由夹具显式配置：Absolute 按目标赋值，Toggle 取反。
                     "saved" | "unsaved" => match srv.star_mark {
                         StarMark::Absolute => e.saved = as_ == "saved",
                         StarMark::Toggle => e.saved = !e.saved,
@@ -925,6 +937,117 @@ fn url_decode(s: &str) -> String {
 
 type TestDb = Arc<tokio::sync::Mutex<rusqlite::Connection>>;
 
+/// 2026-11-09 新契约：本机主动排除的源不等于未知来源。该源仍留在 Fever
+/// 服务端时，其条目不能卡住其它源的页游标和状态对账。紧邻既有未知来源
+/// fail-closed 用例保留两类反例，禁止通过移除所有来源守卫使此测试变绿。
+async fn refactor_deleted_feed_does_not_block_remaining_feed(full: bool) {
+    let srv = Fixture::start().await;
+    srv.set_feeds(vec![
+        (10, "被本机删除", "https://acceptance.invalid/deleted.xml"),
+        (11, "继续订阅", "https://acceptance.invalid/kept.xml"),
+    ]);
+    srv.add_entry(10, 10, "已删除源旧条目", true, false);
+    srv.add_entry(11, 11, "保留源旧条目", true, false);
+    let _guard;
+    let (dbm, path) = seed_db("refactor_fever_deleted_feed", &srv);
+    _guard = common::TempDbGuard::new(path);
+    let client = http();
+    let initial = sync::sync_now(&dbm, &client).await.unwrap();
+    assert!(
+        initial.errors.is_empty(),
+        "fixture setup: {:?}",
+        initial.errors
+    );
+    {
+        let conn = dbm.lock().await;
+        let deleted: i64 = conn
+            .query_row("SELECT id FROM feeds WHERE remote_id = 10", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        app_lib::commands::record_feed_deletion(&conn, deleted).unwrap();
+        assert!(db::feed_url_tombstoned(&conn, "https://acceptance.invalid/deleted.xml").unwrap());
+    }
+    srv.add_entry(20, 10, "删除源仍继续更新", false, false);
+    srv.add_entry(21, 11, "其它源必须正常拉取", false, false);
+    {
+        let mut entries = srv.entries.lock().unwrap();
+        let old = entries.iter_mut().find(|e| e.id == 11).unwrap();
+        old.read = false;
+        old.saved = true;
+    }
+    let report = if full {
+        // Fever 订阅阶段会按能力告知“退订仅本地生效”；这不是条目同步失败。
+        // 仍真实执行订阅发现，再独立验收完整历史状态阶段，避免要求产品删除
+        // 合法的能力告知才能通过本用例。
+        let discovered = sync::feeds_phase(&dbm, &client).await.unwrap();
+        assert!(
+            !discovered.binding_incomplete,
+            "有意排除不得造成订阅绑定失败: {:?}",
+            discovered.errors
+        );
+        sync::states_phase(&dbm, &client, true).await.unwrap()
+    } else {
+        sync::states_phase(&dbm, &client, false).await.unwrap()
+    };
+    assert!(
+        report.errors.is_empty(),
+        "有意排除的源不应阻断同步: {:?}",
+        report.errors
+    );
+    let conn = dbm.lock().await;
+    assert_eq!(
+        article_state(&conn, 21),
+        Some((false, false)),
+        "同一页的保留源新文不能丢失"
+    );
+    assert_eq!(
+        article_state(&conn, 11),
+        Some((false, true)),
+        "轮末双向状态对账必须到达"
+    );
+    assert!(!bound_remote_id(&conn, 20), "有意删除源不能被条目拉取复活");
+    assert_eq!(
+        db::last_sync_entry_id(&conn).unwrap(),
+        21,
+        "仅过滤有意排除条目后应安全消费页游标"
+    );
+}
+
+#[tokio::test]
+async fn refactor_fever_local_deletion_does_not_block_incremental_sync() {
+    refactor_deleted_feed_does_not_block_remaining_feed(false).await;
+}
+
+#[tokio::test]
+async fn refactor_fever_local_deletion_does_not_block_full_history() {
+    refactor_deleted_feed_does_not_block_remaining_feed(true).await;
+}
+
+#[tokio::test]
+async fn refactor_fever_follows_both_read_and_star_directions() {
+    let srv = Fixture::start().await;
+    srv.set_feeds(vec![(10, "源", "https://acceptance.invalid/fever.xml")]);
+    srv.add_entry(1, 10, "条目", true, false);
+    let _guard;
+    let (dbm, path) = seed_db("refactor_fever_bidirectional", &srv);
+    _guard = common::TempDbGuard::new(path);
+    let client = http();
+    let initial = sync::sync_now(&dbm, &client).await.unwrap();
+    assert!(initial.errors.is_empty(), "{:?}", initial.errors);
+    for (read, saved) in [(false, true), (true, false)] {
+        {
+            let mut entries = srv.entries.lock().unwrap();
+            entries[0].read = read;
+            entries[0].saved = saved;
+        }
+        let report = sync::states_phase(&dbm, &client, false).await.unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let conn = dbm.lock().await;
+        assert_eq!(article_state(&conn, 1), Some((read, saved)));
+    }
+}
+
 /// 建临时库 + Fever 账号设置，返回 (db, 临时路径)。
 fn seed_db(tag: &str, srv: &Fixture) -> (TestDb, std::path::PathBuf) {
     let tmp = common::unique_db_path(tag);
@@ -1006,6 +1129,10 @@ fn remove_settings_write_failure(conn: &rusqlite::Connection) {
 
 /// 注入：指定 guid 的文章 INSERT 失败（真 DB trigger）。
 fn install_article_insert_failure(conn: &rusqlite::Connection, guid: &str) {
+    let guid = guid
+        .strip_prefix("remote-")
+        .map(db::remote_identity_guid)
+        .unwrap_or_else(|| guid.to_string());
     conn.execute_batch(&format!(
         "CREATE TRIGGER opt005_fail_article_ins BEFORE INSERT ON articles \
          WHEN NEW.guid = '{guid}' \
@@ -1023,6 +1150,10 @@ fn remove_article_insert_failure(conn: &rusqlite::Connection) {
 /// 重放/回填路径对既有行走 UPDATE（INSERT 注入打不到），触发器随页事务一起
 /// 阻断并回滚。
 fn install_article_update_failure(conn: &rusqlite::Connection, guid: &str) {
+    let guid = guid
+        .strip_prefix("remote-")
+        .map(db::remote_identity_guid)
+        .unwrap_or_else(|| guid.to_string());
     conn.execute_batch(&format!(
         "CREATE TRIGGER opt007_fail_article_upd BEFORE UPDATE ON articles \
          WHEN OLD.guid = '{guid}' \
@@ -1166,8 +1297,10 @@ fn seed_local_article(conn: &rusqlite::Connection) -> i64 {
 }
 
 fn feed_count(conn: &rusqlite::Connection) -> i64 {
-    conn.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
 }
 
 /* ============================================================
@@ -1377,7 +1510,7 @@ async fn full_sync_reaches_all_125_including_read_non_saved_history() {
     srv.add_entry(126, 10, "条目126", true, false);
     srv.add_entry(127, 10, "条目127", false, false);
     let before_light = srv.hits().len();
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -1721,7 +1854,7 @@ async fn fever_light_sync_without_remote_feed_binding_skips_pull_entirely() {
         db::set_fever_history_pending(&conn, 55).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("no remote feed binding is a benign skip");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -1764,7 +1897,7 @@ async fn fever_partial_remote_feed_binding_keeps_cursor_and_history() {
         db::set_fever_history_pending(&conn, 55).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("partial binding is reported without aborting the phase");
     assert!(
@@ -1808,7 +1941,7 @@ async fn fever_entry_feed_without_local_binding_keeps_cursor_and_history() {
         db::reset_fever_history_state(&conn).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("unknown entry feed is reported");
     assert!(
@@ -2017,7 +2150,7 @@ async fn malformed_json_items_response_fails_closed_end_to_end() {
         db::set_fever_history_complete(&conn).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("malformed JSON is report-visible");
     assert!(
@@ -2222,17 +2355,14 @@ async fn mark_sends_one_decimal_id_per_request() {
     assert!(srv.entry_read(5705) && srv.entry_read(LONG_ID));
 }
 
-/// Miniflux 星标语义（2026-10-31 审计对齐）：mark=item&as=saved/unsaved 都是对
-/// 当前状态的取反切换（internal/fever/handler.go:443-467 → storage.ToggleStarred）。
-/// 从未收藏 → 单次 as=saved 推送天然收敛（「从未收藏→收藏单次推送」用例在两种
-/// 变体下都绿）；「远端已收藏再推 as=saved」会翻转成未收藏——产品当前的绝对赋值
-/// 假设与该语义冲突（星标判向 = B1 修复项），翻转场景由阶段 B 配对红门禁锁定，
-/// 本用例锁「单次推送收敛 + 夹具真实语义判别」。
+/// Toggle 夹具的 saved/unsaved 都取反；从未收藏发送一次 saved 仍可收敛。
+/// 本例同时锁定产品读前探测和夹具重复 saved 会翻转的区别，不将 api_version 3
+/// 当作 toggle 声明。已核对的固定 Miniflux faecfa2 使用条件绝对赋值。
 #[tokio::test]
-async fn miniflux_star_mark_toggles_current_state() {
+async fn toggle_fixture_star_mark_toggles_current_state() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
-        // B1：变体判定走 api_version（3 = Miniflux 家族 → toggle 语义 + 探测）。
+        // 版本 3 触发产品保守探测；toggle 语义由 star_mark 独立指定。
         api_version: Some(3),
         ..Default::default()
     })
@@ -2261,23 +2391,23 @@ async fn miniflux_star_mark_toggles_current_state() {
         "从未收藏 → as=saved 单次推送必须收敛为收藏（toggle 下同样成立）"
     );
 
-    // 夹具语义判别（真实 Miniflux 行为，不经产品 push）：已收藏条目再收到一次
+    // Toggle 夹具语义判别（不经产品 push）：已收藏条目再收到一次
     // as=saved（重复推送/丢失响应后的重试形态）会翻转为未收藏。
     let client = FeverClient::new(&srv.url(), USER, PASS, http()).at_resolved(&srv.api_root());
     client.mark_starred(&[7]).await.expect("mark 调用成功");
     assert!(
         !srv.entry_saved(7),
-        "Miniflux 变体：已收藏条目再收 as=saved 必须翻转（ToggleStarred）"
+        "Toggle 夹具：已收藏条目再收 as=saved 必须翻转"
     );
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// B1 红门禁（Miniflux toggle 星标修复，a）：推送响应丢失（服务端已应用、客户端
+/// Toggle 兼容回归（a）：推送响应丢失（服务端已应用、客户端
 /// 见 500）→ 队列保留 → 下轮重发**不得再发 mark**（探测发现已处目标态）——远端
 /// 终态必须收敛到用户意图。修前实现无条件重发 as=saved → toggle 把星标翻回
 /// 未收藏（判别力：第二轮后的 mark 请求计数与服务端终态双断言）。
 #[tokio::test]
-async fn miniflux_star_push_response_lost_resend_converges_without_flip() {
+async fn toggle_fixture_star_push_response_lost_resend_converges_without_flip() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
         api_version: Some(3),
@@ -2336,11 +2466,11 @@ async fn miniflux_star_push_response_lost_resend_converges_without_flip() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// B1 红门禁（Miniflux toggle 星标修复，b）：另一设备已把条目改到目标态时，
+/// Toggle 兼容回归（b）：另一设备已把条目改到目标态时，
 /// 本地 stale 队列项不得把它翻反——探测发现当前态==目标态 → 不发 mark、队列按
 /// 「已收敛」确认。unstar 方向同理锁定。
 #[tokio::test]
-async fn miniflux_stale_star_queue_item_does_not_flip_server_state() {
+async fn toggle_fixture_stale_star_queue_item_does_not_flip_server_state() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
         api_version: Some(3),
@@ -2493,7 +2623,7 @@ async fn history_state_write_failure_blocks_since_and_light_retries() {
         let conn = db.lock().await;
         remove_settings_write_failure(&conn);
     }
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -2551,7 +2681,7 @@ async fn page_insert_failure_rolls_back_page_with_pending_resume() {
         let conn = db.lock().await;
         remove_article_insert_failure(&conn);
     }
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -2613,7 +2743,7 @@ async fn failed_page_rollback_leaves_no_data_change_marker() {
         install_article_update_failure(&conn, "remote-85");
     }
 
-    let report = sync::sync_light(&db, &http_client)
+    let report = sync::states_phase(&db, &http_client, false)
         .await
         .expect("second sync");
     assert!(
@@ -2668,7 +2798,9 @@ async fn unknown_history_state_with_existing_since_auto_backfills() {
         db::set_setting(&conn, "sync_last_entry_id", "100").unwrap();
         // 旧库形态：无 fever_history_state 键（Unknown）。
     }
-    let report = sync::sync_light(&db, &http()).await.expect("light sync");
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("light sync");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     {
         let conn = db.lock().await;
@@ -2694,7 +2826,7 @@ async fn corrupt_history_state_errors_without_touching_cursor() {
         db::set_setting(&conn, "sync_last_entry_id", "100").unwrap();
         db::set_setting(&conn, "fever_history_state", "garbage-value").unwrap();
     }
-    let report = sync::sync_light(&db, &http()).await.expect("sync");
+    let report = sync::states_phase(&db, &http(), false).await.expect("sync");
     assert!(
         report
             .errors
@@ -2794,7 +2926,9 @@ async fn since_short_page_after_hook_filter_continues_to_empty() {
         // 历史已完成：本用例只测增量短页继续（Unknown 会自动补历史，混淆前提）。
         db::set_setting(&conn, "fever_history_state", "complete").unwrap();
     }
-    let report = sync::sync_light(&db, &http()).await.expect("light sync");
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("light sync");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     {
         let conn = db.lock().await;
@@ -2854,7 +2988,7 @@ async fn full_history_failure_then_light_resumes_automatically() {
     }
 
     // 不跑手动 full：普通 light 同步自动从 checkpoint 续取，直到取尽。
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -2893,7 +3027,7 @@ async fn incremental_failure_cursor_not_pushed_by_with_ids_backfill() {
         db::set_setting(&conn, "fever_history_state", "complete").unwrap();
     }
     let http_client = http();
-    let report = sync::sync_light(&db, &http_client)
+    let report = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(
@@ -2927,7 +3061,7 @@ async fn incremental_failure_cursor_not_pushed_by_with_ids_backfill() {
 
     // 清除注入后继续：从 150 起重新覆盖失败区间，全部 101..225 可达。
     srv.set_since_page_fail_at(9999);
-    let again = sync::sync_light(&db, &http_client)
+    let again = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync 继续");
     assert!(again.errors.is_empty(), "{:?}", again.errors);
@@ -3015,7 +3149,7 @@ async fn history_budget_200_pages_defers_and_light_resumes() {
     }
 
     // 下一次普通 light 自动续取剩余 50 条并完成。
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -3103,7 +3237,7 @@ fn seed_anchor_article(conn: &rusqlite::Connection) -> i64 {
     aid
 }
 
-/// R3-P1：初次 `sync_match_maps` 读取失败（真实列类型错误：url_norm 为 BLOB）
+/// R3-P1：初次 `sync_match_maps` 读取失败（真实列类型错误：read_version 为 BLOB）
 /// 必须立即终止本轮——**绝不**退化成空映射继续拉取。
 /// 空 feed 映射会让每条 merge「合法跳过」，却照常确认 since/checkpoint 直到
 /// Complete：本地 0 篇而游标认为历史取尽（永久数据丢失）。
@@ -3115,9 +3249,9 @@ async fn map_read_error_aborts_round_without_fake_completion() {
         let conn = db.lock().await;
         seed_bound_feed(&conn);
         let anchor = seed_anchor_article(&conn);
-        // 真实 DB 列类型错误：url_norm 写 BLOB，sync_match_maps 以 String 读取。
+        // 真实 DB 列类型错误：read_version 写 BLOB，sync_match_maps 以 i64 读取。
         conn.execute(
-            "UPDATE articles SET url_norm = x'00' WHERE id = ?1",
+            "UPDATE articles SET read_version = x'00' WHERE id = ?1",
             [anchor],
         )
         .unwrap();
@@ -3164,7 +3298,7 @@ async fn map_read_error_aborts_round_without_fake_completion() {
 }
 
 /// R3-P1：页失败后的 map 重建失败同样必须终止整轮（真实列类型错误：页 1 成功
-/// 提交的 AFTER INSERT trigger 把锚文章 url_norm 污染成 BLOB，重建读取命中）。
+/// 提交的 AFTER INSERT trigger 把锚文章 read_version 污染成 BLOB，重建读取命中）。
 /// 旧行为退化成空映射继续执行顶部历史回溯——空洞区间（101..150）未合入却被
 /// 伪确认（since 推到 150 + Complete），永久数据丢失。
 #[tokio::test]
@@ -3189,12 +3323,14 @@ async fn page_failure_then_rebuild_map_error_terminates_round() {
         let anchor = seed_anchor_article(&conn);
         conn.execute_batch(&format!(
             "CREATE TRIGGER opt005_r3_pollute AFTER INSERT ON articles \
-             WHEN NEW.guid = 'remote-51' \
-             BEGIN UPDATE articles SET url_norm = x'00' WHERE id = {anchor}; END;"
+             WHEN NEW.guid = char(1)||'fluxreader:remote'||char(1)||'51' \
+             BEGIN UPDATE articles SET read_version = x'00' WHERE id = {anchor}; END;"
         ))
         .unwrap();
     }
-    let report = sync::sync_light(&db, &http()).await.expect("light sync");
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("light sync");
     assert!(
         report.errors.iter().any(|e| e.contains("增量页合并失败")),
         "页失败必须记录：{:?}",
@@ -3298,11 +3434,28 @@ async fn fever_cross_feed_same_url_keeps_independent_entries() {
         let article = |guid: &str| db::NewArticle {
             guid: guid.into(),
             url: Some(SHARED.into()),
-            title: "direct copy".into(),
+            title: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             author: None,
             summary: None,
-            content_html: Some("<p>c</p>".into()),
-            body_text: "c".into(),
+            content_html: Some(
+                if guid == "g-f10" {
+                    "<p>copy-10</p>"
+                } else {
+                    "<p>copy-11</p>"
+                }
+                .into(),
+            ),
+            body_text: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -3354,7 +3507,7 @@ async fn fever_cross_feed_same_url_keeps_independent_entries() {
         );
         assert_eq!(
             article_state(&conn, 7002),
-            Some((true, false)),
+            Some((false, false)),
             "B 按同轮读广播一并标读（read-anywhere-wins；N4 起两协议同轮终值一致），而非 B 自己的远端 unread 立即撤销"
         );
         let total: i64 = conn
@@ -3465,11 +3618,28 @@ async fn seed_cross_feed_pair(
         let article = |guid: &str| db::NewArticle {
             guid: guid.into(),
             url: Some(url.into()),
-            title: "direct copy".into(),
+            title: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             author: None,
             summary: None,
-            content_html: Some("<p>c</p>".into()),
-            body_text: "c".into(),
+            content_html: Some(
+                if guid == "g-f10" {
+                    "<p>copy-10</p>"
+                } else {
+                    "<p>copy-11</p>"
+                }
+                .into(),
+            ),
+            body_text: if guid == "g-f10" {
+                "copy-10"
+            } else {
+                "copy-11"
+            }
+            .into(),
             image_url: None,
             enclosure_url: None,
             enclosure_mime: None,
@@ -3507,7 +3677,7 @@ fn read_version_of(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
 /// 尚未被自己条目合并的未读行必须先被广播标读；随后该行 own unread 处理时，
 /// 同轮已读信号（显式集合）不得被推翻。轮终 Fever 权威对账同样不得撤销。
 #[tokio::test]
-async fn fever_same_round_large_id_read_small_id_unread_stays_read() {
+async fn fever_same_round_different_sources_keep_independent_states() {
     const SHARED: &str = "http://127.0.0.1:8765/post/fever-perm-large-read";
     let srv = Fixture::start().await;
     let (db, tmp) = seed_cross_feed_pair("fever_perm_large_read", &srv, SHARED, 7101, 7102).await;
@@ -3540,16 +3710,15 @@ async fn fever_same_round_large_id_read_small_id_unread_stays_read() {
         );
         assert_eq!(
             article_state(&conn, 7101),
-            Some((true, false)),
+            Some((false, false)),
             "小 id 未读行被同轮广播先标读；own unread 与轮终对账都不得推翻（顺序无关）"
         );
     }
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// N4 集合失败与恢复（可解释链）：失败轮跳过对账但保留 items 合并的已读广播、
-/// 不推完成时间；恢复轮里读信号仍在 → 广播不被撤销；双方显式 unread（无读
-/// 信号）轮 → 双向 unread 权威恢复。
+/// 集合失败保留已绑定 flags 和完成时间；Content 只更新正文。
+/// 恢复轮由完整 State 集合收敛，两源同 URL 的状态仍各自独立。
 #[tokio::test]
 async fn fever_collection_failure_round_and_next_round_recovery_are_explainable() {
     const SHARED: &str = "http://127.0.0.1:8765/post/fever-collection-failure";
@@ -3563,7 +3732,7 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
         db::last_sync_ts(&conn).unwrap()
     };
 
-    // 失败轮：7101 远端已读 + unread 集合拉取失败（响应缺字段）。
+    // 失败轮：7201 远端已读 + unread 集合拉取失败（响应缺字段）。
     {
         let mut es = srv.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == 7201) {
@@ -3588,17 +3757,17 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
         );
         assert_eq!(
             article_state(&conn, 7201),
-            Some((true, false)),
-            "失败轮 items 合并仍生效：读行自身收敛"
+            Some((false, false)),
+            "集合失败不得由正文页越过State边界修改已绑定读状态"
         );
         assert_eq!(
             article_state(&conn, 7202),
-            Some((true, false)),
-            "失败轮跳过对账不等于撤销 items 合并产生的已读广播"
+            Some((false, false)),
+            "另一源仍保持自己的状态"
         );
     }
 
-    // 恢复轮：集合恢复（7201 仍读、7202 仍未读）。读信号仍在 → 广播不被撤销。
+    // 恢复轮：完整集合收敛7201，7202仍未读。
     srv.set_omit_unread(false);
     let r3 = sync::sync_now(&db, &http())
         .await
@@ -3606,10 +3775,11 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
     assert!(r3.errors.is_empty(), "{:?}", r3.errors);
     {
         let conn = db.lock().await;
+        assert_eq!(article_state(&conn, 7201), Some((true, false)));
         assert_eq!(
             article_state(&conn, 7202),
-            Some((true, false)),
-            "恢复轮里同轮已读广播继续有效：own 远端 unread 不得撤销（N4 统一政策）"
+            Some((false, false)),
+            "恢复轮各源按自己的远端状态收敛"
         );
     }
 
@@ -3665,29 +3835,29 @@ async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
     };
     assert_eq!(
         receipts.len(),
-        2,
-        "读闭包回执应包含两条真实翻转行：{receipts:?}"
+        1,
+        "回执只包含当前源真实翻转行：{receipts:?}"
     );
     {
         let conn = db.lock().await;
-        assert_eq!(queued_read_count(&conn), 2, "两行各自入队 read（本地半边）");
+        assert_eq!(queued_read_count(&conn), 1, "只为当前源入队");
         assert_eq!(read_version_of(&conn, 7301), 1);
-        assert_eq!(read_version_of(&conn, 7302), 1);
+        assert_eq!(read_version_of(&conn, 7302), 0);
     }
 
     // 真实网络 push：Fever mark=item 端点被命中，服务端两条变已读，队列清空。
     let r2 = sync::sync_now(&db, &http()).await.expect("sync push");
     assert!(r2.errors.is_empty(), "{:?}", r2.errors);
     assert!(
-        r2.pushed_states >= 2,
-        "两条 read 意图都应经网络推送（pushed_states={}）",
+        r2.pushed_states == 1,
+        "仅当前源 read 意图经网络推送（pushed_states={}）",
         r2.pushed_states
     );
     {
         let es = srv.entries.lock().unwrap();
         let read_of = |id: i64| es.iter().find(|e| e.id == id).map(|e| e.read);
         assert_eq!(read_of(7301), Some(true), "真实 push 后服务端 7301 已读");
-        assert_eq!(read_of(7302), Some(true), "读广播同样经网络到达 7302");
+        assert_eq!(read_of(7302), Some(false), "不向其他源推送 read");
     }
     {
         let conn = db.lock().await;
@@ -3697,7 +3867,7 @@ async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
             "push 确认成功 → 队项被真实确认清空（非模拟 prune）"
         );
         assert_eq!(article_state(&conn, 7301), Some((true, false)));
-        assert_eq!(article_state(&conn, 7302), Some((true, false)));
+        assert_eq!(article_state(&conn, 7302), Some((false, false)));
     }
 
     // 下一轮远端显式 unread（无同轮读信号）：版本守卫必须放行远端合并
@@ -3726,6 +3896,248 @@ async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
             "远端合并不递增版本（版本只记录本地意图）"
         );
         assert_eq!(queued_read_count(&conn), 0, "远端 unread 不产生推送队项");
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+ACK 写回确认（2026-11-03）：Fever mark=item 的宽松 200 不得直接出队
+============================================================ */
+
+fn seed_ack_article(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
+    conn.execute(
+        "INSERT OR IGNORE INTO feeds (feed_url, title)
+         VALUES ('https://fever-ack.example/rss', 'ACK')",
+        [],
+    )
+    .unwrap();
+    let feed_id: i64 = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = 'https://fever-ack.example/rss'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO articles (feed_id, guid, title, url)
+         VALUES (?1, ?2, 'ACK', ?3)",
+        rusqlite::params![
+            feed_id,
+            format!("fever-ack-{remote_id}"),
+            format!("https://fever-ack.example/{remote_id}")
+        ],
+    )
+    .unwrap();
+    let aid = conn.last_insert_rowid();
+    db::set_article_remote_id(conn, aid, remote_id).unwrap();
+    // These ACK fixtures model an earlier Fever item response with feed_id=1,
+    // including a target since removed. Bare/cold IDs are tested separately.
+    assert!(db::confirm_article_remote_origin(conn, aid, remote_id, 1).unwrap());
+    aid
+}
+
+fn sole_queue_class(conn: &rusqlite::Connection) -> (String, Option<String>) {
+    conn.query_row(
+        "SELECT status, last_error_class FROM sync_queue ORDER BY id LIMIT 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn fever_normal_read_is_confirmed_by_with_ids_before_prune() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8101, 1, "normal", false, false);
+    let (db, tmp) = seed_db("fever_ack_normal", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8101);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    sync::push_states_now(&db, &http()).await;
+
+    {
+        let conn = db.lock().await;
+        assert!(db::take_sync_queue(&conn).unwrap().is_empty());
+    }
+    assert!(srv
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.id == 8101 && entry.read));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_unknown_target_with_auth1_ack_stays_retry_wait_inconclusive() {
+    let srv = Fixture::start().await;
+    let (db, tmp) = seed_db("fever_ack_missing", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8999);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    sync::push_states_now(&db, &http()).await;
+
+    let conn = db.lock().await;
+    let queued = db::take_sync_queue(&conn).unwrap();
+    assert_eq!(queued.len(), 1, "未知 target 不得因 auth=1 出队");
+    assert_eq!(queued[0].status, db::STATUS_RETRY_WAIT);
+    let (status, class) = sole_queue_class(&conn);
+    assert_eq!(status, "retry_wait");
+    assert_eq!(class.as_deref(), Some("verification"));
+    let last_error: String = conn
+        .query_row(
+            "SELECT last_error FROM sync_queue ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        last_error.contains("inconclusive"),
+        "空 with_ids 响应必须报告 inconclusive：{last_error:?}"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_ack_with_readback_failure_stays_retry_wait() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8201, 1, "readback", false, false);
+    srv.set_omit_items(true);
+    let (db, tmp) = seed_db("fever_ack_readback_fail", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8201);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    sync::push_states_now(&db, &http()).await;
+
+    let conn = db.lock().await;
+    let queued = db::take_sync_queue(&conn).unwrap();
+    assert_eq!(queued.len(), 1, "读回失败不得出队");
+    assert_eq!(queued[0].status, db::STATUS_RETRY_WAIT);
+    assert_eq!(
+        sole_queue_class(&conn),
+        ("retry_wait".into(), Some("verification".into()))
+    );
+    drop(conn);
+    assert!(srv
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.id == 8201 && entry.read));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_short_readback_keeps_the_missing_row_in_retry_wait() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8301, 1, "present", false, false);
+    let (db, tmp) = seed_db("fever_ack_partial", &srv);
+    let (present_aid, missing_aid) = {
+        let conn = db.lock().await;
+        let present_aid = seed_ack_article(&conn, 8301);
+        db::set_read_with_enqueue(&conn, present_aid, true).unwrap();
+        let missing_aid = seed_ack_article(&conn, 8998);
+        db::set_read_with_enqueue(&conn, missing_aid, true).unwrap();
+        (present_aid, missing_aid)
+    };
+
+    sync::push_states_now(&db, &http()).await;
+
+    let conn = db.lock().await;
+    let queued = db::take_sync_queue(&conn).unwrap();
+    assert_eq!(queued.len(), 1, "只保留缺失目标的队项");
+    assert_eq!(queued[0].article_id, Some(missing_aid));
+    assert_ne!(queued[0].article_id, Some(present_aid));
+    assert_eq!(queued[0].status, db::STATUS_RETRY_WAIT);
+    assert_eq!(
+        sole_queue_class(&conn),
+        ("retry_wait".into(), Some("verification".into()))
+    );
+    drop(conn);
+    assert!(srv
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.id == 8301 && entry.read));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_star_probe_missing_is_saved_does_not_send_mark() {
+    let srv = Fixture::start_with(FixtureOptions {
+        api_version: Some(3),
+        ..Default::default()
+    })
+    .await;
+    srv.add_entry(8401, 1, "star probe", false, false);
+    srv.set_omit_item_state_fields(true);
+    let client = FeverClient::new(&srv.url(), USER, PASS, http()).at_resolved(&srv.api_root());
+
+    let err = client
+        .push_star_state(8401, true)
+        .await
+        .expect_err("缺少 is_saved 时不得盲发 mark");
+    assert_eq!(err.code, "verification");
+    assert!(
+        err.message.contains("is_saved"),
+        "错误应指出缺少 is_saved：{}",
+        err.message
+    );
+    let marks: Vec<Hit> = srv
+        .hits()
+        .into_iter()
+        .filter(|h| h.query_param("mark").as_deref() == Some("item"))
+        .collect();
+    assert!(marks.is_empty(), "探测不可确认时不得发送 mark：{marks:?}");
+}
+
+#[tokio::test]
+async fn fever_states_round_sends_mark_item_once_after_verification_failure() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8501, 1, "same round", false, false);
+    srv.set_omit_item_state_fields(true);
+    let (db, tmp) = seed_db("fever_ack_same_round_once", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8501);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("same-round sync");
+    assert!(
+        report.errors.iter().any(|e| e.contains("inconclusive")),
+        "缺字段读回必须在 report 中可见：{:?}",
+        report.errors
+    );
+    let marks: Vec<Hit> = srv
+        .hits()
+        .into_iter()
+        .filter(|h| h.query_param("mark").as_deref() == Some("item"))
+        .collect();
+    assert_eq!(
+        marks.len(),
+        1,
+        "同一 states 轮不得对已尝试过的队项重发 mark=item：{marks:?}"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            sole_queue_class(&conn),
+            ("retry_wait".into(), Some("verification".into()))
+        );
     }
     let _ = std::fs::remove_file(&tmp);
 }

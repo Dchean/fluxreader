@@ -123,13 +123,13 @@ fn all_scope_len(conn: &rusqlite::Connection) -> usize {
 }
 
 #[tokio::test]
-async fn manual_refresh_all_keeps_identity_and_display_dedup_collapses() {
+async fn manual_refresh_all_keeps_cross_source_identity_and_display_independent() {
     let port = start_feed_server();
     let (db, tmp) = setup_db(port);
     let client = app_lib::ingestion::build_client(30);
 
     set_smart_dedup(&*db.lock().await, true);
-    let (new_articles, failed) = scheduler::refresh_all(&db, &client).await;
+    let (new_articles, failed) = scheduler::refresh_all(&db, &client).await.unwrap();
     assert_eq!(failed, 0, "两个本地源都应抓取成功");
     assert_eq!(
         new_articles, 2,
@@ -140,8 +140,8 @@ async fn manual_refresh_all_keeps_identity_and_display_dedup_collapses() {
         let conn = db.lock().await;
         assert_eq!(
             all_scope_len(&conn),
-            1,
-            "显示层聚合：全部视图折叠为 1（开关的可见效果）"
+            2,
+            "不同源始终独立显示，旧去重开关不能跨源折叠"
         );
     }
 
@@ -162,7 +162,7 @@ async fn manual_refresh_all_keeps_both_when_dedup_off() {
     let client = app_lib::ingestion::build_client(30);
 
     set_smart_dedup(&*db.lock().await, false);
-    let (new_articles, failed) = scheduler::refresh_all(&db, &client).await;
+    let (new_articles, failed) = scheduler::refresh_all(&db, &client).await.unwrap();
     assert_eq!(failed, 0);
     assert_eq!(new_articles, 2, "smartDedup=off：两源各 1 篇");
     assert_eq!(article_count(&db).await, 2);

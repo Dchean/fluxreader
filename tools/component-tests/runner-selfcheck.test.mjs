@@ -28,8 +28,8 @@ const PROBE_DIR = fileURLToPath(new URL('./runner-probes/', import.meta.url));
 const MARKER = fileURLToPath(new URL('../../tmp/opt016b-runner-probes/good-cleaned.txt', import.meta.url));
 
 /** 子进程黑盒运行探针：注入短看门狗，收集退出码与合并输出。 */
-function runProbe(name) {
-  const r = spawnSync(process.execPath, [PROBE_DIR + name], {
+function runProbe(name, args = []) {
+  const r = spawnSync(process.execPath, [PROBE_DIR + name, ...args], {
     cwd: ROOT,
     env: { ...process.env, COMPONENT_WATCHDOG_MS: '1500' },
     encoding: 'utf8',
@@ -37,6 +37,22 @@ function runProbe(name) {
   });
   return { status: r.status, signal: r.signal, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
+
+componentTest('RS4 自检：阅读位置状态在显式复位、成功/失败清理与下一用例初始化中隔离', { timeout: 30000 }, async () => {
+  for (const failBody of [false, true]) {
+    const result = runProbe('probe-reading-position-reset.mjs', failBody ? ['--body-error'] : []);
+    assert.equal(result.status, failBody ? 1 : 0,
+      `位置隔离探针（body失败=${failBody}）退出码不符：${result.status}\n${result.output}`);
+    for (const phase of ['explicit-reset', 'after-first-case', 'next-case-start', 'after-second-case']) {
+      assert.ok(result.output.includes(`RS4_CLEAN ${phase}`),
+        `位置隔离探针缺少成功阶段 ${phase}\n${result.output}`);
+    }
+    assert.match(result.output, failBody ? /# pass 1\b/ : /# pass 2\b/);
+    assert.match(result.output, failBody ? /# fail 1\b/ : /# fail 0\b/);
+    assert.ok(result.output.includes('清理完成'), '位置隔离探针必须完成最终清理');
+    if (failBody) assert.ok(result.output.includes('RS4 expected body error'), '失败来自指定body，不是清理断言');
+  }
+});
 
 componentTest('OPT-016B R1 自检：runner 防护（悬挂/清理/错误账本）在黑盒子进程中真实判红/判绿', { timeout: 60000 }, async () => {
   // 1) after 钩子 pending → 必须非 0（ref 看门狗 exit 3）

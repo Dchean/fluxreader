@@ -22,6 +22,7 @@ export function AppearanceTab() {
             key={m.id}
             className={`toggle-action-btn theme-mode-btn ${settings.themeMode === m.id ? 'theme-active' : ''}`}
             onClick={() => updateSettings({ themeMode: m.id })}
+            aria-pressed={settings.themeMode === m.id}
           >
             <m.icon />
             <span>{m.label}</span>
@@ -36,6 +37,7 @@ export function AppearanceTab() {
             key={p.id}
             className={`palette-card-btn ${settings.palette === p.id ? 'active' : ''}`}
             onClick={() => updateSettings({ palette: p.id })}
+            aria-pressed={settings.palette === p.id}
           >
             <div className="palette-dot" style={{ background: p.color }} />
             <span className="palette-name">{p.name}</span>

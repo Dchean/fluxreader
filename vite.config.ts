@@ -4,6 +4,10 @@ import { defineConfig } from 'vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    // tmp/ 下的审计与测试 HTML 不属于应用依赖图，不能参与冷启动扫描。
+    entries: ['index.html'],
+  },
   server: {
     // 固定端口 + 仅监听 localhost：Tauri devUrl 写死 5173（tauri.conf.json），
     // WebView2 解析 localhost 可能走 IPv4/IPv6 任一栈；host 限定回环后 dev server

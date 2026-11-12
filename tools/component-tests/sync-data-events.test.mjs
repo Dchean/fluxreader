@@ -59,7 +59,7 @@ componentTest('OPT-007 feeds-updated：纯 merged 变化经真实监听器保位
   setPlan({ counts_snapshot: () => Promise.resolve({ feeds: COUNTS_AFTER_MERGE, scope: null }) });
 
   const nonce0 = useAppStore.getState().positionRestoreNonce;
-  const listCalls0 = invokeCount('list_articles');
+  const listCalls0 = invokeCount('get_article_updates');
   const toasts0 = useAppStore.getState().toasts.length;
 
   /* 派发一次真实的 feeds-updated（merged-only 载荷）——App.tsx 的监听器应消费。 */
@@ -73,10 +73,10 @@ componentTest('OPT-007 feeds-updated：纯 merged 变化经真实监听器保位
     });
   });
   await flush(3);
-  await waitFor(() => invokeCount('list_articles') > listCalls0, { label: '事件触发的 reload 已发出' });
+  await waitFor(() => invokeCount('get_article_updates') > listCalls0, { label: '事件触发的属性刷新已发出' });
 
   assert.ok(listeners >= 1, 'feeds-updated 必须存在在册监听器（App.tsx 事件接线）');
-  assert.ok(invokeCount('list_articles') > listCalls0, '事件必须触发一次真实 list_articles 重拉（不限 pulled_entries 的旧判定会漏）');
+  assert.ok(invokeCount('get_article_updates') > listCalls0, '事件必须回读固定成员属性（不限 pulled_entries 的旧判定会漏）');
   assert.equal(art('101')?.isRead, true, '纯对账变化的已读状态随 reload 更新到列表');
   assert.equal(art('101')?.isStarred, true, '纯对账变化的收藏状态随 reload 更新到列表');
   assert.equal(useAppStore.getState().feedCounts.get('10')?.starred, 1, '计数随 reload 以后端为准刷新');

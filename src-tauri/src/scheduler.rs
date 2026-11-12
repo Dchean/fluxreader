@@ -7,8 +7,9 @@
 
 use crate::state::AppState;
 use rusqlite::Connection;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 调度循环的醒来节奏。每 tick 只跑一条便宜的索引查询，没到期的源直接返回。
@@ -18,6 +19,281 @@ const TICK: Duration = Duration::from_secs(60);
 /// 用户可在设置页 1–16 调整（fetchConcurrency）。
 const DEFAULT_CONCURRENCY: usize = 4;
 pub const MAX_CONCURRENCY: usize = 16;
+
+/// 一次刷新批次的完整汇总。`refreshed_feed_urls` 只含本轮 `Applied` 的规范化
+/// feed URL，用于跨批次短期去重；在途跳过、代际取代与失败都不进入 footprint。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RefreshBatchReport {
+    new_articles: usize,
+    data_changed: bool,
+    failed_feeds: usize,
+    refreshed_feed_urls: Vec<String>,
+}
+
+/// watch 通道需要可复制的错误载荷；`AppError` 本身不 Clone，故只搬运 wire 字段。
+#[derive(Debug, Clone)]
+struct SharedRefreshError {
+    code: String,
+    message: String,
+}
+
+impl From<crate::error::AppError> for SharedRefreshError {
+    fn from(error: crate::error::AppError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
+
+impl From<SharedRefreshError> for crate::error::AppError {
+    fn from(error: SharedRefreshError) -> Self {
+        crate::error::AppError::new(&error.code, error.message)
+    }
+}
+
+type FlightResult = Result<RefreshBatchReport, SharedRefreshError>;
+
+struct FullRefreshFlight {
+    result: tokio::sync::watch::Sender<Option<FlightResult>>,
+}
+
+impl FullRefreshFlight {
+    async fn wait(&self) -> crate::error::AppResult<RefreshBatchReport> {
+        let mut rx = self.result.subscribe();
+        loop {
+            if let Some(value) = rx.borrow().clone() {
+                return value.map_err(Into::into);
+            }
+            if rx.changed().await.is_err() {
+                return Err(crate::error::AppError::internal(
+                    "刷新任务结果通道在发布前关闭",
+                ));
+            }
+        }
+    }
+}
+
+/// flight 的生命周期必须由后台任务本身持有：调用方 future 被取消时，任务仍会
+/// 完成并发布结果；任务 panic 时 Drop 守卫也会发布失败并移除映射，避免后续
+/// 调用永久等待一个没有领跑者的 flight。
+struct FlightCompletionGuard {
+    key: usize,
+    flight: Arc<FullRefreshFlight>,
+    finished: bool,
+}
+
+impl FlightCompletionGuard {
+    fn new(key: usize, flight: Arc<FullRefreshFlight>) -> Self {
+        Self {
+            key,
+            flight,
+            finished: false,
+        }
+    }
+
+    fn publish(&self, outcome: FlightResult) {
+        self.flight.result.send_replace(Some(outcome));
+        let mut flights = FULL_REFRESH_FLIGHTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if flights
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.flight))
+        {
+            flights.remove(&self.key);
+        }
+    }
+
+    fn finish(mut self, outcome: FlightResult) {
+        self.publish(outcome);
+        self.finished = true;
+    }
+}
+
+impl Drop for FlightCompletionGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let reason = if std::thread::panicking() {
+            "刷新任务 panic，批次未完成"
+        } else {
+            "刷新任务被取消，批次未完成"
+        };
+        self.publish(Err(SharedRefreshError::from(
+            crate::error::AppError::internal(reason),
+        )));
+    }
+}
+
+/// 手动/托盘全刷的 single-flight：同一数据库同时只有一个领跑者，后到调用
+/// 订阅同一 watch 并复用结果，不再各自创建 Semaphore(fetchConcurrency)。
+// Note: 全刷 single-flight、共享批次闸门与 hybrid 源集合 — 见 .agents/notes/implemented/architecture/2026-11-04-刷新编排与源名分域.md
+static FULL_REFRESH_FLIGHTS: LazyLock<StdMutex<HashMap<usize, Arc<FullRefreshFlight>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// 所有批次刷新（手动全刷、托盘全刷、调度器到期批）共享的串行闸门。
+/// 同一数据库同一时刻只有一批在跑；不同批次类型不合并结果（到期批只抓 due，
+/// 手动批抓全部/本地全部），后者等前者结束后按自己的选择集执行。
+static REFRESH_BATCH_GATES: LazyLock<StdMutex<HashMap<usize, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// 跨批次自动去重 footprint 的存活时间。只有调度 due 批读取它；手动/托盘
+/// 全刷是用户的显式刷新请求，必须绕过 footprint 重新抓取。90 秒用于压制
+/// 调度器与其它自动入口的短窗口重复，不压制用户的显式动作。
+const RECENT_REFRESH_TTL: Duration = Duration::from_secs(90);
+
+struct RecentRefreshes {
+    /// Weak 防止测试/重开数据库时指针地址复用而继承另一个库的 footprint。
+    db: Weak<tokio::sync::Mutex<Connection>>,
+    /// 键是规范化 feed URL，不是 SQLite rowid：删除最大 id 后新源可能复用同一
+    /// rowid，不能因此继承旧源的“刚刷新”状态。
+    feeds: HashMap<String, Instant>,
+}
+
+static RECENT_REFRESHES: LazyLock<StdMutex<HashMap<usize, RecentRefreshes>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(test)]
+static PANIC_NEXT_FULL_REFRESH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 托盘菜单项由 setup 注册；设置页改 syncMode 时经 command 就地更新文案，
+/// 避免原生菜单在运行期继续显示「全部」却实际跳过服务端来源。
+static TRAY_REFRESH_ITEM: LazyLock<StdMutex<Option<tauri::menu::MenuItem<tauri::Wry>>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+#[cfg(test)]
+static LAST_TRAY_REFRESH_MODE: LazyLock<StdMutex<Option<String>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+#[cfg(test)]
+type TrayTextWriter = fn(&str);
+
+#[cfg(test)]
+static TRAY_TEXT_WRITER: LazyLock<StdMutex<Option<TrayTextWriter>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+pub fn refresh_all_menu_label(sync_mode: &str) -> &'static str {
+    if sync_mode == "hybrid" {
+        "刷新本地订阅源"
+    } else {
+        "刷新全部订阅源"
+    }
+}
+
+pub fn register_tray_refresh_item(item: tauri::menu::MenuItem<tauri::Wry>) {
+    *TRAY_REFRESH_ITEM.lock().unwrap_or_else(|e| e.into_inner()) = Some(item);
+}
+
+pub fn set_tray_refresh_mode(sync_mode: &str) {
+    #[cfg(test)]
+    {
+        *LAST_TRAY_REFRESH_MODE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(sync_mode.to_string());
+    }
+    let item = TRAY_REFRESH_ITEM.lock().unwrap_or_else(|e| e.into_inner());
+    // 单元测试只验证「配置应用触发了模式同步」，不链接真实 Tauri 菜单实现：
+    // 测试 exe 默认加载 comctl32 v5，而该实现依赖 v6 的 TaskDialogIndirect，
+    // 会在测试启动前报 STATUS_ENTRYPOINT_NOT_FOUND。
+    #[cfg(not(test))]
+    {
+        if let Some(item) = item.as_ref() {
+            if let Err(e) = item.set_text(refresh_all_menu_label(sync_mode)) {
+                log::warn!("scheduler: 更新托盘刷新文案失败: {e}");
+            }
+        }
+    }
+    #[cfg(test)]
+    {
+        if let Some(writer) = *TRAY_TEXT_WRITER.lock().unwrap_or_else(|e| e.into_inner()) {
+            writer(refresh_all_menu_label(sync_mode));
+        }
+        drop(item);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn take_last_tray_refresh_mode_for_test() -> Option<String> {
+    LAST_TRAY_REFRESH_MODE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
+#[cfg(test)]
+pub(crate) fn set_tray_text_writer_for_test(writer: Option<TrayTextWriter>) {
+    *TRAY_TEXT_WRITER.lock().unwrap_or_else(|e| e.into_inner()) = writer;
+}
+
+fn db_key(db: &Arc<tokio::sync::Mutex<Connection>>) -> usize {
+    Arc::as_ptr(db) as usize
+}
+
+fn batch_gate(db: &Arc<tokio::sync::Mutex<Connection>>) -> Arc<tokio::sync::Mutex<()>> {
+    let key = db_key(db);
+    let mut gates = REFRESH_BATCH_GATES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    gates
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn prune_recent_refreshes(refreshes: &mut HashMap<usize, RecentRefreshes>, now: Instant) {
+    refreshes.retain(|_, entry| {
+        if entry.db.strong_count() == 0 {
+            return false;
+        }
+        entry.feeds.retain(|_, refreshed_at| {
+            now.saturating_duration_since(*refreshed_at) < RECENT_REFRESH_TTL
+        });
+        !entry.feeds.is_empty()
+    });
+}
+
+fn filter_recently_refreshed(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    selected: Vec<crate::db::FeedRefreshCandidate>,
+) -> Vec<crate::db::FeedRefreshCandidate> {
+    if selected.is_empty() {
+        return selected;
+    }
+    let key = db_key(db);
+    let now = Instant::now();
+    let mut refreshes = RECENT_REFRESHES.lock().unwrap_or_else(|e| e.into_inner());
+    prune_recent_refreshes(&mut refreshes, now);
+    let Some(entry) = refreshes.get(&key) else {
+        return selected;
+    };
+    selected
+        .into_iter()
+        .filter(|candidate| !entry.feeds.contains_key(&candidate.normalized_url))
+        .collect()
+}
+
+fn record_recent_refreshes(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    refreshed_feed_urls: &[String],
+) {
+    if refreshed_feed_urls.is_empty() {
+        return;
+    }
+    let key = db_key(db);
+    let now = Instant::now();
+    let mut refreshes = RECENT_REFRESHES.lock().unwrap_or_else(|e| e.into_inner());
+    prune_recent_refreshes(&mut refreshes, now);
+    let entry = refreshes.entry(key).or_insert_with(|| RecentRefreshes {
+        db: Arc::downgrade(db),
+        feeds: HashMap::new(),
+    });
+    for feed_url in refreshed_feed_urls {
+        entry.feeds.insert(feed_url.clone(), now);
+    }
+}
 
 /// 从 app_settings JSON 里读 autoRefresh / refreshInterval / smartDedup /
 /// fetchConcurrency。async 版：在调度循环（tokio worker）里调用。
@@ -31,32 +307,35 @@ pub const MAX_CONCURRENCY: usize = 16;
 async fn read_refresh_config(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> (bool, i64, bool, usize) {
-    let conn = db.lock().await;
-    let raw = crate::db::get_setting(&conn, "app_settings").ok().flatten();
-    let mut enabled = true;
-    let mut interval = 30i64;
-    let mut dedup = false;
-    let mut concurrency = DEFAULT_CONCURRENCY;
-    if let Some(json) = raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-    {
-        if let Some(v) = json.get("autoRefresh").and_then(|v| v.as_bool()) {
-            enabled = v;
-        }
-        if let Some(v) = read_refresh_interval(&json) {
-            interval = v;
-        }
-        if let Some(v) = json.get("smartDedup").and_then(|v| v.as_bool()) {
-            dedup = v;
-        }
-        if let Some(v) = json.get("fetchConcurrency").and_then(|v| v.as_i64()) {
-            if (1..=MAX_CONCURRENCY as i64).contains(&v) {
-                concurrency = v as usize;
+    crate::state::database_work(db.clone(), |conn| {
+        let raw = crate::db::get_setting(conn, "app_settings").ok().flatten();
+        let mut enabled = true;
+        let mut interval = 30i64;
+        let mut dedup = false;
+        let mut concurrency = DEFAULT_CONCURRENCY;
+        if let Some(json) = raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        {
+            if let Some(v) = json.get("autoRefresh").and_then(|v| v.as_bool()) {
+                enabled = v;
+            }
+            if let Some(v) = read_refresh_interval(&json) {
+                interval = v;
+            }
+            if let Some(v) = json.get("smartDedup").and_then(|v| v.as_bool()) {
+                dedup = v;
+            }
+            if let Some(v) = json.get("fetchConcurrency").and_then(|v| v.as_i64()) {
+                if (1..=MAX_CONCURRENCY as i64).contains(&v) {
+                    concurrency = v as usize;
+                }
             }
         }
-    }
-    (enabled, interval, dedup, concurrency)
+        Ok((enabled, interval, dedup, concurrency))
+    })
+    .await
+    .unwrap_or((true, 30, false, DEFAULT_CONCURRENCY))
 }
 
 /// refreshInterval 的数值读取单点（OPT-011）：只接受 5–720 的**整数**。
@@ -73,7 +352,8 @@ fn read_refresh_interval(v: &serde_json::Value) -> Option<i64> {
 }
 
 /// 同步模式（app_settings.syncMode，UI 词条「本机抓取 / 跟随服务端」）：
-/// - `hybrid` 跟随服务端：后台刷新跳过 Miniflux 源（内容走服务端同步）
+/// - `hybrid` 跟随服务端：后台、手动与托盘刷新都跳过 origin='remote' 源
+///   （内容走服务端同步；手动入口文案为「刷新本地订阅源」）
 /// - `direct` 本机抓取（默认/未配置）：全部源直连抓取（旧行为）
 ///
 /// 锁内读（调用方持 conn）。
@@ -82,35 +362,107 @@ fn read_sync_mode_conn(conn: &rusqlite::Connection) -> String {
     crate::db::app_settings_str(conn, "syncMode", "direct")
 }
 
-/// 全量刷新所有源（托盘「刷新全部订阅」与手动全刷入口，忽略到期时间）。
-/// 手动动作始终包含 Miniflux 源——用户显式点了刷新就是要全部内容
-/// （同步模式只影响后台定时行为，不拦用户显式动作）。
+/// 手动/托盘全刷入口（忽略到期时间与自动去重 footprint）。并发重复调用复用
+/// 同一 in-flight 结果；一次批次完成后的下一次显式全刷会重新抓取。
+/// 同步模式语义与后台一致：direct 抓全部来源；hybrid 排除 origin='remote'
+///（保留 local 及其它非 remote 来源；服务端来源由同步提供，避免
+/// direct/remote 两份文章）。
 pub async fn refresh_all(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
-) -> (usize, usize) {
-    // TASK-064 N3：smartDedup 照常生效——此前写死 false，开智能去重的用户手动
-    // 全刷会放行跨源同文（文章翻倍且不可逆）。手动语义只解除「到期时间与同步
-    // 模式对 remote 源的跳过」，不解除去重。
-    let (_, _, dedup, concurrency) = read_refresh_config(db).await;
-    refresh_feeds_inner_with_concurrency(db, http, None, dedup, concurrency).await
+) -> crate::error::AppResult<(usize, usize)> {
+    let key = db_key(db);
+    let (flight, leader) = {
+        let mut flights = FULL_REFRESH_FLIGHTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match flights.get(&key) {
+            Some(existing) => (existing.clone(), false),
+            None => {
+                let (tx, _) = tokio::sync::watch::channel(None);
+                let created = Arc::new(FullRefreshFlight { result: tx });
+                flights.insert(key, created.clone());
+                (created, true)
+            }
+        }
+    };
+    if !leader {
+        let report = flight.wait().await?;
+        return Ok((report.new_articles, report.failed_feeds));
+    }
+
+    let db = db.clone();
+    let http = http.clone();
+    let guard = FlightCompletionGuard::new(key, flight.clone());
+    tokio::spawn(async move {
+        let report = run_full_refresh(&db, &http).await;
+        guard.finish(report.map_err(Into::into));
+    });
+    let report = flight.wait().await?;
+    Ok((report.new_articles, report.failed_feeds))
 }
-/// 抓取所有到期源（后台调度入口，并发上限 = 设置 fetchConcurrency，默认 4）。
+
+async fn run_full_refresh(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+) -> crate::error::AppResult<RefreshBatchReport> {
+    #[cfg(test)]
+    if PANIC_NEXT_FULL_REFRESH.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        panic!("injected full refresh panic");
+    }
+    let gate = batch_gate(db);
+    let _permit = gate.lock().await;
+    // TASK-064 N3：smartDedup 照常生效——此前写死 false，开智能去重的用户手动
+    // 全刷会放行跨源同文（文章翻倍且不可逆）。模式只决定源集合，不解除去重。
+    let (_, _, dedup, concurrency) = read_refresh_config(db).await;
+    let report =
+        refresh_feeds_inner_with_concurrency(db, http, None, dedup, concurrency, true).await?;
+    record_recent_refreshes(db, &report.refreshed_feed_urls);
+    Ok(report)
+}
+
+/// 抓取所有到期源（后台调度入口，自动使用成功 footprint 去重；并发上限 =
+/// 设置 fetchConcurrency，默认 4）。
 /// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
-/// 返回 (新增条数, 失败源数)。
+/// 返回批次报告；数据库查询失败向上返回，不能被伪装成空批成功。
 /// 同步模式作用点：hybrid（跟随服务端）→ 到期查询跳过 origin='remote' 的源
 /// （服务端源内容由后端同步提供）；direct → 全部源照常直连（旧行为）。
 async fn refresh_due_feeds(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
-) -> (usize, usize) {
+) -> crate::error::AppResult<RefreshBatchReport> {
+    let gate = batch_gate(db);
+    let _permit = gate.lock().await;
     let (_, interval_min, dedup, concurrency) = read_refresh_config(db).await;
-    refresh_feeds_inner_with_concurrency(db, http, Some(interval_min), dedup, concurrency).await
+    let report = refresh_feeds_inner_with_concurrency(
+        db,
+        http,
+        Some(interval_min),
+        dedup,
+        concurrency,
+        false,
+    )
+    .await?;
+    record_recent_refreshes(db, &report.refreshed_feed_urls);
+    Ok(report)
+}
+
+/// 集成测试入口：与调度循环使用同一到期批实现（含共享闸门、footprint 与查询错误
+/// 上抛），不启动 8 秒延迟的循环。
+#[doc(hidden)]
+pub async fn refresh_due_once(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+) -> crate::error::AppResult<(usize, usize)> {
+    let report = refresh_due_feeds(db, http).await?;
+    Ok((report.new_articles, report.failed_feeds))
 }
 
 /// 抓取实现：`Some(interval_min)` 只抓到期源（模式过滤在查询内做），
-/// `None` 全量（手动语义，始终含 Miniflux 源）；`dedup` 透传给入库管线
+/// `None` 为手动/托盘全量（direct 含全部来源，hybrid 排除 origin='remote'）；
+/// `dedup` 透传给入库管线
 /// （TASK-064 N3：两条路径都读设置，不再对手动全量写死 false）。
+/// `force=true` 仅用于用户显式全刷，绕过 footprint；due 批传 false。
 /// 并发上限取设置值（全量入口同样尊重 fetchConcurrency）。
 async fn refresh_feeds_inner_with_concurrency(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
@@ -118,166 +470,351 @@ async fn refresh_feeds_inner_with_concurrency(
     due_filter: Option<i64>,
     dedup: bool,
     concurrency: usize,
-) -> (usize, usize) {
+    force: bool,
+) -> crate::error::AppResult<RefreshBatchReport> {
     use tokio::sync::Semaphore;
-    let due: Vec<i64> = {
-        let conn = db.lock().await;
-        match due_filter {
-            // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
-            Some(interval_min) => {
-                let include_remote = read_sync_mode_conn(&conn) != "hybrid";
-                crate::db::feeds_due_for_refresh(&conn, interval_min, include_remote)
+    let runtime = crate::sync::runtime::for_db(db);
+    runtime.ensure_running()?;
+    let selected: Vec<crate::db::FeedRefreshCandidate> =
+        crate::state::database_work(db.clone(), move |conn| {
+            match due_filter {
+                // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
+                Some(interval_min) => {
+                    let include_remote = read_sync_mode_conn(conn) != "hybrid";
+                    crate::db::feeds_due_for_refresh_candidates(conn, interval_min, include_remote)
+                }
+                // 手动/托盘全量：hybrid（跟随服务端）排除 origin='remote'，保留
+                // local 及其它非 remote 来源——服务端源内容由后端同步提供，直连抓取
+                // 会产生 source='direct' 文章与已有 remote 文章重复（guid 不同 +
+                // 智能去重默认关），导致文章翻倍、状态错乱、未读数对不齐。
+                // direct 模式则全部直连（旧行为）。
+                None => {
+                    let include_remote = read_sync_mode_conn(conn) != "hybrid";
+                    crate::db::feeds_all_candidates(conn, include_remote)
+                }
             }
-            // 手动全量：hybrid（跟随服务端）模式下跳过 origin='remote' 源——
-            // 服务端源的内容由后端同步提供，直连抓取会产生 source='direct'
-            // 文章与已有的 source='miniflux' 文章重复（guid 不同 + 智能去重默认关），
-            // 导致文章翻倍、状态错乱、未读数对不齐。direct 模式则全部直连（旧行为）。
-            None => {
-                let include_remote = read_sync_mode_conn(&conn) != "hybrid";
-                crate::db::feeds_all_ids(&conn, include_remote)
-            }
-        }
-        .unwrap_or_else(|e| {
-            log::warn!("scheduler: query feeds failed: {e}");
-            Vec::new()
         })
+        .await?;
+    // 手动/托盘是用户的显式刷新请求，必须绕过短期 footprint；调度 due 批才是
+    // 自动去重入口。并发 manual 仍由 full-refresh flight 复用同一结果。
+    let selected = if force {
+        selected
+    } else {
+        filter_recently_refreshed(db, selected)
     };
-    if due.is_empty() {
-        return (0, 0);
+    if selected.is_empty() {
+        return Ok(RefreshBatchReport::default());
     }
     log::info!(
-        "scheduler: {} feed(s) due, concurrency={concurrency}",
-        due.len()
+        "scheduler: {} feed(s) selected, concurrency={concurrency}",
+        selected.len()
     );
 
     let sem = Arc::new(Semaphore::new(concurrency));
-    let mut handles = Vec::with_capacity(due.len());
-    for id in due {
+    let mut handles = Vec::with_capacity(selected.len());
+    for candidate in selected {
         let sem = sem.clone();
         let db = db.clone();
         let http = http.clone();
+        let runtime = runtime.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await;
-            match crate::ingestion::refresh_feed_staged(&db, &http, id, dedup).await {
-                Ok(n) => (n, 0),
-                Err(_) => (0, 1),
+            let _permit = tokio::select! {
+                biased;
+                _ = runtime.wait_for_stop() => return Err(crate::sync::runtime::cancelled()),
+                permit = sem.acquire_owned() => permit,
+            };
+            runtime.ensure_running()?;
+            // Note: 退出信号同时关闭排队抓取与在途异步链，flight/CAS 保持原契约 — 见 .agents/notes/implemented/architecture/2026-11-05-同步运行生命周期与诊断.md
+            tokio::select! {
+                biased;
+                _ = runtime.wait_for_stop() => Err(crate::sync::runtime::cancelled()),
+                result = crate::ingestion::refresh_feed_staged(&db, &http, candidate.id, dedup) => {
+                    result.map(|outcome| (candidate.id, outcome))
+                },
             }
         }));
     }
-    let mut new_articles = 0;
-    let mut failed = 0;
+    let mut report = RefreshBatchReport::default();
     for h in handles {
-        if let Ok((n, f)) = h.await {
-            new_articles += n;
-            failed += f;
+        absorb_refresh_worker(h, &mut report).await;
+    }
+    runtime.ensure_running()?;
+    Ok(report)
+}
+
+async fn absorb_refresh_worker(
+    handle: tokio::task::JoinHandle<
+        crate::error::AppResult<(i64, crate::ingestion::FeedRefreshOutcome)>,
+    >,
+    report: &mut RefreshBatchReport,
+) {
+    match handle.await {
+        Ok(Ok((feed_id, outcome))) => match outcome {
+            crate::ingestion::FeedRefreshOutcome::Applied {
+                new_articles,
+                data_changed,
+                feed_url,
+            } => {
+                report.data_changed |= data_changed;
+                report.new_articles += new_articles;
+                report
+                    .refreshed_feed_urls
+                    .push(crate::db::normalize_url(&feed_url));
+            }
+            crate::ingestion::FeedRefreshOutcome::SkippedInFlight => {
+                log::debug!("scheduler: feed {feed_id} 已有刷新在途，批次不记账");
+            }
+            crate::ingestion::FeedRefreshOutcome::Superseded => {
+                log::debug!("scheduler: feed {feed_id} 的写回已被更新代际取代，不记账");
+            }
+        },
+        Ok(Err(error)) => {
+            log::warn!("scheduler: 源刷新失败: {error}");
+            report.failed_feeds += 1;
+        }
+        Err(error) => {
+            log::error!("scheduler: 源刷新任务异常结束: {error}");
+            report.failed_feeds += 1;
         }
     }
-    (new_articles, failed)
 }
 
 /// 启动后台调度循环。启动后等 8s 再跑第一轮（避开启动期的 UI 抢锁）。
 pub fn spawn_scheduler(app: AppHandle) {
+    let state_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(8)).await;
+        let db = state_app.state::<AppState>().db.clone();
+        let http = state_app.state::<AppState>().http.clone();
+        let runtime = crate::sync::runtime::for_db(&db);
+        // Recover durable intent once at startup. Periodic polls must not keep
+        // waking the mailbox and bypassing its exponential failure backoff.
+        let pending = crate::state::database_work(db.clone(), |conn| {
+            crate::db::sync_queue_stats(conn).map(|stats| stats.waiting > 0)
+        })
+        .await;
+        match pending {
+            Ok(true) => crate::commands::schedule_state_push_for_db(&db, &http),
+            Ok(false) => {}
+            Err(error) => crate::diagnostics::record(0, "push", "error", Some(&error)),
+        }
+        let mut delay = Duration::from_secs(30);
+        loop {
+            tokio::select! {
+                _=runtime.wait_for_stop()=>return,
+                _=tokio::time::sleep(delay)=>{},
+            }
+            delay = if run_background_states(&db, &http, false).await {
+                Duration::from_secs(30)
+            } else {
+                (delay * 2).min(Duration::from_secs(300))
+            };
+        }
+    });
+    let content_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let db = content_app.state::<AppState>().db.clone();
+        let http = content_app.state::<AppState>().http.clone();
+        let runtime = crate::sync::runtime::for_db(&db);
+        loop {
+            tokio::select! {
+                _ = runtime.wait_for_stop() => return,
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+            }
+            auto_sync_backend(&db, &http, &content_app).await;
+        }
+    });
+    tauri::async_runtime::spawn(async move {
         // 只 clone Send 的部件（Arc<Mutex> + Client），不跨 await 持有 tauri State
         let db = app.state::<AppState>().db.clone();
         let http = app.state::<AppState>().http.clone();
+        let runtime = crate::sync::runtime::for_db(&db);
+        tokio::select! {
+            _ = runtime.wait_for_stop() => return,
+            _ = tokio::time::sleep(Duration::from_secs(8)) => {},
+        }
+        let mut retention_cursor = crate::db::body_retention::RetentionCursor::default();
         loop {
+            if runtime.is_stopped() {
+                return;
+            }
             let (enabled, _interval, _dedup, _concurrency) = read_refresh_config(&db).await;
+            let mut changed = false;
+            let mut new_articles = 0;
+            let mut failed_feeds = 0;
             if enabled {
-                let (new_articles, failed) = refresh_due_feeds(&db, &http).await;
-                if new_articles > 0 || failed > 0 {
-                    let _ = app.emit(
-                        "feeds-updated",
-                        serde_json::json!({ "new_articles": new_articles, "failed_feeds": failed }),
-                    );
-                    // 新文章系统通知（notifyOnNewArticles 开关，默认关；
-                    // 窗口隐藏/失焦时才发——正在看应用时不打扰）
-                    if new_articles > 0 && should_notify(&db, &app).await {
-                        notify_new_articles(&app, new_articles);
+                match refresh_due_feeds(&db, &http).await {
+                    Ok(report) if report.data_changed || report.failed_feeds > 0 => {
+                        changed = true;
+                        new_articles = report.new_articles;
+                        failed_feeds = report.failed_feeds;
+                        // 新文章系统通知（notifyOnNewArticles 开关，默认关；
+                        // 窗口隐藏/失焦时才发——正在看应用时不打扰）
+                        if report.new_articles > 0 && should_notify(&db, &app).await {
+                            notify_new_articles(&app, report.new_articles);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::error!("scheduler: 到期源查询失败，本轮跳过: {error}");
+                        crate::diagnostics::record(0, "refresh", "error", Some(&error));
+                        let _ = app.emit("sync-error", serde_json::json!({
+                            "source": "refresh", "message": format!("后台刷新失败：{}", error.message)
+                        }));
                     }
                 }
             }
-            // 后端后台自动同步（autoSync 开关，默认开）：
-            // 到期才跑轻量同步（push 队列 + changed_after 增量 pull）
-            auto_sync_backend(&db, &http, &app).await;
-            tokio::time::sleep(TICK).await;
+
+            // Local maintenance shares this minute loop but is independent of
+            // autoRefresh. Foreground or SQLite writer contention skips a tick.
+            let mut next_cursor = retention_cursor.clone();
+            match crate::state::try_database_work(db.clone(), move |conn| {
+                let report = crate::db::body_retention::retire_read_bodies_slice(
+                    conn,
+                    chrono::Utc::now().timestamp(),
+                    &mut next_cursor,
+                )?;
+                Ok((report, next_cursor))
+            })
+            .await
+            {
+                Ok(Some((report, next_cursor))) => {
+                    retention_cursor = next_cursor;
+                    changed |= report.released > 0;
+                }
+                Ok(None) => {}
+                Err(error) => log::debug!("scheduler: 正文保留维护本轮跳过: {error}"),
+            }
+            if changed {
+                let _ = app.emit(
+                    "feeds-updated",
+                    serde_json::json!({
+                        "new_articles": new_articles,
+                        "failed_feeds": failed_feeds
+                    }),
+                );
+            }
+
+            tokio::select! {
+                _ = runtime.wait_for_stop() => return,
+                _ = tokio::time::sleep(TICK) => {},
+            }
         }
     });
 }
 
-/// 后端自动同步：读 autoSync（默认开）与刷新间隔，
-/// 到期（now - last_sync ≥ refreshInterval 分钟）时跑轻量同步。
-/// 失败静默（log 记录），下个 tick 仍会因 last_sync 未推进而重试。
-/// 状态被拉平后发 feeds-updated——前端列表/未读计数与 DB 不再脱节
-/// （pull 改变了 is_read 但用户无感知的"静默漂移"问题）。
+/// Content/subscription work has its own bounded loop; its wait cannot hold the
+/// authority state reader. Existing cursor/discovery throttles remain here.
 async fn auto_sync_backend(
     db: &Arc<tokio::sync::Mutex<Connection>>,
     http: &reqwest::Client,
     app: &AppHandle,
 ) {
+    run_background_sync(db, http, app, false).await;
+}
+
+async fn state_sync_enabled(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+) -> crate::error::AppResult<bool> {
+    crate::state::database_work(db.clone(), move |conn| {
+        let settings = crate::db::get_setting(conn, "app_settings")?
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()?;
+        if settings
+            .as_ref()
+            .and_then(|value| value.get("autoSync"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            return Ok(false);
+        }
+        if crate::sync::current_account(conn)?.is_none() {
+            return Ok(false);
+        }
+        crate::db::has_remote_feed_binding(conn)
+    })
+    .await
+}
+
+/// No content cursor, subscription discovery or outbox is a prerequisite for a
+/// known entry's read/star state. The state reader emits its committed changes.
+async fn run_background_states(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    http: &reqwest::Client,
+    focus: bool,
+) -> bool {
+    let runtime = crate::sync::runtime::for_db(db);
+    if runtime.is_stopped() || matches!(state_sync_enabled(db).await, Ok(false)) {
+        return true;
+    }
+    let db = db.clone();
+    let http = http.clone();
+    runtime
+        .run_in(
+            crate::sync::runtime::SyncLane::State,
+            if focus { "focus" } else { "auto" },
+            async move {
+                if !state_sync_enabled(&db).await? {
+                    return Ok(crate::sync::SyncReport::default());
+                }
+                crate::sync::runtime::stage("states");
+                crate::sync::sync_states_now(&db, &http).await
+            },
+        )
+        .await
+        .is_ok_and(|report| report.errors.is_empty())
+}
+
+struct BackendSyncPlan {
+    normal_due: bool,
+    discovery_due: bool,
+    outbox_pending: bool,
+}
+
+async fn backend_sync_plan(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    focus: bool,
+) -> crate::error::AppResult<Option<BackendSyncPlan>> {
     let now = chrono::Utc::now().timestamp();
-    let (on, interval_min, connected, last_sync, has_binding, discovery_due, outbox_pending) = {
-        let conn = db.lock().await;
-        /* TASK-068/069：autoSync 布尔读取收口为类型化助手（默认值语义不变） */
-        let on = crate::db::app_settings_bool(&conn, "autoSync", true);
+    let snapshot = crate::state::database_work(db.clone(), move |conn| {
+        let settings = crate::db::get_setting(conn, "app_settings")?
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()?;
+        let on = settings
+            .as_ref()
+            .and_then(|value| value.get("autoSync"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         if !on {
-            return;
+            return Ok(None);
         }
         // refreshInterval 是数值型（带区间夹取），N-硬2 明确推迟到后续任务；
         // 仅在 autoSync 开启时才需要解析，故放在早退之后（避免无谓的二次读取）。
         // OPT-011：解析收口到 read_refresh_interval（5–720 整数，与刷新调度同一口径）。
-        let interval = crate::db::get_setting(&conn, "app_settings")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        let interval = settings
             .as_ref()
             .and_then(read_refresh_interval)
             .unwrap_or(30);
-        // OPT-014 R1：凭据读取/解密失败（密文损坏）不等于「未配置」——
-        // 记警告并跳过本轮自动同步（不发任何请求；可见失败由推送路径的
-        // last_error 呈现），不得静默当作离线。
-        let (connected, account_key) = match crate::sync::current_account(&conn) {
-            Ok(Some(ctx)) => (true, Some(ctx.key)),
-            Ok(None) => (false, None),
-            Err(e) => {
-                log::warn!("scheduler: 凭据读取失败，跳过本轮后端自动同步: {e}");
-                (false, None)
-            }
+        let (connected, account_key) = match crate::sync::current_account(conn)? {
+            Some(ctx) => (true, Some(ctx.key)),
+            None => (false, None),
         };
-        let last = crate::db::last_sync_ts(&conn).unwrap_or(0);
-        let has_binding = match crate::db::has_remote_feed_binding(&conn) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("scheduler: 读取远端 feed 绑定状态失败，跳过本轮自动同步: {e}");
-                return;
-            }
-        };
+        if !connected {
+            return Ok(None);
+        }
+        let last = crate::db::last_sync_ts(conn)?;
+        let has_binding = crate::db::has_remote_feed_binding(conn)?;
         let discovery_due = match account_key.as_deref() {
-            Some(key) => match crate::db::zero_binding_discovery_due(&conn, key, now) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!("scheduler: 读取订阅发现节流状态失败，跳过本轮自动同步: {e}");
-                    return;
-                }
-            },
+            Some(key) => crate::db::zero_binding_discovery_due(conn, key, now)?,
             None => false,
         };
         // A-P2-2：订阅 outbox 是否有待推行（本地查询，零网络成本）。有 pending
         // 才值得构建会话执行写回；无 pending 不发任何请求，后台同步保持便宜。
-        // key 屏障与执行器一致（异账号暂停行不触发）；读取失败仅跳过本轮
-        // outbox 触发（记警告，不影响 light/discovery 的既有判定），下一 tick 重试。
+        // key 屏障与执行器一致；读取失败由活动终态呈现，不把未知当无待办。
         let outbox_pending = match account_key.as_deref() {
-            Some(key) => match crate::db::outbox_has_pending(&conn, key) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!("scheduler: 读取订阅写回队列状态失败，本轮跳过订阅 outbox: {e}");
-                    false
-                }
-            },
+            Some(key) => crate::db::outbox_has_pending(conn, key)?,
             None => false,
         };
-        (
+        Ok(Some((
             on,
             interval,
             connected,
@@ -285,67 +822,113 @@ async fn auto_sync_backend(
             has_binding,
             discovery_due,
             outbox_pending,
-        )
+        )))
+    })
+    .await?;
+    let Some((on, interval_min, connected, last_sync, has_binding, discovery_due, outbox_pending)) =
+        snapshot
+    else {
+        return Ok(None);
     };
     if !on || !connected {
-        return;
+        return Ok(None);
     }
-    let normal_due = has_binding && backend_sync_due(now, interval_min, true, last_sync, false);
+    let normal_due = focus
+        || (has_binding && backend_sync_due(now, interval_min.min(1), true, last_sync, false));
     if !normal_due && !discovery_due && !outbox_pending {
+        return Ok(None);
+    }
+    Ok(Some(BackendSyncPlan {
+        normal_due,
+        discovery_due,
+        outbox_pending,
+    }))
+}
+
+async fn run_background_sync(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    http: &reqwest::Client,
+    app: &AppHandle,
+    focus: bool,
+) {
+    let runtime = crate::sync::runtime::for_db(db);
+    if runtime.is_stopped() || matches!(backend_sync_plan(db, focus).await, Ok(None)) {
         return;
     }
-    log::info!("scheduler: 后端自动同步开始");
-    let _ = app.emit("sync-running", serde_json::json!({ "source": "auto" }));
-    // A-P2-2：outbox 有 pending 时先执行订阅写回。执行器自带 PUSH_LOCK 串行化
-    // 与账号 key/代际屏障（见 push_subscription_outbox）；构建失败的落账由
-    // try_push 内的 record_outbox_session_block 承担（A-P2-6）。排在 light/
-    // discovery 之前：先收敛本地意图，再做拉取对账（与 feeds_phase 的 push →
-    // pull 次序一致）。
-    // Note: 订阅 outbox 接入后台自动调度 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
-    if outbox_pending {
-        crate::sync::try_push_subscription_outbox(db, http).await;
-    }
-    let result = if normal_due {
-        crate::sync::sync_light(db, http).await
-    } else if discovery_due {
-        crate::sync::sync_subscription_discovery(db, http).await
-    } else {
-        Ok(crate::sync::SyncReport::default())
-    };
-    match result {
-        Ok(r) => {
-            log::info!(
-                "scheduler: 后端自动同步完成：推 {}/拉 {} 项、对账 {} 项，{} 错误",
-                r.pushed_states,
-                r.pulled_entries,
-                r.merged_states,
-                r.errors.len()
-            );
-            /* OPT-007（F11 / R3 / R4 / R5）：数据变化事件按**实际变更集**驱动——
-            判定单点在 SyncReport::has_data_change：条目层真实变化
-            （entries_data_changed：新插入 / 正文·绑定真实改变 / 读藏值实际改变，
-            每个成功变更点即时合并）或 merged_states（本消费路径上为 states 阶段
-            对账值条件写命中行——真实变化；订阅阶段的无条件绑定计数不在
-            sync_light 路径上，见 mod.rs 注释）或订阅层增删（pulled_feeds /
-            removed_feeds）。pulled_entries 是「处理过/已接受」计数（守卫通过但
-            值未变也计数），不冒充变化。空变化（只有推送确认/错误）不发，避免
-            无谓 reload 抖动。payload 保持既有字段（new_articles 固定 0 为保留
-            策略），前端零改动。 */
-            if r.has_data_change() {
-                let _ = app.emit(
-                    "feeds-updated",
-                    serde_json::json!({
-                        "new_articles": 0,
-                        "failed_feeds": 0,
-                        "pulled_entries": r.pulled_entries,
-                        "merged_states": r.merged_states
-                    }),
-                );
+    let db = db.clone();
+    let http = http.clone();
+    let app = app.clone();
+    let source = if focus { "focus" } else { "auto" };
+    let _ = runtime
+        .run(source, async move {
+            let Some(plan) = backend_sync_plan(&db, focus).await? else {
+                return Ok(crate::sync::SyncReport::default());
+            };
+            let mut report = crate::sync::SyncReport::default();
+            // A-P2-2：outbox 有 pending 时先执行订阅写回。执行器自带 PUSH_LOCK 串行化
+            // 与账号 key/代际屏障（见 push_subscription_outbox）；构建失败的落账由
+            // try_push 内的 record_outbox_session_block 承担（A-P2-6）。排在 light/
+            // discovery 之前：先收敛本地意图，再做拉取对账（与 feeds_phase 的 push →
+            // pull 次序一致）。
+            // Note: 订阅 outbox 接入后台自动调度 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+            if plan.outbox_pending {
+                crate::sync::runtime::stage("feeds");
+                report.absorb(crate::sync::push_subscription_changes(&db, &http).await?);
             }
-        }
-        Err(e) => log::warn!("scheduler: 后端自动同步失败: {e}"),
-    }
-    let _ = app.emit("sync-idle", ());
+            crate::sync::runtime::stage("states");
+            let result = if plan.normal_due {
+                crate::sync::states_phase(&db, &http, false).await
+            } else if plan.discovery_due {
+                crate::sync::sync_subscription_discovery(&db, &http).await
+            } else {
+                Ok(crate::sync::SyncReport::default())
+            };
+            match result {
+                Ok(r) => {
+                    log::info!(
+                        "scheduler: 后端自动同步完成：推 {}/拉 {} 项、对账 {} 项，{} 错误",
+                        r.pushed_states,
+                        r.pulled_entries,
+                        r.merged_states,
+                        r.errors.len()
+                    );
+                    /* OPT-007（F11 / R3 / R4 / R5）：数据变化事件按**实际变更集**驱动——
+                    判定单点在 SyncReport::has_data_change：条目层真实变化
+                    （entries_data_changed：新插入 / 正文·绑定真实改变 / 读藏值实际改变，
+                    每个成功变更点即时合并）或 merged_states（本消费路径上为 states 阶段
+                    对账值条件写命中行——真实变化；订阅阶段的无条件绑定计数不在
+                    sync_light 路径上，见 mod.rs 注释）或订阅层增删（pulled_feeds /
+                    removed_feeds）。pulled_entries 是「处理过/已接受」计数（守卫通过但
+                    值未变也计数），不冒充变化。空变化（只有推送确认/错误）不发，避免
+                    无谓 reload 抖动。payload 保持既有字段（new_articles 固定 0 为保留
+                    策略），前端零改动。 */
+                    report.absorb(r);
+                }
+                Err(error) => {
+                    report.note_client_error(&error);
+                    report.errors.push(error.to_string());
+                }
+            }
+            if report.has_data_change()
+                && app
+                    .emit(
+                        "feeds-updated",
+                        serde_json::json!({
+                            "new_articles": 0,
+                            "failed_feeds": 0,
+                            "pulled_entries": report.pulled_entries,
+                            "merged_states": report.merged_states
+                        }),
+                    )
+                    .is_err()
+            {
+                report
+                    .errors
+                    .push("同步已写入本机，但界面更新通知失败，请重试刷新".into());
+            }
+            Ok(report)
+        })
+        .await;
 }
 
 /// 有绑定时沿用条目游标间隔；零绑定时改用独立发现节流，避免 `last_sync_ts=0`
@@ -413,63 +996,12 @@ pub fn on_window_focused(app: AppHandle) {
 async fn focus_triggered_sync(app: &AppHandle) {
     let db = app.state::<AppState>().db.clone();
     let http = app.state::<AppState>().http.clone();
-    // 前置判定与 auto_sync_backend 同源（autoSync 默认开；凭据读取失败按
-    // 「本轮跳过」的失败关闭口径，不静默当作离线）。
-    let (on, connected, outbox_pending) = {
-        let conn = db.lock().await;
-        let on = crate::db::app_settings_bool(&conn, "autoSync", true);
-        let (connected, account_key) = match crate::sync::current_account(&conn) {
-            Ok(Some(ctx)) => (true, Some(ctx.key)),
-            Ok(None) => (false, None),
-            Err(e) => {
-                log::warn!("scheduler: 聚焦同步凭据读取失败，跳过本轮: {e}");
-                (false, None)
-            }
-        };
-        // A-P2-2 同款：outbox 有 pending 才执行写回（本地查询零网络成本）；
-        // 读取失败仅跳过写回段（不影响 light），下一窗口重试。
-        let outbox_pending = match account_key.as_deref() {
-            Some(key) => crate::db::outbox_has_pending(&conn, key).unwrap_or_else(|e| {
-                log::warn!("scheduler: 聚焦同步读取订阅写回队列状态失败，跳过写回段: {e}");
-                false
-            }),
-            None => false,
-        };
-        (on, connected, outbox_pending)
-    };
-    if !on || !connected {
-        return;
-    }
-    let _ = app.emit("sync-running", serde_json::json!({ "source": "focus" }));
-    if outbox_pending {
-        // Note: 订阅 outbox 接入后台自动调度 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
-        crate::sync::try_push_subscription_outbox(&db, &http).await;
-    }
-    match crate::sync::sync_light(&db, &http).await {
-        Ok(r) => {
-            log::info!(
-                "scheduler: 聚焦同步完成：推 {}/拉 {} 项、对账 {} 项，{} 错误",
-                r.pushed_states,
-                r.pulled_entries,
-                r.merged_states,
-                r.errors.len()
-            );
-            // 数据变化事件判定与 auto_sync_backend 同单点（has_data_change）。
-            if r.has_data_change() {
-                let _ = app.emit(
-                    "feeds-updated",
-                    serde_json::json!({
-                        "new_articles": 0,
-                        "failed_feeds": 0,
-                        "pulled_entries": r.pulled_entries,
-                        "merged_states": r.merged_states
-                    }),
-                );
-            }
-        }
-        Err(e) => log::warn!("scheduler: 聚焦同步失败: {e}"),
-    }
-    let _ = app.emit("sync-idle", ());
+    // Both futures enter separate managed lanes. A slow subscription/content
+    // round cannot delay the first state request on returning to the window.
+    tokio::join!(
+        run_background_states(&db, &http, true),
+        run_background_sync(&db, &http, app, true),
+    );
 }
 
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。
@@ -477,11 +1009,16 @@ async fn should_notify(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     app: &AppHandle,
 ) -> bool {
-    let on = {
-        let conn = db.lock().await;
+    let on = crate::state::database_work(db.clone(), |conn| {
         /* TASK-069：notifyOnNewArticles 布尔读取收口为类型化助手（默认值语义不变） */
-        crate::db::app_settings_bool(&conn, "notifyOnNewArticles", false)
-    };
+        Ok(crate::db::app_settings_bool(
+            conn,
+            "notifyOnNewArticles",
+            false,
+        ))
+    })
+    .await
+    .unwrap_or(false);
     if !on {
         return false;
     }
@@ -516,19 +1053,24 @@ const COVER_BACKFILL_CONCURRENCY: usize = 2;
 const COVER_BACKFILL_TICK: Duration = Duration::from_secs(60);
 /// 单请求（抓文章页）超时。
 const COVER_BACKFILL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// 进程内「已尝试 URL」负缓存上限（OPT-017D）。
+/// 进程内封面 URL 结果缓存上限（OPT-017D；成功与失败共用容量）。
 ///
-/// 语义：一次尝试**完整结束后**（成功 / 无 og:image / 抓取失败）URL 记入负缓存，
-/// 本进程内不再重试；DB 写失败与终止信号中断不算「已尝试」。
-/// 缓存有上限：写满后按插入序逐出最旧的 URL——逐出只把「本进程永不重试」放宽为
-/// 「至少要再排 CAP 条其它尝试之后才可能被重试」，每轮请求量仍由
+/// 语义：尝试成功记有限成功图（同URL后继条目复用），无图/抓取失败记10分钟
+/// 负缓存；DB 写失败与终止信号中断不算「已尝试」。
+/// 缓存写满按插入序逐出最旧 URL；失败在 TTL 到期或被逐出后可重试，每轮请求量由
 /// [`COVER_BACKFILL_BATCH`] / [`COVER_BACKFILL_CONCURRENCY`] / 扫描页数约束，
-/// 不存在对单个 URL 的无界重试。上限本身约束内存（约 100B/条 × 1024 ≈ 100KB）。
+/// 不存在对单个 URL 的逐轮无间隔重试。此上限是条目数预算，不是严格字节预算。
 pub const COVER_BACKFILL_ATTEMPT_CACHE_MAX: usize = 1024;
+const COVER_FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// 进程内「已尝试 URL」负缓存（带容量上限，逐出最旧）。
+enum CachedCover {
+    Failed(Instant),
+    Image(String),
+}
+
+/// 进程内有界URL结果缓存；成功保留可复用图片，失败按TTL恢复机会。
 pub struct CoverAttemptCache {
-    set: std::collections::HashSet<String>,
+    set: HashMap<String, CachedCover>,
     order: std::collections::VecDeque<String>,
     cap: usize,
 }
@@ -548,27 +1090,46 @@ impl CoverAttemptCache {
     /// 指定上限（测试用小容量验证逐出；cap=0 表示不缓存）。
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            set: std::collections::HashSet::new(),
+            set: HashMap::new(),
             order: std::collections::VecDeque::new(),
             cap,
         }
     }
 
     pub fn contains(&self, url: &str) -> bool {
-        self.set.contains(url)
+        self.contains_at(url, Instant::now())
     }
 
-    /// 记入一次「已尝试」。重复记入不改变顺序；超出上限时逐出最旧。
-    pub fn insert(&mut self, url: String) {
-        if !self.set.insert(url.clone()) {
-            return;
+    fn contains_at(&self, url: &str, now: Instant) -> bool {
+        match self.set.get(url) {
+            Some(CachedCover::Image(_)) => true,
+            Some(CachedCover::Failed(at)) => now.saturating_duration_since(*at) < COVER_FAILURE_TTL,
+            None => false,
         }
-        self.order.push_back(url);
+    }
+
+    fn image(&self, url: &str) -> Option<String> {
+        match self.set.get(url) {
+            Some(CachedCover::Image(image)) => Some(image.clone()),
+            _ => None,
+        }
+    }
+
+    fn remember(&mut self, url: String, value: CachedCover) {
+        let exists = self.set.insert(url.clone(), value).is_some();
+        if !exists {
+            self.order.push_back(url);
+        }
         while self.order.len() > self.cap {
             if let Some(oldest) = self.order.pop_front() {
                 self.set.remove(&oldest);
             }
         }
+    }
+
+    /// 记入一次失败完成时刻；重复不改变逐出顺序，TTL从最近实际失败计算。
+    pub fn insert(&mut self, url: String) {
+        self.remember(url, CachedCover::Failed(Instant::now()));
     }
 
     pub fn len(&self) -> usize {
@@ -582,7 +1143,7 @@ impl CoverAttemptCache {
 
 /// 封面补全的进程内状态（**跨轮持久**）。
 ///
-/// - `attempts`：负缓存，一次尝试完整结束后记入（见 [`CoverAttemptCache`]）。
+/// - `attempts`：结果缓存；成功图可复用，失败10分钟内跳过（见 [`CoverAttemptCache`]）。
 /// - `scan_offset`：候选扫描游标（行偏移）。每轮从上次结束处继续扫描，按
 ///   **已扫描行数**推进（负缓存命中 / 同 URL 重复 / 批次已满都算扫描过），
 ///   扫到候选集末尾（读到空页）回绕到 0。
@@ -627,6 +1188,19 @@ impl CoverBackfillState {
     /// 当前扫描游标（行偏移）。
     pub fn scan_offset(&self) -> i64 {
         self.scan_offset
+    }
+
+    /// 同一成功图被前端确认失效后撤掉可复用值，并保留短期失败屏障。
+    /// 与数据库精确 CAS 同一命令接线；后来不同图URL的迟到失败不影响新缓存。
+    pub fn report_broken(&mut self, page_url: &str, image_url: &str) {
+        if self
+            .attempts
+            .image(page_url)
+            .as_deref()
+            .map_or(true, |cached| cached == image_url)
+        {
+            self.attempts.insert(page_url.to_string());
+        }
     }
 }
 
@@ -685,7 +1259,7 @@ const COVER_BACKFILL_SCAN_PAGES: usize = 4;
 /// 列表卡片无封面。此循环对「无封面 + 有原文 URL 的文章」（直连与各服务端
 /// 协议后端同列——正文首图兜底后仍无图的缺口集合）抓文章页 og:image 补封面
 /// （复用 extraction::lead_image），低优先级、限并发、单请求超时、失败
-/// 负缓存（同一 URL 本进程不重试，避免反复轰炸源站）。
+/// 结果缓存（同一 URL 失败10分钟内不重试，成功图直接复用，避免反复请求源站）。
 ///
 /// 生命周期（OPT-017D）：`shutdown` 触发后循环立即退出（等待期与轮内两处
 /// 都消费信号）；轮内在途请求被取消、全部子任务随 round 返回结束——应用
@@ -703,7 +1277,7 @@ pub fn spawn_cover_backfill(app: AppHandle, shutdown: ShutdownToken) {
         }
         let db = app.state::<AppState>().db.clone();
         let http = app.state::<AppState>().http.clone();
-        let state = Arc::new(tokio::sync::Mutex::new(CoverBackfillState::new()));
+        let state = app.state::<AppState>().cover_backfill.clone();
         loop {
             if shutdown.is_triggered() {
                 log::info!("scheduler: 封面补全循环退出（收到终止信号）");
@@ -729,8 +1303,8 @@ pub fn spawn_cover_backfill(app: AppHandle, shutdown: ShutdownToken) {
     });
 }
 
-/// 单轮封面补全（可测试入口）：从**持久扫描游标**处分页扫描候选、跳过本进程
-/// 已尝试过的 URL，并发抓取最多 COVER_BACKFILL_BATCH 篇，返回本轮补到封面的篇数。
+/// 单轮封面补全（可测试入口）：从跨轮扫描游标处分页扫描候选、跳过未过期失败，
+/// 复用成功图或并发抓取最多 COVER_BACKFILL_BATCH 篇，返回本轮补图条目数。
 ///
 /// 窗口推进（REQ-106①）：候选队列里「抓过但没图」的条目不会被移除，若每轮
 /// 只看 ORDER BY published_at DESC 的第一页，最新一批全部拿不到图时更老的
@@ -755,19 +1329,18 @@ pub async fn cover_backfill_round(
         log::debug!("scheduler: 封面补全已收到终止信号，本轮跳过");
         return 0;
     }
-    // 目标按 URL 分组：同一 URL 一轮只请求一次，但**所有**指向该 URL 的条目都要
-    // 写入封面（不同源可能收录同一篇原文；只填第一篇会让同 URL 的其它条目永久空缺，
-    // 且该 URL 已进负缓存、本进程内不会再轮到它们）。
-    let targets: Vec<(String, Vec<i64>)> = {
-        let conn = db.lock().await;
-        let mut state = state.lock().await;
+    // 目标按URL分组，同轮同URL只请求一次；窗外/后新增同URL候选在后续扫描中
+    // 复用已缓存的成功图，不为了填全部同URL条目做额外全库扫描。
+    let scan_state = state.clone();
+    let targets = crate::state::database_work(db.clone(), move |conn| {
+        let mut state = scan_state.blocking_lock();
         let mut picked: Vec<(String, Vec<i64>)> = Vec::new();
         let mut picked_urls: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         // 从上次游标继续；读到空页 = 到达候选集末尾 → 回绕。
         let mut offset = state.scan_offset;
         for _ in 0..COVER_BACKFILL_SCAN_PAGES {
-            let page = match crate::db::articles_without_cover(&conn, COVER_BACKFILL_BATCH, offset)
+            let page = match crate::db::articles_without_cover(conn, COVER_BACKFILL_BATCH, offset)
             {
                 Ok(page) => page,
                 Err(e) => {
@@ -788,7 +1361,7 @@ pub async fn cover_backfill_round(
             }
             offset += page.len() as i64;
             for (aid, url) in page {
-                if state.attempts().contains(&url) {
+                if state.attempts().contains(&url) && state.attempts().image(&url).is_none() {
                     // 负缓存命中：跳过请求，但该行已计入 offset 推进（下方统一写回）。
                     continue;
                 }
@@ -810,7 +1383,14 @@ pub async fn cover_backfill_round(
         }
         // 游标按已扫描行数写回（负缓存命中 / 重复 URL / 批次已满都算扫描过）。
         state.scan_offset = offset;
-        picked
+        Ok(picked)
+    }).await;
+    let targets = match targets {
+        Ok(targets) => targets,
+        Err(error) => {
+            log::warn!("scheduler: 封面补全候选数据库工作失败，本轮跳过: {error}");
+            return 0;
+        }
     };
     if targets.is_empty() {
         return 0;
@@ -833,7 +1413,7 @@ pub async fn cover_backfill_round(
     let mut filled = 0usize;
     for h in handles {
         match h.await {
-            Ok(CoverAttempt::Settled(n)) => filled += n,
+            Ok(CoverAttempt::Settled(n)) | Ok(CoverAttempt::Filled(n)) => filled += n,
             Ok(CoverAttempt::Cancelled) | Ok(CoverAttempt::DbWriteFailed) => {}
             // 子任务 panic（join 失败）不得静默跳过：该 URL 未记入负缓存，
             // 下一轮会重新尝试；记错误便于诊断。
@@ -847,9 +1427,9 @@ pub async fn cover_backfill_round(
 
 /// 单次尝试的结局（决定是否记入负缓存、是否计入补全数）。
 enum CoverAttempt {
-    /// 尝试完整结束（成功写库 n 条 / 页面无 og:image / 抓取失败）——
-    /// 结果对本进程是确定的，记入负缓存，本进程内不再重复尝试。
+    /// 页面无图或抓取失败，记10分钟失败缓存；n保留既有回执形态。
     Settled(usize),
+    Filled(usize),
     /// 终止信号中断了这次尝试（未完成，不记负缓存）。
     Cancelled,
     /// 数据库写入失败：不记负缓存（那不是「已处理」），下轮重试；已记错误日志。
@@ -875,13 +1455,19 @@ async fn backfill_cover_once(
     if shutdown.is_triggered() {
         return CoverAttempt::Cancelled;
     }
-    // 负缓存：本进程已尝试过（失败/无图）的 URL 不再重试。
-    // 这里返回 Settled(0) 会重复记入同一 URL——幂等且不改变插入序。
-    if state.lock().await.attempts().contains(url) {
-        return CoverAttempt::Settled(0);
+    // 成功可直接填扫描到的候选；失败TTL内直接返回，不续期失败时钟。
+    {
+        let cache = state.lock().await;
+        if let Some(image) = cache.attempts().image(url) {
+            drop(cache);
+            return fill_cover(db, state, aids, url, &image).await;
+        }
+        if cache.attempts().contains(url) {
+            return CoverAttempt::Settled(0);
+        }
     }
-    let outcome = attempt_cover(http, db, shutdown, aids, url).await;
-    // 成功 / 无图 / 抓取失败都算「本进程已尝试」——但必须发生在尝试**之后**。
+    let outcome = attempt_cover(http, db, state, shutdown, aids, url).await;
+    // 实际完成失败后才写入失败时刻，成功图在写库同锁内记入。
     if matches!(outcome, CoverAttempt::Settled(_)) {
         state.lock().await.attempts_mut().insert(url.to_string());
     }
@@ -892,6 +1478,7 @@ async fn backfill_cover_once(
 async fn attempt_cover(
     http: &reqwest::Client,
     db: &Arc<tokio::sync::Mutex<Connection>>,
+    state: &Arc<tokio::sync::Mutex<CoverBackfillState>>,
     shutdown: &ShutdownToken,
     aids: &[i64],
     url: &str,
@@ -915,10 +1502,11 @@ async fn attempt_cover(
             return CoverAttempt::Settled(0);
         }
     };
+    let base = resp.url().to_string();
     let html = tokio::select! {
         biased;
         _ = shutdown.wait() => return CoverAttempt::Cancelled,
-        h = resp.text() => h,
+        h = crate::ingestion::read_text_capped(resp, crate::ingestion::MAX_BODY_BYTES) => h,
     };
     let html = match html {
         Ok(h) => h,
@@ -928,7 +1516,6 @@ async fn attempt_cover(
         }
     };
     // lead_image 是纯同步（scraper）返回 Option<String>，spawn_blocking 里跑避免阻塞 async worker
-    let base = url.to_string();
     let image = match tokio::task::spawn_blocking(move || {
         crate::extraction::lead_image(&html, &base)
     })
@@ -947,22 +1534,52 @@ async fn attempt_cover(
     // 落库（幂等：已有封面不覆盖）。NULLIF 把空串也视为「没有封面」——候选查询
     // （image_url IS NULL OR image_url = ''）把空串计入队列，而 COALESCE 只判 NULL，
     // 空串行会一直留在队列里且每轮都被算作「已补全」。
-    let conn = db.lock().await;
+    fill_cover(db, state, aids, url, &image).await
+}
+
+async fn fill_cover(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    state: &Arc<tokio::sync::Mutex<CoverBackfillState>>,
+    aids: &[i64],
+    url: &str,
+    image: &str,
+) -> CoverAttempt {
+    let state = state.clone();
+    let aids = aids.to_owned();
+    let url = url.to_owned();
+    let image = image.to_owned();
+    match crate::state::database_work(db.clone(), move |conn| {
+    let mut cache = state.blocking_lock();
+    if cache.attempts().contains(&url) && cache.attempts().image(&url).is_none() {
+        // 请求在途期间失败上报已清掉该图；不能把刚失败的结果重新填回。
+        return Ok(CoverAttempt::Cancelled);
+    }
+    let _writer = crate::db::writer_guard(conn)?;
     let mut filled = 0;
     for aid in aids {
         match conn.execute(
-            "UPDATE articles SET image_url = COALESCE(NULLIF(image_url, ''), ?1) WHERE id = ?2",
-            rusqlite::params![image, aid],
+            "UPDATE articles SET image_url = ?1, image_source = 'page' WHERE id = ?2 AND url = ?3 AND (image_url IS NULL OR image_url = '')",
+            rusqlite::params![image, aid, url],
         ) {
             Ok(n) => filled += n,
             Err(e) => {
                 // 写失败不得压成 0 后把 URL 当作已处理：不记负缓存，下轮重试。
                 log::error!("scheduler: 封面补全写库失败（不记已尝试，下轮重试）{url}: {e}");
-                return CoverAttempt::DbWriteFailed;
+                return Ok(CoverAttempt::DbWriteFailed);
             }
         }
     }
-    CoverAttempt::Settled(filled)
+    cache
+        .attempts_mut()
+        .remember(url.to_string(), CachedCover::Image(image.to_string()));
+    Ok(CoverAttempt::Filled(filled))
+    }).await {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!("scheduler: 封面补全数据库工作失败（下轮重试）: {error}");
+            CoverAttempt::DbWriteFailed
+        }
+    }
 }
 
 /* ============================================================
@@ -1050,12 +1667,268 @@ mod refresh_interval_tests {
     }
 }
 
+#[cfg(test)]
+mod backend_plan_tests {
+    use super::*;
+
+    fn configured_db() -> Arc<tokio::sync::Mutex<Connection>> {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        for (key, value) in [
+            ("greader_endpoint", "http://127.0.0.1:9"),
+            ("greader_username", "runtime-test"),
+            ("greader_password", "test-token"),
+        ] {
+            crate::db::set_setting(&conn, key, value).unwrap();
+        }
+        Arc::new(tokio::sync::Mutex::new(conn))
+    }
+
+    #[tokio::test]
+    async fn disabled_or_unconfigured_background_sync_remains_a_quiet_skip() {
+        let db = configured_db();
+        {
+            let conn = db.lock().await;
+            crate::db::set_setting(&conn, "app_settings", r#"{"autoSync":false}"#).unwrap();
+            conn.execute(
+                "UPDATE settings SET value='dpapi:@@corrupt@@' WHERE key='greader_password'",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(backend_sync_plan(&db, false).await.unwrap().is_none());
+        {
+            let conn = db.lock().await;
+            crate::db::set_setting(&conn, "app_settings", r#"{"autoSync":true}"#).unwrap();
+            conn.execute("DELETE FROM settings WHERE key='greader_endpoint'", [])
+                .unwrap();
+        }
+        assert!(backend_sync_plan(&db, true).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn background_plan_read_failures_publish_error_instead_of_offline_or_empty_success() {
+        for (sql, expected) in [
+            (
+                "INSERT INTO settings(key,value) VALUES('app_settings','{broken')",
+                "json",
+            ),
+            (
+                "UPDATE settings SET value='dpapi:@@corrupt@@' WHERE key='greader_password'",
+                "credentialCorrupt",
+            ),
+            (
+                "INSERT INTO settings(key,value) VALUES('sync_last_sync',X'00')",
+                "db",
+            ),
+            ("ALTER TABLE feeds RENAME TO missing_feeds", "db"),
+            ("DROP TABLE subscription_outbox", "db"),
+        ] {
+            for source in ["auto", "focus"] {
+                let db = configured_db();
+                db.lock().await.execute_batch(sql).unwrap();
+                let events = Arc::new(StdMutex::new(Vec::new()));
+                let captured = events.clone();
+                let runtime = crate::sync::runtime::SyncRuntime::new(move |event| {
+                    captured.lock().unwrap().push(event);
+                });
+                let error = runtime
+                    .run(source, async move {
+                        backend_sync_plan(&db, source == "focus").await?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code, expected, "{source}: {sql}");
+                let events = events.lock().unwrap();
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[1].outcome.as_deref(), Some("error"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod refresh_worker_tests {
+    use super::{absorb_refresh_worker, refresh_all, RefreshBatchReport};
+    use crate::ingestion::FeedRefreshOutcome;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn panicked_feed_worker_is_counted_as_failed() {
+        let handle = tokio::spawn(async {
+            panic!("injected refresh worker panic");
+        });
+        let mut report = RefreshBatchReport::default();
+        absorb_refresh_worker(handle, &mut report).await;
+        assert_eq!(report.failed_feeds, 1);
+        assert_eq!(report.new_articles, 0);
+        assert!(
+            report.refreshed_feed_urls.is_empty(),
+            "panic 的源不得进入成功 footprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_applied_outcome_enters_footprint() {
+        for outcome in [
+            FeedRefreshOutcome::SkippedInFlight,
+            FeedRefreshOutcome::Superseded,
+        ] {
+            let handle = tokio::spawn(async move { Ok::<_, crate::error::AppError>((1, outcome)) });
+            let mut report = RefreshBatchReport::default();
+            absorb_refresh_worker(handle, &mut report).await;
+            assert_eq!(report.new_articles, 0);
+            assert_eq!(report.failed_feeds, 0);
+            assert!(
+                report.refreshed_feed_urls.is_empty(),
+                "只有 Applied 才可进入 footprint"
+            );
+        }
+
+        let raw_url = "https://Example.com/feed?utm_source=skip#fragment";
+        let handle = tokio::spawn(async move {
+            Ok::<_, crate::error::AppError>((
+                7,
+                FeedRefreshOutcome::Applied {
+                    new_articles: 2,
+                    data_changed: true,
+                    feed_url: raw_url.into(),
+                },
+            ))
+        });
+        let mut report = RefreshBatchReport::default();
+        absorb_refresh_worker(handle, &mut report).await;
+        assert_eq!(report.new_articles, 2);
+        assert_eq!(report.failed_feeds, 0);
+        assert_eq!(
+            report.refreshed_feed_urls,
+            vec![crate::db::normalize_url(raw_url)]
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_full_refresh_publishes_error_and_clears_flight() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let db = Arc::new(tokio::sync::Mutex::new(conn));
+        let client = crate::ingestion::build_client(1);
+
+        super::PANIC_NEXT_FULL_REFRESH.store(true, Ordering::SeqCst);
+        let error = refresh_all(&db, &client)
+            .await
+            .expect_err("后台 flight panic 必须通过 watch 返回错误");
+        assert_eq!(error.code, "internal");
+        assert!(
+            error.message.contains("panic"),
+            "错误必须保留 panic 清理语义: {error}"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(2), refresh_all(&db, &client))
+            .await
+            .expect("flight 必须已清理，后续调用不得等待旧结果")
+            .expect("旧 flight 清理后，新一轮空批次应正常完成");
+        assert_eq!(second, (0, 0));
+    }
+}
+
 /* ============================================================
 OPT-017D：封面补全负缓存（上限与逐出）单元测试
 ============================================================ */
 #[cfg(test)]
 mod cover_attempt_cache_tests {
-    use super::{CoverAttemptCache, COVER_BACKFILL_ATTEMPT_CACHE_MAX};
+    use super::{
+        CachedCover, CoverAttemptCache, CoverBackfillState, COVER_BACKFILL_ATTEMPT_CACHE_MAX,
+        COVER_FAILURE_TTL,
+    };
+
+    #[test]
+    fn negative_cache_expires_and_success_report_does_not_poison_new_image() {
+        let now = std::time::Instant::now();
+        let mut cache = CoverAttemptCache::with_capacity(2);
+        cache.remember("failed".into(), CachedCover::Failed(now));
+        assert!(cache.contains_at(
+            "failed",
+            now + COVER_FAILURE_TTL - std::time::Duration::from_millis(1)
+        ));
+        assert!(!cache.contains_at("failed", now + COVER_FAILURE_TTL));
+        cache.remember("good".into(), CachedCover::Image("new.jpg".into()));
+        assert!(cache.contains_at("good", now + COVER_FAILURE_TTL * 100));
+        assert_eq!(cache.image("good").as_deref(), Some("new.jpg"));
+        let mut state = CoverBackfillState::new();
+        state
+            .attempts
+            .remember("page".into(), CachedCover::Image("new.jpg".into()));
+        state.report_broken("page", "old.jpg");
+        assert_eq!(state.attempts.image("page").as_deref(), Some("new.jpg"));
+        state.report_broken("page", "new.jpg");
+        assert!(state.attempts.image("page").is_none());
+        assert!(state.attempts.contains("page"));
+    }
+
+    #[tokio::test]
+    async fn expired_failure_retries_real_http_and_fills_after_recovery() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/article", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut bytes).unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&bytes[..n]);
+            }
+            let body = "<meta property=\"og:image\" content=\"https://example.com/recovered.jpg\">";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut connection).unwrap();
+        connection.execute_batch("INSERT INTO folders(id,name) VALUES(1,'F'); INSERT INTO feeds(id,folder_id,feed_url,title) VALUES(1,1,'https://example.com/rss','F');").unwrap();
+        connection
+            .execute(
+                "INSERT INTO articles(id,feed_id,guid,title,url) VALUES(1,1,'g','T',?1)",
+                [&url],
+            )
+            .unwrap();
+        let db = std::sync::Arc::new(tokio::sync::Mutex::new(connection));
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(CoverBackfillState::new()));
+        state.lock().await.attempts_mut().remember(
+            url.clone(),
+            CachedCover::Failed(std::time::Instant::now() - COVER_FAILURE_TTL),
+        );
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::cover_backfill_round(&db, &http, &state, &super::ShutdownToken::new()).await,
+            1
+        );
+        server.join().unwrap();
+        let image: String = db
+            .lock()
+            .await
+            .query_row("SELECT image_url FROM articles WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(image, "https://example.com/recovered.jpg");
+    }
 
     /// 上限之外必须逐出最旧（插入序）；重复记入不得改变顺序或触发逐出；
     /// 默认构造必须用到生产上限常量而不是 0（防「容量为 0 悄悄禁掉缓存」）。

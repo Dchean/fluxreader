@@ -1027,9 +1027,11 @@ async fn paused_other_account_intent_does_not_block_pull_removal() {
             "B 的权威快照必须生效：异账号暂停意图不得保护本账号的删除对账: {report:?}"
         );
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND id = ?1",
+                [feed_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "B 的 remote-origin 源必须按远端事实删除");
         let items = db::pending_outbox(&conn).unwrap();
@@ -1094,9 +1096,11 @@ async fn protection_read_failure_does_not_delete_remote_feed() {
     };
     let feed_id = {
         let conn = dbm.lock().await;
-        conn.query_row::<i64, _, _>("SELECT id FROM feeds WHERE feed_url = ?1", [&url], |r| {
-            r.get(0)
-        })
+        conn.query_row::<i64, _, _>(
+            "SELECT id FROM feeds WHERE active=1 AND feed_url = ?1",
+            [&url],
+            |r| r.get(0),
+        )
         .unwrap()
     };
     let report = sync::feeds_phase(&dbm, &http)
@@ -1109,9 +1113,11 @@ async fn protection_read_failure_does_not_delete_remote_feed() {
             "保护集合读取失败 = 状态未知：必须 fail-closed（不得按空集合删除）: {report:?}"
         );
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND id = ?1",
+                [feed_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 1, "状态未知时本地订阅必须原样");
         assert!(
@@ -1129,9 +1135,11 @@ async fn protection_read_failure_does_not_delete_remote_feed() {
     {
         let conn = dbm.lock().await;
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND id = ?1",
+                [feed_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "恢复后按远端事实删除");
     }
@@ -1574,7 +1582,7 @@ async fn quickadd_response_lost_across_restart_converges_via_list_evidence() {
         assert_eq!(bound, Some(remote_id), "必须绑定到已创建的远端订阅");
         let dup: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )
@@ -1839,14 +1847,16 @@ async fn deleted_feed_unsubscribe_is_durable_across_outage_and_restart() {
         assert!(items[0].attempts >= 1, "失败必须累计 attempts");
         assert!(items[0].last_error.is_some(), "失败必须记录 last_error");
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND id = ?1",
+                [feed_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "本地删除已生效");
         let revived: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )
@@ -2113,7 +2123,9 @@ async fn folder_delete_creates_per_member_unsubscribe_intents_and_converges() {
             .unwrap();
         assert_eq!(folders, 0, "目录已删除");
         let feeds: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(feeds, 0, "成员订阅随目录删除");
         // 逐成员独立退订意图（各自带远端目标）
@@ -2199,7 +2211,9 @@ async fn folder_delete_midway_failure_rolls_back_cascade_and_intents() {
         .unwrap();
     assert_eq!(folders, 1, "故障后目录必须原样（不得半删）");
     let feeds: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(feeds, 2, "故障后成员订阅必须原样");
     assert!(
@@ -2265,7 +2279,9 @@ async fn folder_tombstone_read_failure_skips_import_instead_of_reviving() {
             "状态未知时不得按远端 label 建目录（会复活已删分类）"
         );
         let feeds: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             feeds, 0,
@@ -2299,7 +2315,9 @@ async fn folder_tombstone_read_failure_skips_import_instead_of_reviving() {
             .unwrap();
         assert_eq!(folders, 1, "故障恢复后分类导入收敛");
         let feeds: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(feeds, 2, "故障恢复后远端订阅（mock 两条）导入收敛");
     }
@@ -2638,9 +2656,11 @@ async fn delete_while_quickadd_inflight_keeps_durable_unsubscribe() {
             "id 此刻不可知（响应在途），由执行器幂等解析或 adopt 结转: {items:?}"
         );
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND id = ?1",
+                [feed_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "本地删除必须已生效（与意图同一事务）");
         assert!(
@@ -2677,7 +2697,7 @@ async fn delete_while_quickadd_inflight_keeps_durable_unsubscribe() {
         );
         let revived: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )
@@ -2716,7 +2736,7 @@ async fn delete_while_quickadd_inflight_keeps_durable_unsubscribe() {
         );
         let revived: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )
@@ -2796,7 +2816,9 @@ async fn folder_delete_while_quickadd_inflight_keeps_member_unsubscribe() {
             .unwrap();
         assert_eq!(folders, 0, "目录已级联删除");
         let feeds: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE active=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(feeds, 0, "成员订阅随目录删除");
         let items = db::pending_outbox(&conn).unwrap();
@@ -2872,7 +2894,7 @@ async fn folder_delete_while_quickadd_inflight_keeps_member_unsubscribe() {
         assert_eq!(folder, 0, "目录不得复活");
         let feed: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )
@@ -2923,9 +2945,11 @@ async fn record_feed_deletion_outbox_failure_rolls_back_local_and_tombstone() {
     );
 
     let feeds: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE active=1 AND id = ?1",
+            [feed],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(feeds, 1, "故障后本地订阅必须原样（不得半删）");
     assert!(
@@ -4143,7 +4167,7 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_sending() {
         );
         let revived: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )
@@ -5530,7 +5554,7 @@ async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck
         );
         let revived: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                "SELECT COUNT(*) FROM feeds WHERE active=1 AND feed_url = ?1",
                 [&url],
                 |r| r.get(0),
             )

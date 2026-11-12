@@ -1,9 +1,8 @@
 //! Google Reader API（兼容协议）客户端。
 //!
 //! 后端：Miniflux（新版原生支持 Google Reader 兼容层 + Fever API）。
-//! 本模块当前**只实现 Google Reader 协议**（后端可换的基线）；Fever API 预留
-//! 未实现——它是可选备胎，仅在 Google Reader 兼容层不可用时才需要补充
-//! （`POST /fever/?api` + `api_key=md5(username:password)`）。
+//! 本模块实现 Google Reader 协议；Fever 客户端由 `fever.rs` 实现，
+//! 上层按当前同步账户选择对应协议。
 //! 认证（OPT-004 起，契约见 `.agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md`）：
 //! 两步 ClientLogin 换取 auth token；**所有** API 请求一致携带
 //! `Authorization: GoogleLogin auth=<auth>`（GET 与 POST 都带——FreshRSS 靠它设用户上下文），
@@ -21,6 +20,7 @@
 use crate::error::{AppError, AppResult};
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 
 /* ============================================================
 行类型（Google Reader JSON 的最小子集）
@@ -151,13 +151,93 @@ pub struct ItemContentsResponse {
     pub items: Vec<ItemContent>,
 }
 
+/// 状态验证读回：`complete=false` 说明响应没有覆盖全部请求 id（空/短/重复/
+/// 无关条目都可能造成），不足以证明缺失；调用方必须把缺条解释为
+/// inconclusive，不能升级成 target_missing。
+#[derive(Debug)]
+pub struct VerificationItems {
+    pub items: Vec<ItemContent>,
+    pub complete: bool,
+}
+
+/// 远端条目状态字段的三态：字段缺失是「未知」，不能被当作明确的 false。
+///
+/// Google Reader 用 `categories` 承载 read/starred；Fever 用独立的
+/// `is_read/is_saved` 数值字段。两种协议都必须先区分「服务端没给这个字段」
+/// 与「服务端明确给了 false」，否则一次缺字段响应就会回滚本地读/藏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemoteState {
+    #[default]
+    Missing,
+    False,
+    True,
+}
+
+impl RemoteState {
+    pub fn from_bool(value: bool) -> Self {
+        if value {
+            Self::True
+        } else {
+            Self::False
+        }
+    }
+}
+
+/// Google Reader 条目的 `categories` 字段，保留「字段是否出现」。
+///
+/// 显式 `[]` 是服务端明确给出的空分类（read/starred 均为 false）；字段缺失
+/// 或 null 才是未知。`Deref<Target=[String]>` 保持既有 `has_tag(&categories, ..)`
+/// 调用形态不变。
+#[derive(Debug, Clone, Default)]
+pub struct ItemCategories(Option<Vec<String>>);
+
+impl ItemCategories {
+    pub fn from_values(values: Vec<String>) -> Self {
+        Self(Some(values))
+    }
+
+    pub fn as_slice(&self) -> &[String] {
+        self.0.as_deref().unwrap_or(&[])
+    }
+
+    pub fn state_for(&self, tag_suffix: &str) -> RemoteState {
+        match self.0.as_ref() {
+            None => RemoteState::Missing,
+            Some(categories) => RemoteState::from_bool(has_tag(categories, tag_suffix)),
+        }
+    }
+}
+
+impl std::ops::Deref for ItemCategories {
+    type Target = [String];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'de> Deserialize<'de> for ItemCategories {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<Vec<String>>::deserialize(deserializer).map(Self)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ItemContent {
     /// 长格式 id：`tag:google.com,2005:reader/item/...`
     pub id: String,
     /// 状态 tag 列表：含 `read`/`starred`/`reading-list`/分类 label
     #[serde(default)]
-    pub categories: Vec<String>,
+    pub categories: ItemCategories,
+    /// Fever 等非 categories 协议解析出的显式状态；None = 回退到 categories。
+    /// Some(Missing) 表示协议字段确实缺失，不能再用 categories 推断。
+    #[serde(skip)]
+    pub(crate) read_state_override: Option<RemoteState>,
+    #[serde(skip)]
+    pub(crate) starred_state_override: Option<RemoteState>,
     pub title: String,
     #[serde(default)]
     pub author: Option<String>,
@@ -176,6 +256,22 @@ pub struct ItemContent {
     pub origin: Option<OriginRef>,
     #[serde(default)]
     pub enclosure: Vec<EnclosureRef>,
+}
+
+impl ItemContent {
+    pub fn read_state(&self) -> RemoteState {
+        match self.read_state_override {
+            Some(state) => state,
+            None => self.categories.state_for("/com.google/read"),
+        }
+    }
+
+    pub fn starred_state(&self) -> RemoteState {
+        match self.starred_state_override {
+            Some(state) => state,
+            None => self.categories.state_for("/com.google/starred"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,7 +334,13 @@ pub mod tags {
 客户端
 ============================================================ */
 
-#[derive(Clone, Debug)]
+pub(crate) type RequestGuard = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
 pub struct GReaderClient {
     /// 后端根 URL（去尾部斜杠），如 `https://sync.example.invalid`
     base: String,
@@ -248,6 +350,15 @@ pub struct GReaderClient {
     /// 失败不缓存：错误返回后下次调用会重试（OnceCell 的 get_or_try_init 语义）。
     action_token: tokio::sync::OnceCell<String>,
     http: Client,
+    request_guard: Option<RequestGuard>,
+}
+
+impl std::fmt::Debug for GReaderClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GReaderClient")
+            .finish_non_exhaustive()
+    }
 }
 
 /// HTTP 传输/读取失败仍是 network；成功响应的 JSON 解码或 schema 失败是
@@ -274,7 +385,21 @@ impl GReaderClient {
             token: token.to_string(),
             action_token: tokio::sync::OnceCell::new(),
             http,
+            request_guard: None,
         }
+    }
+
+    /// Session-owned generation guard; standalone protocol clients have none.
+    pub(crate) fn with_request_guard(mut self, guard: RequestGuard) -> Self {
+        self.request_guard = Some(guard);
+        self
+    }
+
+    async fn ensure_request_current(&self) -> AppResult<()> {
+        if let Some(check) = &self.request_guard {
+            check().await?;
+        }
+        Ok(())
     }
 
     /// 两步认证：先 ClientLogin 换 token，再构建客户端。
@@ -338,14 +463,12 @@ impl GReaderClient {
         password: &str,
         http: &Client,
     ) -> AppResult<Option<Self>> {
-        let resp = http
-            .post(format!("{base}/accounts/ClientLogin"))
-            .form(&[
+        let resp =
+            crate::sync_http::send(http.post(format!("{base}/accounts/ClientLogin")).form(&[
                 ("Email", username),
                 ("Passwd", password),
                 ("output", "json"),
-            ])
-            .send()
+            ]))
             .await?;
         let status = resp.status().as_u16();
 
@@ -370,6 +493,7 @@ impl GReaderClient {
             token,
             action_token: tokio::sync::OnceCell::new(),
             http: http.clone(),
+            request_guard: None,
         }))
     }
 
@@ -387,12 +511,13 @@ impl GReaderClient {
 
     /// GET 请求（带 `Authorization: GoogleLogin auth=<token>`）。
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> AppResult<T> {
-        let resp = self
-            .http
-            .get(self.url(path))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
-            .send()
-            .await?;
+        self.ensure_request_current().await?;
+        let resp = crate::sync_http::send(
+            self.http
+                .get(self.url(path))
+                .header("Authorization", format!("GoogleLogin auth={}", self.token)),
+        )
+        .await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             return Err(AppError::network(format!("GET {path} → {}", resp.status()))
@@ -420,13 +545,22 @@ impl GReaderClient {
     }
 
     async fn fetch_action_token(&self) -> AppResult<String> {
-        let resp = self
-            .http
-            .get(self.url("/reader/api/0/token"))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("获取 action token 失败：网络错误（{e}）")))?;
+        self.ensure_request_current().await?;
+        let resp = crate::sync_http::send(
+            self.http
+                .get(self.url("/reader/api/0/token"))
+                .header("Authorization", format!("GoogleLogin auth={}", self.token)),
+        )
+        .await
+        .map_err(|mut error| {
+            let kind = if error.code == "network" {
+                "网络错误："
+            } else {
+                ""
+            };
+            error.message = format!("获取 action token 失败：{kind}{}", error.message);
+            error
+        })?;
         let status = resp.status().as_u16();
         if status == 404 {
             // 兼容无 /token 的实现：明确 404 才回退到登录 auth（见方法注释的边界说明）。
@@ -466,16 +600,31 @@ impl GReaderClient {
         path: &str,
         form: &[(&str, String)],
     ) -> AppResult<reqwest::Response> {
+        self.post_action_token_raw_checked(path, form, None).await
+    }
+
+    async fn post_action_token_raw_checked(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        write_guard: Option<&RequestGuard>,
+    ) -> AppResult<reqwest::Response> {
         let token = self.action_token().await?.to_string();
         let mut params: Vec<(&str, String)> = vec![("T", token)];
         params.extend_from_slice(form);
-        self.http
-            .post(self.url(path))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("POST {path} 网络失败（{e}）")))
+        // Token acquisition is a separate HTTP boundary. Recheck after it for
+        // every POST, and additionally check this state write's exact binding.
+        self.ensure_request_current().await?;
+        if let Some(check) = write_guard {
+            check().await?;
+        }
+        crate::sync_http::send(
+            self.http
+                .post(self.url(path))
+                .header("Authorization", format!("GoogleLogin auth={}", self.token))
+                .form(&params),
+        )
+        .await
     }
 
     async fn post_with_action_token(
@@ -526,7 +675,20 @@ impl GReaderClient {
         form: &[(&str, String)],
         tolerate_missing_target: bool,
     ) -> AppResult<()> {
-        let resp = self.post_action_token_raw(path, form).await?;
+        self.post_form_text_inner_checked(path, form, tolerate_missing_target, None)
+            .await
+    }
+
+    async fn post_form_text_inner_checked(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        tolerate_missing_target: bool,
+        write_guard: Option<&RequestGuard>,
+    ) -> AppResult<()> {
+        let resp = self
+            .post_action_token_raw_checked(path, form, write_guard)
+            .await?;
         if !resp.status().is_success() {
             if tolerate_missing_target && matches!(resp.status().as_u16(), 400 | 404) {
                 log::warn!(
@@ -639,6 +801,56 @@ impl GReaderClient {
 
     /// 拉条目正文（按十进制 id，可重复）。返回 items 含状态/正文/enclosure。
     pub async fn item_contents(&self, ids: &[i64]) -> AppResult<Vec<ItemContent>> {
+        let items = self.fetch_item_contents(ids).await?;
+        // Note: 正文按请求 ID 覆盖验证，重复/无关项不能掩盖缺条 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+        let requested: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        let returned: std::collections::HashSet<i64> = items
+            .iter()
+            .filter_map(|item| parse_item_id(&item.id))
+            .collect();
+        if !requested.is_subset(&returned) {
+            return Err(AppError::new(
+                "protocol",
+                format!(
+                    "stream/items/contents 响应未覆盖请求 ID：请求 {} 个，覆盖 {} 个",
+                    requested.len(),
+                    requested.intersection(&returned).count()
+                ),
+            ));
+        }
+        Ok(items
+            .into_iter()
+            .filter(|item| parse_item_id(&item.id).is_some_and(|id| requested.contains(&id)))
+            .collect())
+    }
+
+    /// 状态写回后的专用读回：保留响应是否覆盖全部请求 id 的完整性标记。
+    // Note: ACK 不是应用成功；空/短响应只能进 inconclusive — 见
+    // .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
+    ///
+    /// 与 [`Self::item_contents`] 的差别只在「短响应」的解释：拉取正文时缺条
+    /// 是窗口截断，必须失败并保留游标；写后验证仍返回条目，但缺条只能记为
+    /// inconclusive——200 空数组/短数组不能证明目标已删除。网络、HTTP、schema
+    /// 错误仍一律 Err。
+    pub async fn item_contents_for_verification(
+        &self,
+        ids: &[i64],
+    ) -> AppResult<VerificationItems> {
+        let items = self.fetch_item_contents(ids).await?;
+        // 完整性按「请求的 id 是否都在响应里」判定，不能用条数代替：服务端可能
+        // 返回重复条目或无关条目，条数够多仍可能漏掉目标。只有每个请求 id 都能
+        // 解析并实际出现，才允许把后续缺目标视为「协议未提供删除证据」。
+        let returned: std::collections::HashSet<i64> = items
+            .iter()
+            .filter_map(|item| parse_item_id(&item.id))
+            .collect();
+        Ok(VerificationItems {
+            complete: ids.iter().all(|id| returned.contains(id)),
+            items,
+        })
+    }
+
+    async fn fetch_item_contents(&self, ids: &[i64]) -> AppResult<Vec<ItemContent>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -646,20 +858,6 @@ impl GReaderClient {
         let r: ItemContentsResponse = self
             .post_form("/reader/api/0/stream/items/contents?output=json", &form)
             .await?;
-        // 协议对每个 i 参数逐条返回（重复 id 逐条重复）：返回条数少于请求数
-        // （含空 items）是服务端截断/异常，不是「权威空集」——静默当成功会把
-        // 未取到的窗口伪装成已同步（失败 ≠ 空集合），调用方按块失败保留游标。
-        // Note: 正文缺条判协议错误 — 见 .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
-        if r.items.len() < ids.len() {
-            return Err(AppError::new(
-                "protocol",
-                format!(
-                    "stream/items/contents 响应条数不足：请求 {} 条，返回 {} 条",
-                    ids.len(),
-                    r.items.len()
-                ),
-            ));
-        }
         Ok(r.items)
     }
 
@@ -668,6 +866,27 @@ impl GReaderClient {
     /// 标读/未读、收藏/取消收藏。
     /// `add`/`remove` 是 tag 列表（如 `user/-/state/com.google/read`）。
     pub async fn edit_tag(&self, item_ids: &[i64], add: &[&str], remove: &[&str]) -> AppResult<()> {
+        self.edit_tag_inner(item_ids, add, remove, None).await
+    }
+
+    pub(crate) async fn edit_tag_checked(
+        &self,
+        item_ids: &[i64],
+        add: &[&str],
+        remove: &[&str],
+        write_guard: RequestGuard,
+    ) -> AppResult<()> {
+        self.edit_tag_inner(item_ids, add, remove, Some(&write_guard))
+            .await
+    }
+
+    async fn edit_tag_inner(
+        &self,
+        item_ids: &[i64],
+        add: &[&str],
+        remove: &[&str],
+        write_guard: Option<&RequestGuard>,
+    ) -> AppResult<()> {
         let mut form: Vec<(&str, String)> = Vec::new();
         for id in item_ids {
             form.push(("i", id.to_string()));
@@ -679,7 +898,8 @@ impl GReaderClient {
             form.push(("r", tag.to_string()));
         }
         // 注意：`a`/`r` 必须来自 body（PostForm），不能放 query。用 .form() 默认发 body。
-        self.post_form_text("/reader/api/0/edit-tag", &form).await
+        self.post_form_text_inner_checked("/reader/api/0/edit-tag", &form, false, write_guard)
+            .await
     }
 
     /// 标已读。
@@ -1021,5 +1241,28 @@ mod tests {
         ];
         assert!(has_tag(&cats, "/com.google/read"));
         assert!(!has_tag(&cats, "/com.google/starred"));
+    }
+
+    #[test]
+    fn item_categories_preserve_missing_vs_explicit_false() {
+        let missing: ItemContent =
+            serde_json::from_str(r#"{"id":"123","title":"missing"}"#).unwrap();
+        assert_eq!(missing.read_state(), RemoteState::Missing);
+        assert_eq!(missing.starred_state(), RemoteState::Missing);
+
+        let explicit_false: ItemContent =
+            serde_json::from_str(r#"{"id":"123","title":"false","categories":[]}"#).unwrap();
+        assert_eq!(explicit_false.read_state(), RemoteState::False);
+        assert_eq!(explicit_false.starred_state(), RemoteState::False);
+
+        let explicit_true: ItemContent = serde_json::from_str(
+            r#"{"id":"123","title":"true","categories":[
+                "user/2/state/com.google/read",
+                "user/2/state/com.google/starred"
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(explicit_true.read_state(), RemoteState::True);
+        assert_eq!(explicit_true.starred_state(), RemoteState::True);
     }
 }

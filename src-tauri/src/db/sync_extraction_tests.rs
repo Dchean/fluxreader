@@ -426,10 +426,8 @@ fn backfill_article_content_only_when_empty() {
     assert_eq!(enc_url2, Some("http://example.com/audio.mp3".to_string()));
 }
 
-/// R3（历史异常 Readability 保护）：当前指向的行是 readability + 已提取、但
-/// body 缺失/错配的**历史异常形态**时，回填不得合成 `(提取 HTML, RSS 纯文本)`
-/// 的 rss 源新行并丢 fulltext_extracted——必须保持 readability 来源就地修复
-/// body（html_to_text 同源）。隔离回归（不依赖网络/迁移）。
+/// 当前受检提取正文保持identity、字节、来源、标志和修订；回填仅补元数据。
+/// 旧直接SQL制造错配并要求惰性迁移的语义已随新库边界退役。
 #[test]
 fn backfill_keeps_protected_readability_source() {
     let mut conn = Connection::open_in_memory().unwrap();
@@ -464,28 +462,15 @@ fn backfill_keeps_protected_readability_source() {
         source: "direct".into(),
     };
     let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
-    let cid = conn
-        .query_row(
-            "SELECT content_id FROM articles WHERE id = ?1",
-            params![aid],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap();
-
-    // 历史异常现场：readability + 已提取，HTML 非空但 body 缺失（旧版只写
-    // HTML+flag 的错配形态）；revision 从 1 起。
-    conn.execute(
-        "UPDATE contents SET extraction_source = 'readability', fulltext_extracted = 1,
-             content_html = '<p>提取保留的 HTML 正文</p>', body_text = '' WHERE id = ?1",
-        params![cid],
-    )
-    .unwrap();
-    let rev_before: i64 = conn
-        .query_row(
-            "SELECT revision FROM contents WHERE id = ?1",
-            params![cid],
-            |r| r.get(0),
-        )
+    let (token, _) = article_content_commit_token(&conn, aid).unwrap().unwrap();
+    let (cid, rev_before) =
+        replace_article_content_checked(&conn, aid, &token, "<p>提取保留的 HTML 正文</p>")
+            .unwrap()
+            .unwrap();
+    let identity_before: String = conn
+        .query_row("SELECT identity FROM contents WHERE id=?1", [cid], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     // 回填（RSS 纯文本 + 更“新”的 RSS HTML）：不得降级/重指/丢 flag
@@ -503,7 +488,7 @@ fn backfill_keeps_protected_readability_source() {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM contents", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 1, "不得合成 rss 源新行（保护行保持单一）");
+    assert_eq!(count, 2, "独立RSS与提取全文保留，不因回填另造正文");
     let (cid_after, source, flag, body, rev_after): (i64, String, i64, String, i64) = conn
         .query_row(
             "SELECT c.id, c.extraction_source, c.fulltext_extracted, c.body_text, c.revision
@@ -521,13 +506,17 @@ fn backfill_keeps_protected_readability_source() {
     assert_eq!(
         body,
         crate::sanitize::html_to_text("<p>提取保留的 HTML 正文</p>"),
-        "body 就地按保留 HTML 修复（同源），而不是 RSS 纯文本"
+        "保留当前受检提取的文本，不换成RSS回填文本"
     );
-    assert!(
-        rev_after > rev_before,
-        "修复随 revision+1 暴露给前端修订失效"
+    assert_eq!(rev_after, rev_before, "回填未改变正文，不推进修订");
+    assert_eq!(
+        conn.query_row("SELECT identity FROM contents WHERE id=?1", [cid], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        identity_before
     );
-    assert!(changed, "修复计为数据变化（驱动数据变化标记）");
+    assert!(changed, "真实封面回填仍计为数据变化");
     // 条目级 meta 回填照常
     let img: Option<String> = conn
         .query_row(
@@ -537,12 +526,12 @@ fn backfill_keeps_protected_readability_source() {
         )
         .unwrap();
     assert_eq!(img.as_deref(), Some("http://example.com/img.jpg"));
-    // 搜索跟随修复后的正文（受保护内容仍可搜；OPT-017B 起由 trigram 候选索引
+    // 搜索保留当前提取正文（受保护内容仍可搜；OPT-017B 起由 trigram 候选索引
     // + LIKE 验证承接——该词含大写，同时覆盖索引文档的 ASCII 折叠路径）
     let hits: Vec<i64> = crate::db::search_articles(&conn, "HTML", 50)
         .unwrap()
         .into_iter()
         .map(|r| r.id)
         .collect();
-    assert_eq!(hits, vec![aid], "修复后的提取正文仍可被该条目搜到");
+    assert_eq!(hits, vec![aid], "未被改写的提取正文仍可被该条目搜到");
 }

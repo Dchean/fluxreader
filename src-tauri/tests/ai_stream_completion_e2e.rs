@@ -131,6 +131,37 @@ async fn stop_with_done_is_complete_crlf_and_tail_without_newline() {
     assert_eq!(deltas, vec!["你", "好，世界"], "增量与全文一致");
 }
 
+#[tokio::test]
+async fn cr_only_and_cross_chunk_crlf_preserve_event_boundaries() {
+    let data = [
+        "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}",
+        "data: [DONE]",
+    ];
+    for ending in ["\r", "\n", "\r\n"] {
+        let body = data
+            .iter()
+            .map(|line| format!("{line}{ending}{ending}"))
+            .collect::<String>();
+        let (result, _) = run_stream(http_parts(&body)).await;
+        let outcome = result.unwrap();
+        assert!(outcome.completed);
+        assert_eq!(outcome.text, "OK");
+    }
+    // CRLF 的 CR 与 LF 分别在不同传输块；多行 data 事件不能被误派发两次。
+    let parts = vec![
+        HTTP_HEAD.to_vec(),
+        b"data: {\"choices\":[\r".to_vec(),
+        b"\ndata: {\"delta\":{\"content\":\"OK\"}}]}\r".to_vec(),
+        b"\n\r".to_vec(),
+        b"\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n".to_vec(),
+        b"data: [DONE]\r".to_vec(),
+        b"\n\r\n".to_vec(),
+    ];
+    let (result, _) = run_stream(parts).await;
+    assert_eq!(result.unwrap().text, "OK");
+}
+
 /// 跨 TCP chunk 切开的 UTF-8 多字节序列必须重组成完整行、不得损坏字符。
 #[tokio::test]
 async fn utf8_split_across_tcp_chunks_is_reassembled() {

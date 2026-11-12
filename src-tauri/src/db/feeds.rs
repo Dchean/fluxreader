@@ -24,6 +24,7 @@ pub fn mark_binding_incomplete(conn: &Connection, account_key: &str) -> AppResul
 }
 
 pub fn clear_binding_incomplete(conn: &Connection, account_key: &str) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key = ?1",
         params![binding_incomplete_key(account_key)],
@@ -32,6 +33,7 @@ pub fn clear_binding_incomplete(conn: &Connection, account_key: &str) -> AppResu
 }
 
 pub fn clear_binding_incomplete_attempts(conn: &Connection) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key LIKE ?1",
         params![format!("{BINDING_INCOMPLETE_KEY_PREFIX}%")],
@@ -42,7 +44,7 @@ pub fn clear_binding_incomplete_attempts(conn: &Connection) -> AppResult<()> {
 /// 当前库是否至少有一个远端 feed 绑定。
 pub fn has_remote_feed_binding(conn: &Connection) -> AppResult<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM feeds WHERE remote_id IS NOT NULL)",
+        "SELECT EXISTS(SELECT 1 FROM feeds WHERE active = 1 AND remote_id IS NOT NULL)",
         [],
         |r| r.get::<_, i64>(0),
     )? != 0)
@@ -50,7 +52,7 @@ pub fn has_remote_feed_binding(conn: &Connection) -> AppResult<bool> {
 
 pub fn remote_feed_binding_count(conn: &Connection) -> AppResult<i64> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL",
+        "SELECT COUNT(*) FROM feeds WHERE active = 1 AND remote_id IS NOT NULL",
         [],
         |r| r.get(0),
     )?)
@@ -61,7 +63,7 @@ pub fn remote_feed_binding_count(conn: &Connection) -> AppResult<i64> {
 pub fn unbound_remote_feeds(conn: &Connection) -> AppResult<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, feed_url FROM feeds
-         WHERE origin = 'remote' AND remote_id IS NULL
+         WHERE active = 1 AND origin = 'remote' AND remote_id IS NULL
          ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -97,6 +99,7 @@ pub fn mark_zero_binding_discovery_attempt(
 }
 
 pub fn clear_zero_binding_discovery_attempts(conn: &Connection) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "DELETE FROM settings WHERE key LIKE ?1",
         params![format!("{ZERO_BINDING_DISCOVERY_KEY_PREFIX}%")],
@@ -195,9 +198,12 @@ pub struct FeedRow {
     pub fetch_failed: bool,
     pub fetch_error: Option<String>,
     pub last_fetched_at: Option<String>,
+    pub sync_id: String,
+    pub subscription_state: String,
+    pub effective_layout: String,
 }
 
-const FEED_COLS: &str = "id, folder_id, feed_url, site_url, title, favicon_url, layout, auto_summary, auto_translate, summary_mode, translate_mode, fetch_failed, fetch_error, last_fetched_at";
+const FEED_COLS: &str = "id, COALESCE(folder_id, 0), COALESCE((SELECT url FROM local_sync_feed_state WHERE id=feeds.id),feed_url), site_url, title, favicon_url, layout, auto_summary, auto_translate, summary_mode, translate_mode, fetch_failed, fetch_error, last_fetched_at, sync_id, CASE (SELECT active FROM local_sync_feed_state WHERE id=feeds.id) WHEN 1 THEN 'active' ELSE 'retained' END, CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END";
 
 fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FeedRow> {
     let auto_summary = r.get::<_, i64>(7)? != 0;
@@ -221,11 +227,22 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FeedRow> {
         fetch_failed: r.get::<_, i64>(11)? != 0,
         fetch_error: r.get(12)?,
         last_fetched_at: r.get(13)?,
+        sync_id: r.get(14)?,
+        subscription_state: r.get(15)?,
+        effective_layout: r.get(16)?,
     })
 }
 
 pub fn list_feeds(conn: &Connection) -> AppResult<Vec<FeedRow>> {
-    let mut stmt = conn.prepare(&format!("SELECT {FEED_COLS} FROM feeds ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FEED_COLS} FROM feeds WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([], feed_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn list_article_sources(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+    let mut stmt = conn.prepare(&format!("SELECT {FEED_COLS} FROM feeds WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) OR EXISTS(SELECT 1 FROM local_sync_article_state a WHERE a.feed_id=feeds.id AND a.is_starred=1) ORDER BY id"))?;
     let rows = stmt.query_map([], feed_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -239,6 +256,18 @@ pub fn find_feed_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> 
         )
         .optional()?;
     Ok(id)
+}
+
+/// 按 feed id 取 URL（定向同步的 selector 解析；不存在返回 None）。
+pub fn feed_url_by_id(conn: &Connection, feed_id: i64) -> AppResult<Option<String>> {
+    let url = conn
+        .query_row(
+            "SELECT url FROM local_sync_feed_state WHERE id = ?1",
+            params![feed_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(url)
 }
 
 /// 新增订阅源。参数即 feeds 表列（URL/站点/标题/分类/布局/AI 开关）——
@@ -315,6 +344,82 @@ pub fn insert_feed_origin_modes(
     translate_mode: FeedAiMode,
     origin: &str,
 ) -> AppResult<i64> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        let id = insert_feed_origin_modes(
+            &tx,
+            feed_url,
+            site_url,
+            title,
+            favicon_url,
+            folder_id,
+            layout,
+            summary_mode,
+            translate_mode,
+            origin,
+        )?;
+        tx.commit()?;
+        return Ok(id);
+    }
+    let existing = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = ?1",
+            [feed_url],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    let retained = match existing {
+        Some(id) if !crate::local_sync::logical::feed_active(conn, id)? => Some(id),
+        _ => None,
+    };
+    if let Some(id) = retained {
+        let mut patch = serde_json::Map::new();
+        if let Some(epoch) = crate::local_sync::logical::reactivation_epoch(conn, id)? {
+            patch.insert("reactivate".into(), epoch);
+        }
+        patch.insert(
+            "folder".into(),
+            serde_json::json!(conn
+                .query_row(
+                    "SELECT sync_id FROM folders WHERE id=?1",
+                    [folder_id],
+                    |r| r.get::<_, String>(0)
+                )
+                .optional()?),
+        );
+        patch.insert("layout".into(), serde_json::json!(layout));
+        patch.insert(
+            "summary_mode".into(),
+            serde_json::json!(summary_mode.as_str()),
+        );
+        patch.insert(
+            "translate_mode".into(),
+            serde_json::json!(translate_mode.as_str()),
+        );
+        patch.insert("title".into(), serde_json::json!(title));
+        if let Some(url) = site_url {
+            patch.insert("site_url".into(), serde_json::json!(url));
+        }
+        let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
+        conn.execute(
+            "UPDATE feeds SET active = 1, lifecycle_version = lifecycle_version + 1,
+            folder_id = ?1, layout = ?2, summary_mode = ?3, translate_mode = ?4,
+            title = ?5, site_url = COALESCE(?6,site_url), origin = ?7 WHERE id = ?8",
+            params![
+                folder_id,
+                layout,
+                summary_mode.as_str(),
+                translate_mode.as_str(),
+                title,
+                site_url,
+                origin,
+                id
+            ],
+        )?;
+        crate::local_sync::logical::finish_explicit(conn, explicit)?;
+        remove_feed_tombstone(conn, feed_url)?;
+        return Ok(id);
+    }
     conn.execute(
         "INSERT INTO feeds (feed_url, site_url, title, favicon_url, folder_id, layout,
                             auto_summary, auto_translate, summary_mode, translate_mode, origin)
@@ -336,8 +441,66 @@ pub fn insert_feed_origin_modes(
     Ok(conn.last_insert_rowid())
 }
 
+/// 把一次显式用户/配置导入的标题持久化为自定义标题。
+/// 新增源时 `insert_*` 先把传入标题同时写进 title/fetched_title；只有调用方
+/// 能证明这是用户意图（添加表单、OPML、配置导入）时才调用本函数，远端订阅
+/// 发现与 RSS 刷新仍走抓取标题域，不能把服务端标题误标成用户改名。
+/// 空标题与 URL 兜底（导入解析器在缺失标题时用 URL 填充）都不是用户意图；
+/// 即使调用方漏判，本函数也拒绝把它们固化进 title_custom。
+pub fn set_feed_custom_title(conn: &Connection, id: i64, title: &str) -> AppResult<()> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(());
+    }
+    let url = feed_url_by_id(conn, id)?;
+    if url.as_deref() == Some(title) {
+        return Ok(());
+    }
+    update_feed_full(conn, id, Some(title), None, None, None, None, None, None)
+}
+
+/// 导入/配置快照的显式标题归一：去空白后非空且不等于源 URL 才是用户意图。
+/// OPML 等解析器会用 URL 作为缺省标题；该兜底不得变成自定义标题。
+pub fn explicit_feed_title<'a>(title: &'a str, feed_url: &str) -> Option<&'a str> {
+    let title = title.trim();
+    (!title.is_empty() && title != feed_url).then_some(title)
+}
+
 pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
-    conn.execute("DELETE FROM feeds WHERE id = ?1", params![id])?;
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        delete_feed(&tx, id)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    super::contents::with_write_savepoint(conn, "retain_unsubscribed", || {
+        let patch = serde_json::Map::from_iter([("deleted".into(), serde_json::json!(true))]);
+        let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
+        conn.execute(
+            "UPDATE feeds SET lifecycle_version = lifecycle_version + 1 WHERE id=?1 AND active=1",
+            [id],
+        )?;
+        conn.execute(
+            "INSERT INTO source_tombstones(source_id,lifecycle_version,feed_url)
+            SELECT sync_id,lifecycle_version,feed_url FROM feeds WHERE id=?1
+            ON CONFLICT(source_id) DO UPDATE SET lifecycle_version=excluded.lifecycle_version,
+                feed_url=excluded.feed_url,deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            [id],
+        )?;
+        conn.execute("UPDATE feeds SET active = 0, fetch_generation = fetch_generation + 1,
+            layout = CASE WHEN layout != 'inherit' THEN layout ELSE COALESCE((SELECT layout FROM folders WHERE id = feeds.folder_id), 'article') END
+            WHERE id = ?1", [id])?;
+        if !explicit {
+            conn.execute(
+                "DELETE FROM articles WHERE feed_id = ?1 AND is_starred = 0",
+                [id],
+            )?;
+        }
+        crate::local_sync::logical::finish_explicit(conn, explicit)?;
+        // Keep the stable source identity and explicit exclusion even when no saved article
+        // remains; re-subscribing can recover this identity without inventing a new source.
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -351,6 +514,7 @@ pub fn set_feed_fetch_state(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> AppResult<()> {
+    let _writer = crate::db::writer_guard(conn)?;
     conn.execute(
         "UPDATE feeds SET
             fetch_failed = ?1,
@@ -369,33 +533,162 @@ pub fn set_feed_fetch_state(
     Ok(())
 }
 
+/// 带刷新代际的状态写回：只有 `feed_generation` 仍等于本请求开始时的值才写。
+/// 返回 false 表示本轮已被更新的一次抓取取代，调用方必须丢弃整个写回结果
+/// （包括文章），不能把旧 ETag/失败状态覆盖到新轮次上。
+pub fn set_feed_fetch_state_if_generation(
+    conn: &Connection,
+    id: i64,
+    generation: i64,
+    failed: bool,
+    error: Option<&str>,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> AppResult<bool> {
+    let _writer = crate::db::writer_guard(conn)?;
+    if !crate::local_sync::logical::feed_active(conn, id)? {
+        return Ok(false);
+    }
+    let changed = conn.execute(
+        "UPDATE feeds SET
+            fetch_failed = ?1,
+            fetch_error = ?2,
+            etag = ?3,
+            last_modified = ?4,
+            last_fetched_at = datetime('now'),
+            fail_count = CASE WHEN ?1 THEN fail_count + 1 ELSE 0 END,
+            next_retry_at = CASE
+                WHEN ?1 THEN datetime('now', '+' || (CASE fail_count
+                    WHEN 0 THEN 5 WHEN 1 THEN 5 WHEN 2 THEN 30 ELSE 120 END) || ' minutes')
+                ELSE NULL END
+         WHERE id = ?5 AND fetch_generation = ?6",
+        params![failed as i64, error, etag, last_modified, id, generation],
+    )?;
+    Ok(changed == 1)
+}
+
+/// 开始一轮抓取：锁内自增代际并抓取本轮快照。即使随后的网络请求失败或
+/// 进程被中断，代际也已推进，上一轮迟到结果无法再通过 CAS。
+pub struct FeedRefreshAttempt {
+    pub feed_url: String,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub generation: i64,
+}
+
+pub fn begin_feed_refresh(conn: &Connection, feed_id: i64) -> AppResult<FeedRefreshAttempt> {
+    let tx = crate::db::write_transaction(conn)?;
+    if !crate::local_sync::logical::feed_active(&tx, feed_id)? {
+        return Err(crate::error::AppError::not_found(format!(
+            "feed {feed_id} not found"
+        )));
+    }
+    let changed = tx.execute(
+        "UPDATE feeds SET fetch_generation = fetch_generation + 1 WHERE id = ?1 AND active = 1",
+        params![feed_id],
+    )?;
+    if changed == 0 {
+        return Err(crate::error::AppError::not_found(format!(
+            "feed {feed_id} not found"
+        )));
+    }
+    let attempt = tx.query_row(
+        "SELECT (SELECT url FROM local_sync_feed_state WHERE id=feeds.id), etag, last_modified, fetch_generation
+           FROM feeds WHERE id = ?1",
+        params![feed_id],
+        |r| {
+            Ok(FeedRefreshAttempt {
+                feed_url: r.get(0)?,
+                etag: r.get(1)?,
+                last_modified: r.get(2)?,
+                generation: r.get(3)?,
+            })
+        },
+    )?;
+    tx.commit()?;
+    Ok(attempt)
+}
+
 /// 调度器取"到期"的源：超过全局间隔未抓 且 不在退避窗口内。
 /// last_fetched_at 为 NULL（从未抓过）的源立即视为到期。
-/// 到期源 id。`include_remote = false`（跟随服务端同步模式）时跳过
+/// 到期候选带规范化 URL，供跨批次 footprint 去重；rowid 可复用，不能作为键。
+/// `include_remote = false`（跟随服务端同步模式）时跳过
 /// origin='remote' 的源——服务端源的内容由 Miniflux 同步提供，
 /// 直连抓取会与服务端状态产生两份不一致的真相。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedRefreshCandidate {
+    pub id: i64,
+    pub normalized_url: String,
+}
+
+fn collect_refresh_candidates(
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(i64, String)>,
+    >,
+) -> AppResult<Vec<FeedRefreshCandidate>> {
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (id, feed_url) = row?;
+        candidates.push(FeedRefreshCandidate {
+            id,
+            normalized_url: normalize_url(&feed_url),
+        });
+    }
+    Ok(candidates)
+}
+
+pub fn feeds_due_for_refresh_candidates(
+    conn: &Connection,
+    interval_min: i64,
+    include_remote: bool,
+) -> AppResult<Vec<FeedRefreshCandidate>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, (SELECT url FROM local_sync_feed_state WHERE id=feeds.id) FROM feeds
+         WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) AND (last_fetched_at IS NULL
+            OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
+                 AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
+           AND (?2 OR origin != 'remote')",
+    )?;
+    let rows = stmt.query_map(params![interval_min, include_remote], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
+    collect_refresh_candidates(rows)
+}
+
 pub fn feeds_due_for_refresh(
     conn: &Connection,
     interval_min: i64,
     include_remote: bool,
 ) -> AppResult<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM feeds
-         WHERE (last_fetched_at IS NULL
-            OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
-                 AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
-           AND (?2 OR origin != 'remote')",
-    )?;
-    let rows = stmt.query_map(params![interval_min, include_remote], |r| r.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(
+        feeds_due_for_refresh_candidates(conn, interval_min, include_remote)?
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect(),
+    )
 }
 
-/// 全部源 id（托盘「刷新全部订阅」与手动全刷入口，忽略到期与退避）。
-/// 手动入口始终包含 Miniflux 源（用户显式动作 = 要全部内容）。
+/// 全量抓取候选 id（忽略到期与退避）。
+/// `include_remote=false` 是 hybrid/跟随服务端的「刷新本地订阅源」语义：
+/// 排除 origin='remote'，保留 local 及其它非 remote 来源；direct/本机抓取
+/// 才传入 true 抓全部来源。
+pub fn feeds_all_candidates(
+    conn: &Connection,
+    include_remote: bool,
+) -> AppResult<Vec<FeedRefreshCandidate>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, (SELECT url FROM local_sync_feed_state WHERE id=feeds.id) FROM feeds WHERE id IN(SELECT id FROM local_sync_feed_state WHERE active=1) AND (?1 OR origin != 'remote')",
+    )?;
+    let rows = stmt.query_map(params![include_remote], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    collect_refresh_candidates(rows)
+}
+
 pub fn feeds_all_ids(conn: &Connection, include_remote: bool) -> AppResult<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM feeds WHERE (?1 OR origin != 'remote')")?;
-    let rows = stmt.query_map(params![include_remote], |r| r.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(feeds_all_candidates(conn, include_remote)?
+        .into_iter()
+        .map(|candidate| candidate.id)
+        .collect())
 }
 
 pub fn set_feed_title_and_icon(
@@ -405,12 +698,48 @@ pub fn set_feed_title_and_icon(
     favicon: Option<&str>,
     site_url: Option<&str>,
 ) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        set_feed_title_and_icon(&tx, id, title, favicon, site_url)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    if crate::local_sync::logical::enabled(conn)? {
+        let source: Option<String> = conn
+            .query_row("SELECT sync_id FROM feeds WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
+        if let Some(source) = source {
+            if crate::local_sync::logical::get(conn, &format!("s/{source}/created"))?.is_some() {
+                crate::local_sync::logical::materialize(conn, &format!("s/{source}"))?;
+            }
+        }
+    }
     let title = title.filter(|t| !t.trim().is_empty());
     let favicon = favicon.filter(|f| !f.trim().is_empty());
-    // 只覆盖非空值：用户手动重命名的标题不被下一次抓取冲掉
+    // 抓取只更新 fetched_title；显示名 title 在有 title_custom 时保持用户值，
+    // 否则跟随新的抓取标题。title_custom=NULL 只存在于 v34 前的旧行：首次刷新
+    // 若标题变化，就把旧 title 固化自定义（保护无法反推的历史改名）；标题未变
+    // 则收敛为空串，后续照常跟随源站。
+    // Note: 抓取标题/用户标题分域的旧库保守迁移 — 见 .agents/notes/implemented/architecture/2026-11-04-刷新编排与源名分域.md
     conn.execute(
         "UPDATE feeds SET
-            title = COALESCE(?1, title),
+            fetched_title = COALESCE(?1, fetched_title),
+            title_custom = CASE
+                WHEN NULLIF(trim(COALESCE(title_custom, '')), '') IS NOT NULL
+                    THEN title_custom
+                WHEN title_custom IS NULL AND ?1 IS NOT NULL AND ?1 <> title AND title <> feed_url
+                    THEN title
+                WHEN title_custom IS NULL
+                    THEN ''
+                ELSE title_custom
+            END,
+            title = CASE
+                WHEN NULLIF(trim(COALESCE(title_custom, '')), '') IS NOT NULL
+                    THEN title_custom
+                WHEN title_custom IS NULL AND ?1 IS NOT NULL AND ?1 <> title AND title <> feed_url
+                    THEN title
+                ELSE COALESCE(?1, NULLIF(fetched_title, ''), title)
+            END,
             favicon_url = COALESCE(?2, favicon_url),
             site_url = COALESCE(?3, site_url)
          WHERE id = ?4",
@@ -420,11 +749,7 @@ pub fn set_feed_title_and_icon(
 }
 
 pub fn update_feed_layout(conn: &Connection, id: i64, layout: &str) -> AppResult<()> {
-    conn.execute(
-        "UPDATE feeds SET layout = ?1 WHERE id = ?2",
-        params![layout, id],
-    )?;
-    Ok(())
+    update_feed_full(conn, id, None, None, Some(layout), None, None, None, None)
 }
 
 /// 编辑源一次性落库：标题 / 所属分类 / 布局 / AI 开关（单语句，避免多次往返）。
@@ -467,13 +792,55 @@ pub fn update_feed_full(
     summary_mode: Option<FeedAiMode>,
     translate_mode: Option<FeedAiMode>,
 ) -> AppResult<()> {
+    if conn.is_autocommit() {
+        let tx = crate::db::write_transaction(conn)?;
+        update_feed_full(
+            &tx,
+            id,
+            title,
+            folder_id,
+            layout,
+            auto_summary,
+            auto_translate,
+            summary_mode,
+            translate_mode,
+        )?;
+        tx.commit()?;
+        return Ok(());
+    }
     let title = title.map(str::trim).filter(|t| !t.is_empty());
     let summary_mode = summary_mode.or(auto_summary.map(FeedAiMode::from_legacy_bool));
     let translate_mode = translate_mode.or(auto_translate.map(FeedAiMode::from_legacy_bool));
+    let mut patch = serde_json::Map::new();
+    if let Some(title) = title {
+        patch.insert("title".into(), serde_json::json!(title));
+        patch.insert("title_custom".into(), serde_json::json!(title));
+    }
+    if let Some(folder) = folder_id {
+        patch.insert(
+            "folder".into(),
+            serde_json::json!(conn
+                .query_row("SELECT sync_id FROM folders WHERE id=?1", [folder], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?),
+        );
+    }
+    if let Some(layout) = layout {
+        patch.insert("layout".into(), serde_json::json!(layout));
+    }
+    if let Some(mode) = summary_mode {
+        patch.insert("summary_mode".into(), serde_json::json!(mode.as_str()));
+    }
+    if let Some(mode) = translate_mode {
+        patch.insert("translate_mode".into(), serde_json::json!(mode.as_str()));
+    }
+    let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
     // 空标题回退原值（不置 NULL——源名必填）
     conn.execute(
         "UPDATE feeds SET
             title = COALESCE(?1, title),
+            title_custom = COALESCE(?1, title_custom),
             folder_id = COALESCE(?2, folder_id),
             layout = COALESCE(?3, layout),
             summary_mode = COALESCE(?4, summary_mode),
@@ -492,6 +859,7 @@ pub fn update_feed_full(
             id
         ],
     )?;
+    crate::local_sync::logical::finish_explicit(conn, explicit)?;
     Ok(())
 }
 
@@ -523,22 +891,17 @@ pub fn set_feed_ai_flags(
     summary: bool,
     translate: bool,
 ) -> AppResult<()> {
-    let summary_mode = FeedAiMode::from_legacy_bool(summary);
-    let translate_mode = FeedAiMode::from_legacy_bool(translate);
-    conn.execute(
-        "UPDATE feeds SET
-            summary_mode = ?1, translate_mode = ?2,
-            auto_summary = ?3, auto_translate = ?4
-         WHERE id = ?5",
-        params![
-            summary_mode.as_str(),
-            translate_mode.as_str(),
-            summary_mode.mirrors_legacy_bool() as i64,
-            translate_mode.mirrors_legacy_bool() as i64,
-            id
-        ],
-    )?;
-    Ok(())
+    update_feed_full(
+        conn,
+        id,
+        None,
+        None,
+        None,
+        Some(summary),
+        Some(translate),
+        None,
+        None,
+    )
 }
 
 /* ============================================================
@@ -695,9 +1058,10 @@ pub fn feed_remote_info(conn: &Connection, id: i64) -> AppResult<(String, Option
 pub fn feed_folder_label(conn: &Connection, id: i64) -> AppResult<Option<String>> {
     let folder_id: Option<i64> = conn
         .query_row("SELECT folder_id FROM feeds WHERE id = ?1", [id], |r| {
-            r.get(0)
+            r.get::<_, Option<i64>>(0)
         })
-        .optional()?;
+        .optional()?
+        .flatten();
     match folder_id {
         Some(fid) => super::folders::folder_name(conn, fid),
         None => Ok(None),
@@ -1024,5 +1388,57 @@ mod ai_mode_tests {
         let err = FeedAiMode::parse("maybe").unwrap_err();
         assert_eq!(err.code, "validate");
         assert!(err.message.contains("maybe"), "错误必须指出非法值: {err}");
+    }
+}
+
+#[cfg(test)]
+mod title_domain_tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        super::super::create_folder(&conn, "分类", "article").unwrap();
+        conn
+    }
+
+    #[test]
+    fn empty_and_url_fallback_titles_are_not_custom() {
+        let conn = conn();
+        let id = insert_feed(
+            &conn,
+            "https://fallback.example/rss",
+            None,
+            "初始标题",
+            None,
+            1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        set_feed_custom_title(&conn, id, "   ").unwrap();
+        set_feed_custom_title(&conn, id, "https://fallback.example/rss").unwrap();
+        let (title, custom): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, title_custom FROM feeds WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "初始标题");
+        assert_eq!(custom.as_deref(), Some(""));
+
+        set_feed_custom_title(&conn, id, " 用户改名 ").unwrap();
+        let (title, custom): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, title_custom FROM feeds WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "用户改名");
+        assert_eq!(custom.as_deref(), Some("用户改名"));
     }
 }

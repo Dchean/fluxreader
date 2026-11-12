@@ -18,7 +18,7 @@ export type SettingsSlice = Pick<
 
 /* ============================================================
 OPT-008B 设置持久化协议（R1 顺序与确认态；R2 接力；R3 读凭据；R4 时序）；
-R5 机制收敛：**基线 + 每笔已校验 patch** 生成载荷，意图按序，UI 由投影得出
+R5/R7 机制收敛：每笔已校验 patch 由后端事务合并，意图按序，UI 由投影得出
 
 缺陷链（R5 关闭的三个主控真实反例）：
 - 反例一：门后 A/B 两笔点击，B 的键被远端新值覆盖时载荷回退用的是「乐观前
@@ -31,19 +31,18 @@ R5 机制收敛：**基线 + 每笔已校验 patch** 生成载荷，意图按序
 特判，统一为：
 
 - 确认基线 base：后端 app_settings 原文（新鲜读取 / 应用回读 / 有界校准可刷新；
-  写成功后按提交序推进为该笔 payload）。`appSettingsBaseKnown` 区分「已知」
+  写成功后按提交序推进为该笔 完整 JSON）。`appSettingsBaseKnown` 区分「已知」
   （含已知为空）与「未知」（从未读到 / 应用回读失败）。
 - 待写意图 intents：按发起序排队的 `{seq, patch, prev}`（patch=该笔已校验键值，
   prev=乐观前本值仅供显示回退）。
-- **每笔发送载荷 = base 解析对象 + 本笔 patch**（发送时生成，不携带任何其它笔
-  意图；base 未知或为空时也绝不回退到旧全量快照）。
+- **每笔发送载荷 = 本笔已校验 patch**，后端在事务内合并当前设置；返回的提交后
+  完整 JSON 推进确认基线。不携带其他意图，不覆盖回读之后的远端别键更新。
 - **乐观 UI = 当前值叠 base + 按序叠仍有效意图**（`projectSettings`）——回读
   落地/校准/写落定都走同一投影；失败意图出队并按其键回投到 base（无 base 键时
   回 prev），不残留「永远成功」的乐观值。
 - 发送前若 base 未知：一次**有界校准读取**，成功即以原文为底；失败→本笔不发送
   （可见失败、不改库、该笔键回显），持续失败由下一次成功读取/重试恢复。
-- 写入串行（后写永不先发，A 网络在途时后发请求排队）；成功推进 base 并按本笔
-  patch 是否含 smartDedup 触发 reload；失败如实 toast（每笔一次）。
+- 写入串行（后写永不先发，A 网络在途时后发请求排队）；成功推进 base；失败如实 toast（每笔一次）。
 - 应用边界（runAppSettingsApplyBoundary）：窗口内点击请求排在应用+回读之后
   （乐观落地不受影响）；回读落地=新 base，窗口内点击键由投影自然保留（无需
   专门保留集合）；上传只等发起时前沿（awaitAppSettingsWriteFrontier），不设门。
@@ -231,13 +230,6 @@ function acceptBase(raw: string | null, opts?: { applyViewFilters?: boolean }): 
   }
 }
 
-/** 该笔发送载荷：base 解析对象 + 本笔 patch（不携带任何其它笔意图；
-    base 未知/为空时不回退旧全量）。 */
-function buildIntentPayload(intent: SettingsWriteIntent): string {
-  const baseObj = appSettingsBaseKnown && confirmedAppSettings ? parseSettingsRaw(confirmedAppSettings) : {};
-  return JSON.stringify({ ...baseObj, ...intent.patch });
-}
-
 /** 意图出队（不碰 UI）。 */
 function removeIntent(intent: SettingsWriteIntent): void {
   pendingIntents = pendingIntents.filter((i) => i !== intent);
@@ -276,7 +268,7 @@ export async function awaitAppSettingsWriteFrontier(): Promise<void> {
 
 /** 配置应用写边界（用户确认后调用）：同步捕获「前一边界 + 当时的写链尾」并
     发布 own gate——此后发出的 updateSettings 请求排在应用之后（乐观落地不受
-    影响），载荷在发送时从「base + 本笔 patch」生成。成功/失败都在 finally 释放
+    影响），每笔仅发送显式 patch，后端事务合并并返回完整基线。成功/失败都在 finally 释放
     自己的门；清门只在自己仍是尾时发生（后发边界的门不被旧边界打开）。 */
 export async function runAppSettingsApplyBoundary<T>(fn: () => Promise<T>): Promise<T> {
   const prevGate = appSettingsApplyGate;
@@ -297,12 +289,12 @@ export async function runAppSettingsApplyBoundary<T>(fn: () => Promise<T>): Prom
     读取结果成为新基线；**强制新鲜读取**（不复用应用前在途的读取，并推进应用
     代次使更早的共享读取对后续等待者失效）；窗口内点击由投影保留。读取同样
     占用读取凭据（后发起者优先）。 */
-export async function readBackAppliedAppSettings(): Promise<void> {
+export async function readBackAppliedAppSettings(opts: { applyViewFilters?: boolean } = {}): Promise<void> {
   appSettingsAppliedEpoch += 1; // 应用代次推进：更早发起的在途读取不得被 join 为新鲜
   const read = readRawShared(true);
   const raw = await read.promise;
   if (appSettingsReadSerial !== read.token) return; // 更晚的读取已发起：本读取过期
-  acceptBase(raw, { applyViewFilters: true });
+  acceptBase(raw, { applyViewFilters: opts.applyViewFilters !== false });
 }
 
 /** 应用已提交但设置回读失败：基线未知（不假称可恢复）——此后每笔写发送前
@@ -315,8 +307,7 @@ export function markAppSettingsUnconfirmed(): void {
   appSettingsAppliedEpoch += 1;
 }
 
-export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set, get) => ({
-  settings: {
+const DEFAULT_APP_SETTINGS: SettingsState = {
     autoRefresh: true,
     refreshInterval: 30,
     fetchConcurrency: 4,
@@ -335,13 +326,28 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
     listWidth: 320,
     showReadTime: true,
     defaultOpenMode: 'rss',
-    smartDedup: false,
+    articleAutoSummary: false,
+    articleAutoTranslate: false,
+    socialAutoTranslate: false,
+    notificationAutoSummary: false,
+    notificationAutoTranslate: false,
     closeToTray: true,
     closePromptShown: false,
     notifyOnNewArticles: false,
     autoSync: true,
     syncMode: 'direct',
-  },
+    readBodyRetentionDays: 0,
+  };
+
+/** 整库替换才回到默认设置；普通同步只叠真实设置，不重置机器选项。 */
+export function resetAppSettingsForLibraryRestore(): void {
+  const { autoStart, closePromptShown } = appStore().getState().settings;
+  markAppSettingsUnconfirmed();
+  appStore().setState({ settings: { ...DEFAULT_APP_SETTINGS, autoStart, closePromptShown } });
+}
+
+export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set, get) => ({
+  settings: { ...DEFAULT_APP_SETTINGS },
 
   updateSettings: (partial) => {
     /* D5：写入前做运行时校验（类型 + 取值域），与读回路径 bootstrapSettings
@@ -359,12 +365,10 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
     /* 乐观应用到内存（保留既有交互手感）；持久化按下方串行链落库。 */
     set((s) => ({ settings: { ...s.settings, ...accepted } }));
     if (!(typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)) return;
-    /* R5：意图登记（patch = 本笔已校验键值；prev 仅显示回退用）。每笔载荷在
-       发送时由「base + 本笔 patch」生成——不携带任何其它笔意图。 */
+    /* R5：意图登记（patch = 本笔已校验键值；prev 仅显示回退用）。每笔发送时只携带自己的显式 patch，不携带任何其它笔意图。 */
     const serial = ++appSettingsWriteSerial;
     const intent: SettingsWriteIntent = { seq: serial, patch: accepted as Record<string, unknown>, prev };
     pendingIntents.push(intent);
-    const dedupChanged = 'smartDedup' in accepted;
     appSettingsWriteChain = appSettingsWriteChain
       .then(async () => {
         if (gateAtIssue) {
@@ -374,14 +378,16 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
            校准**（优先复用/等待在途读取，至多一次强制新鲜读）：失败则本笔不
            发送（返回 null 哨兵，可见失败、不改库、不以旧全量覆盖远端键）。 */
         if (!appSettingsBaseKnown && !(await calibrateBase())) return null;
-        const payload = buildIntentPayload(intent);
         appSettingsSentInFlight += 1;
         try {
-          await api.setSetting('app_settings', payload);
+          // Note: 后端事务内仅合并显式意图，保留先到达的远端别键更新。
+          // 见 .agents/notes/implemented/architecture/2026-11-09-本地同步与便携恢复界面边界.md
+          const committed = await api.patchAppSettings(intent.patch);
+          JSON.parse(committed); // IPC 返回损坏快照不能充当确认基线。
+          return committed;
         } finally {
           appSettingsSentInFlight = Math.max(0, appSettingsSentInFlight - 1);
         }
-        return payload;
       })
       .then((payload) => {
         if (payload === null) {
@@ -398,11 +404,6 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
         appSettingsBaseKnown = true;
         confirmedAtWriteSerial = serial;
         projectSettings();
-        /* 本笔含 smartDedup 变更 → 按新口径重取（不被后续非 dedup 写吞掉）。
-           reload 自身失败已有可见提示，这里再兜 catch 避免未处理拒绝。 */
-        if (dedupChanged) {
-          void get().reloadFromBackend().catch(() => { /* 失败可见性由 reload 内部负责 */ });
-        }
       })
       .catch((e: unknown) => {
         /* 失败：该笔键回投到 base（无 base 键回 prev），如实 toast——每笔失败

@@ -60,6 +60,11 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
 
     // 模拟服务端拉取：origin='remote' 订阅 + 文章 + 绑定 + 队列 + 墓碑
     let remote_folder = db::create_folder(&conn, "远端分类", "article").unwrap();
+    conn.execute(
+        "UPDATE folders SET origin = 'remote' WHERE id = ?1",
+        [remote_folder],
+    )
+    .unwrap();
     let remote_feed = db::insert_feed_origin(
         &conn,
         "http://example.com/remote.xml",
@@ -232,10 +237,15 @@ fn cache_cleanup_articles_respects_star_and_age() {
     let old_unread = mk("old-unread", 40, false, false);
 
     let (deleted, _) = db::cleanup_cache(&mut conn, 30, "articles").unwrap();
-    assert_eq!(deleted, 1, "only old read non-starred deleted");
+    assert_eq!(deleted, 1, "only old read non-starred body released");
+    assert!(db::get_article(&conn, old).unwrap().unwrap().body_missing);
+    assert!(db::get_article(&conn, old).unwrap().unwrap().is_read);
+    for kept in [old_starred, recent, old_unread] {
+        assert!(!db::get_article(&conn, kept).unwrap().unwrap().body_missing);
+    }
 
     for (aid, should_exist, why) in [
-        (old, false, "old read article purged"),
+        (old, true, "old read identity preserved"),
         (old_starred, true, "starred preserved"),
         (recent, true, "recent preserved"),
         (

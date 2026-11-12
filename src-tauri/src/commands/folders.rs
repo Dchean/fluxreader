@@ -1,6 +1,6 @@
 //! commands 的 folders 领域子模块（TASK-044 从 commands.rs 按既有章节拆分，纯搬运）。
 
-use super::{read_dedup_flag, sync_configured};
+use super::{read_dedup_flag, subscription_write_back_supported, sync_configured};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::ingestion;
@@ -13,8 +13,7 @@ Folders / Feeds
 
 #[tauri::command]
 pub async fn list_folders(state: State<'_, AppState>) -> AppResult<Vec<db::FolderRow>> {
-    let conn = state.db.lock().await;
-    db::list_folders(&conn)
+    crate::state::database_work(state.db.clone(), move |conn| db::list_folders(conn)).await
 }
 
 /// create_folder 命令的真实逻辑（命令与测试共用，对齐本文件 record_* 形态）。
@@ -45,8 +44,10 @@ pub async fn create_folder(
     name: String,
     layout: String,
 ) -> AppResult<i64> {
-    let conn = state.db.lock().await;
-    create_folder_checked(&conn, &name, &layout)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        create_folder_checked(conn, &name, &layout)
+    })
+    .await
 }
 
 /// 分类改名（命令与测试共用的真实逻辑）：本地改名 + 旧 label 墓碑（A-4）+ 成员
@@ -60,8 +61,8 @@ pub async fn create_folder(
 /// 空分类没有成员可表达：本地改名 + 旧 label 墓碑防复活，**不宣称远端已改**
 /// （没有可验证的远端表达，不伪造成功——如实列为本卡边界）。
 pub fn record_folder_rename(conn: &rusqlite::Connection, id: i64, new_name: &str) -> AppResult<()> {
-    let old = db::folder_name(conn, id)?;
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
+    let old = db::folder_name(&tx, id)?;
     // 凭据读取失败 → Err（失败关闭）：整个改名（含墓碑与成员意图）不落库。
     let account = crate::sync::current_account(&tx)?;
     let account_key = account.as_ref().map(|c| c.key.clone()).unwrap_or_default();
@@ -109,7 +110,7 @@ pub fn record_folder_rename(conn: &rusqlite::Connection, id: i64, new_name: &str
 /// 远端表达同改名：没有分类级删除端点（`disable-tag` 未验证），退订逐源表达；
 /// label 在最后一个成员移除后自然消失。
 pub fn record_folder_delete(conn: &rusqlite::Connection, id: i64) -> AppResult<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(conn)?;
     let account = crate::sync::current_account(&tx)?;
     let account_key = account.as_ref().map(|c| c.key.clone()).unwrap_or_default();
     if let Some(label) = db::folder_name(&tx, id)? {
@@ -144,10 +145,10 @@ pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) ->
     }
     // 本地改名 + 旧 label 墓碑（A-4）：远端分类是 label 名，不做远端改写，
     // 但必须阻挡 pull 按旧 label 复活空目录。
-    {
-        let conn = state.db.lock().await;
-        record_folder_rename(&conn, id, &name)?;
-    }
+    crate::state::database_work(state.db.clone(), move |conn| {
+        record_folder_rename(conn, id, &name)
+    })
+    .await?;
     // OPT-009 B3：成员改写的远端意图已在事务内入队（分类级命令不立即推送，
     // 等待下一轮同步）——锁外广播订阅写回回执，UI 立刻看到「待办出现」。
     crate::sync::notify_subscription_outbox_changed(&state.db).await;
@@ -156,10 +157,8 @@ pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) ->
 
 #[tauri::command]
 pub async fn delete_folder(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    {
-        let conn = state.db.lock().await;
-        record_folder_delete(&conn, id)?;
-    }
+    crate::state::database_work(state.db.clone(), move |conn| record_folder_delete(conn, id))
+        .await?;
     // OPT-009 B3：逐源退订意图已在事务内入队——锁外广播订阅写回回执
     // （同样不立即推送，等待下一轮同步执行器）。
     crate::sync::notify_subscription_outbox_changed(&state.db).await;
@@ -172,8 +171,10 @@ pub async fn update_folder_layout(
     id: i64,
     layout: String,
 ) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::update_folder_layout(&conn, id, &layout)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::update_folder_layout(conn, id, &layout)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -182,8 +183,10 @@ pub async fn set_folder_collapsed(
     id: i64,
     collapsed: bool,
 ) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_folder_collapsed(&conn, id, collapsed)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::set_folder_collapsed(conn, id, collapsed)
+    })
+    .await
 }
 
 /// 分类 AI 默认开关写入。OPT-011：参数改为可选（单字段 patch）——新 caller 只传
@@ -196,14 +199,38 @@ pub async fn set_folder_ai_flags(
     summary: Option<bool>,
     translate: Option<bool>,
 ) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_folder_ai_flags_partial(&conn, id, summary, translate)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::set_folder_ai_flags_partial(conn, id, summary, translate)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn list_feeds(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow>> {
-    let conn = state.db.lock().await;
-    db::list_feeds(&conn)
+    crate::state::database_work(state.db.clone(), move |conn| db::list_feeds(conn)).await
+}
+
+#[tauri::command]
+pub async fn list_article_sources(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow>> {
+    crate::state::database_work(state.db.clone(), move |conn| db::list_article_sources(conn)).await
+}
+
+#[tauri::command]
+pub async fn set_folder_ai_modes(
+    state: State<'_, AppState>,
+    id: i64,
+    summary: Option<String>,
+    translate: Option<String>,
+) -> AppResult<()> {
+    let summary = summary.as_deref().map(db::FeedAiMode::parse).transpose()?;
+    let translate = translate
+        .as_deref()
+        .map(db::FeedAiMode::parse)
+        .transpose()?;
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::set_folder_ai_modes(conn, id, summary, translate)
+    })
+    .await
 }
 
 /// 添加订阅源：先直连抓一次验证 URL 是有效 feed，成功才入库（不依赖 Miniflux）。
@@ -252,10 +279,9 @@ pub async fn add_feed(
     let parsed = ingestion::parse_feed(&bytes, &feed_url)?;
 
     // 2. 入库（feed 元数据 + 全量条目，source='direct'）
-    let row = {
-        let conn = state.db.lock().await;
+    let row = crate::state::database_work(state.db.clone(), move |conn| {
         persist_new_feed(
-            &conn,
+            conn,
             &feed_url,
             &parsed,
             title.as_deref(),
@@ -266,8 +292,9 @@ pub async fn add_feed(
             summary_mode,
             translate_mode,
             sync_to_backend,
-        )?
-    };
+        )
+    })
+    .await?;
     // OPT-009 B3：勾选同步且已连接时，类型化 subscribe 意图与本地入库同事务
     // 入队——锁外广播订阅写回回执（未入队/未配置时 notify 内部静默或同快照）。
     if sync_to_backend {
@@ -317,11 +344,12 @@ fn persist_new_feed(
     translate_mode: db::FeedAiMode,
     sync_to_backend: bool,
 ) -> AppResult<db::FeedRow> {
+    let tx = crate::db::write_transaction(conn)?;
     // P3[9]（REQ-104）：改用**规范化 URL** 去重（与 sync 侧 pull_feeds 同一判据）。
     // 此前用 find_feed_by_url 精确匹配，而 feeds.feed_url 的 UNIQUE 也是按原串，
     // 于是同一订阅只要饰词不同（https/http、www.、尾斜杠、utm_* 等跟踪参数）就能
     // 被重复添加 → 文章翻倍、已读/收藏状态分裂、未读数与远端对不齐。
-    if db::feed_id_by_url_normalized(conn, feed_url)?.is_some() {
+    if db::feed_id_by_url_normalized(&tx, feed_url)?.is_some() {
         return Err(AppError::new("duplicate", "该订阅地址已存在"));
     }
     let final_title = title
@@ -338,20 +366,19 @@ fn persist_new_feed(
     // folder_not_found。None 路径保持「未分类」兜底不变。
     let folder_id = match folder_id {
         Some(fid) => {
-            if !db::folder_exists(conn, fid)? {
+            if !db::folder_exists(&tx, fid)? {
                 return Err(AppError::new("folder_not_found", "目标分类不存在"));
             }
             fid
         }
-        None => db::ensure_uncategorized_folder(conn)?,
+        None => db::ensure_uncategorized_folder(&tx)?,
     };
     // P3-1（自检 2026-09-29）：入库段全程单事务（unchecked_transaction 用法对齐
     // 同库 mark_all_read_with_enqueue，db/articles.rs）——insert_feed → 清墓碑 →
     // 写抓取状态 → 逐条 upsert 文章 → 按需入队，任一步失败整体回滚（Err 路径
     // Transaction drop 自动回滚）。此前逐条自动提交：文章 upsert 中途失败会留下
     // 「feed 已存在而文章残缺」的半套状态，且重试被「该订阅地址已存在」判重
-    // 拦住，用户必须先删再加。查重/分类校验是纯读，留在事务外不影响原子性。
-    let tx = conn.unchecked_transaction()?;
+    // 拦住，用户必须先删再加。查重与分类校验现在也在写预留内，避免独立同步连接改变前提。
     let feed_id = db::insert_feed_origin_modes(
         &tx,
         feed_url,
@@ -364,25 +391,39 @@ fn persist_new_feed(
         translate_mode,
         "local",
     )?;
+    if let Some(user_title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        db::set_feed_custom_title(&tx, feed_id, user_title)?;
+    }
     // TASK-064 N4：重新添加 = 用户改变主意的最强证据——清掉同 URL 的删除
     // 墓碑。此前墓碑只在 pull 的「远端不再列出」分支清除，重新添加的源被永久
-    // 压制：pull 跳过绑定、其未推送状态 30 天后被 prune_stale_unbound 物理删除。
+    // 压制：pull 跳过绑定、其未推送状态 30 天后被转为 expired_unconfirmed。
     db::remove_feed_tombstone(&tx, feed_url)?;
     db::set_feed_fetch_state(&tx, feed_id, false, None, etag, last_modified)?;
     let dedup = read_dedup_flag(&tx);
     for a in &parsed.articles {
-        db::upsert_article_with_feed(&tx, feed_id, a, dedup)?;
+        db::upsert_article_with_feed_source(
+            &tx,
+            feed_id,
+            &a.article,
+            dedup,
+            a.published_at_clamped,
+        )?;
     }
-    // 勾选「同步到后端」且已连接 → 入队类型化订阅 outbox（feeds 阶段推远端）。
+    // 勾选「同步到账户」且已连接 → 入队类型化订阅 outbox（feeds 阶段推远端）。
     // OPT-014 R1：凭据读取失败 → Err（不得静默当未连接跳过入队）。
     // OPT-009 阶段 B：与本地入库同一事务、携带账号 key/代际；远端确认按
     // (id, generation) 精确出队（由 sync 的订阅执行器处理）。
-    if sync_to_backend {
+    if sync_to_backend && {
+        let protocol = db::get_setting(&tx, "sync_protocol")?
+            .filter(|p| p == "fever" || p == "greader")
+            .unwrap_or_else(|| "greader".into());
+        subscription_write_back_supported(&protocol)
+    } {
         if let Some(ctx) = crate::sync::current_account(&tx)? {
             let folder_label = db::folder_name(&tx, folder_id)?;
             // B2-5：用户/来源给的标题作为**目标**随队项落库（挂载时用真实 t=
             // 写回）；URL 兜底标题不是用户意图（会把 URL 当标题推到远端）→ 不推。
-            let desired_title = (final_title != feed_url).then_some(final_title.as_str());
+            let desired_title = db::explicit_feed_title(&final_title, feed_url);
             db::enqueue_subscribe(
                 &tx,
                 ctx.generation,
@@ -480,7 +521,7 @@ mod tests {
     }
 
     /// N4：重新添加清墓碑——先删源留墓碑，再 persist 同 URL，墓碑必须消失
-    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化物理删除）。
+    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化转过期）。
     #[test]
     fn republishing_a_url_clears_its_tombstone() {
         let conn = test_conn();
@@ -699,7 +740,7 @@ mod tests {
         db::add_feed_tombstone(&conn, "https://f.example/rss").unwrap();
 
         let mut parsed = minimal_parsed();
-        parsed.articles.push(db::NewArticle {
+        parsed.push_article(db::NewArticle {
             guid: "boom".into(),
             url: Some("https://e.example/boom".into()),
             title: "boom".into(),
@@ -944,6 +985,70 @@ mod tests {
         assert_eq!(inherit_count, 1, "库内真值列确实写了 inherit");
     }
 
+    /// P2：Fever 没有订阅写回端点——即使旧前端/恶意调用传 sync_to_backend=true，
+    /// add_feed 也不得写订阅 outbox；GReader 对照仍正常入队。
+    #[test]
+    fn persist_new_feed_fever_never_enqueues_subscription_outbox() {
+        let conn = test_conn();
+        db::set_setting(
+            &conn,
+            "greader_endpoint",
+            "http://127.0.0.1:1/api/greader.php",
+        )
+        .unwrap();
+        db::set_setting(&conn, "greader_username", "t").unwrap();
+        db::set_setting(&conn, "greader_password", "pw").unwrap();
+        db::set_setting(&conn, "sync_protocol", "fever").unwrap();
+
+        let parsed = minimal_parsed();
+        persist_new_feed(
+            &conn,
+            "https://f.example/fever.xml",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            db::FeedAiMode::Inherit,
+            db::FeedAiMode::Inherit,
+            true,
+        )
+        .unwrap();
+        assert!(
+            db::pending_outbox(&conn).unwrap().is_empty(),
+            "Fever 下 add_feed 不得入订阅 outbox"
+        );
+
+        db::set_setting(&conn, "sync_protocol", "greader").unwrap();
+        let parsed_control = ingestion::parse_feed(
+            br#"<?xml version="1.0"?><rss version="2.0"><channel><title>T2</title>
+<item><title>b</title><link>https://e.example/2</link><guid>g2</guid></item>
+</channel></rss>"#,
+            "https://f.example/greader.xml",
+        )
+        .unwrap();
+        persist_new_feed(
+            &conn,
+            "https://f.example/greader.xml",
+            &parsed_control,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            db::FeedAiMode::Inherit,
+            db::FeedAiMode::Inherit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            db::pending_outbox(&conn).unwrap().len(),
+            1,
+            "GReader 对照必须正常入队（证明门控不是恒关）"
+        );
+    }
+
     /// record_feed_edit 的新真值入口：只改一个 mode、其余字段不动；
     /// 显式 off 能压过分类开启（写库层只存选择，解析在前端 resolver——见 Note）。
     #[test]
@@ -998,14 +1103,14 @@ pub fn record_feed_deletion(
     conn: &rusqlite::Connection,
     id: i64,
 ) -> AppResult<Option<(i64, String, i64)>> {
-    let sync_ok = sync_configured(conn)?;
-    let generation = db::sync_generation(conn)?;
-    let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    let tx = crate::db::write_transaction(conn)?;
+    let sync_ok = sync_configured(&tx)?;
+    let generation = db::sync_generation(&tx)?;
+    let (feed_url, remote_id) = db::feed_remote_info(&tx, id)?;
     // B2-R2/R2-3：删除时快照「远端当前 label」的移除基准（本地当前分类名）——
     // 退订未确认前同一 URL 被快速重加时，后继 subscribe 行继承它做 r= 移除基准，
     // 否则远端会残留这个旧 label（挂载只发 a= 是追加分类）。
-    let folder_label = db::feed_folder_label(conn, id)?;
-    let tx = conn.unchecked_transaction()?;
+    let folder_label = db::feed_folder_label(&tx, id)?;
     // A-1：墓碑先落，退订失败也不得让 pull 把已删订阅拉回来
     db::add_feed_tombstone(&tx, &feed_url)?;
     // B2-2：typed 退订意图与墓碑/本地删除同生共死；凭据读取失败 → Err 整体回滚
@@ -1033,10 +1138,9 @@ pub fn record_feed_deletion(
 pub async fn delete_feed(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     // 删除语义（SUB-4/SYN-1）：本地删除 ≠ 强删远端。
     // 不建 remove_feed 队项（该动作从未被 sync.rs 消费，只会累积僵尸队列）。
-    let unsubscribe = {
-        let conn = state.db.lock().await;
-        record_feed_deletion(&conn, id)?
-    };
+    let unsubscribe =
+        crate::state::database_work(state.db.clone(), move |conn| record_feed_deletion(conn, id))
+            .await?;
     // 锁外即时尝试一次订阅写回执行器（与 update_feed 同一 UX 形态）：退订意图
     // 已在上面的事务里持久化，这次尝试失败只是留给下一轮同步重试。
     // 注意：请求成功仅意味着后端接受（2xx），**不代表远端已删除**——墓碑仍只由
@@ -1055,8 +1159,10 @@ pub async fn update_feed_layout(
     id: i64,
     layout: String,
 ) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::update_feed_layout(&conn, id, &layout)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::update_feed_layout(conn, id, &layout)
+    })
+    .await
 }
 
 /// 编辑源：标题/所属分类/布局/AI 开关一次性更新。
@@ -1091,10 +1197,9 @@ pub async fn update_feed(
         .map(db::FeedAiMode::parse)
         .transpose()?;
 
-    let push = {
-        let conn = state.db.lock().await;
+    let push = crate::state::database_work(state.db.clone(), move |conn| {
         record_feed_edit(
-            &conn,
+            conn,
             id,
             title.as_deref(),
             folder_id,
@@ -1103,8 +1208,9 @@ pub async fn update_feed(
             auto_translate,
             summary_mode,
             translate_mode,
-        )?
-    };
+        )
+    })
+    .await?;
     // 锁外 best-effort 推送远端（GReader ac=edit）：OPT-009 阶段 B 起，
     // 编辑已在 record_feed_edit 的同一事务内入队订阅 outbox，此处立即尝试一次
     // 执行器推送（失败静默——队项保留，下一轮同步自动重试；不再出现
@@ -1153,24 +1259,25 @@ pub fn record_feed_edit(
     summary_mode: Option<db::FeedAiMode>,
     translate_mode: Option<db::FeedAiMode>,
 ) -> AppResult<Option<FeedEditPush>> {
+    let tx = crate::db::write_transaction(conn)?;
     // 账号身份 + 代际与凭据同源快照；Err（坏密文）在任何本地副作用之前上抛。
-    let account = crate::sync::current_account(conn)?;
+    let account = crate::sync::current_account(&tx)?;
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
-        if !db::folder_exists(conn, fid)? {
+        if !db::folder_exists(&tx, fid)? {
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
     // 空标题 = 不改名（与 update_feed_full 的回退语义一致）
     let new_title = title.map(str::trim).filter(|t| !t.is_empty());
     // 写前预读推送目标：read 失败 → 整体 Err，且**尚未**触碰本地字段。
-    let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    let (feed_url, remote_id) = db::feed_remote_info(&tx, id)?;
     let new_folder_label = match folder_id {
-        Some(fid) => db::folder_name(conn, fid)?,
+        Some(fid) => db::folder_name(&tx, fid)?,
         None => None,
     };
     let prev_folder_label = if folder_id.is_some() {
-        db::feed_folder_label(conn, id)?
+        db::feed_folder_label(&tx, id)?
     } else {
         None
     };
@@ -1189,7 +1296,6 @@ pub fn record_feed_edit(
     };
     let changed = new_title.is_some() || moved;
 
-    let tx = conn.unchecked_transaction()?;
     db::update_feed_full(
         &tx,
         id,
@@ -1257,8 +1363,10 @@ pub async fn set_feed_ai_flags(
     summary: bool,
     translate: bool,
 ) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_feed_ai_flags(&conn, id, summary, translate)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::set_feed_ai_flags(conn, id, summary, translate)
+    })
+    .await
 }
 
 /// OPT-011：设置源级 AI 开关三态（新真值入口；设置页三态控件等使用）。
@@ -1285,6 +1393,8 @@ pub async fn set_feed_ai_modes(
             "至少给出一个要更新的 AI 开关模式",
         ));
     }
-    let conn = state.db.lock().await;
-    db::set_feed_ai_modes(&conn, id, summary_mode, translate_mode)
+    crate::state::database_work(state.db.clone(), move |conn| {
+        db::set_feed_ai_modes(conn, id, summary_mode, translate_mode)
+    })
+    .await
 }

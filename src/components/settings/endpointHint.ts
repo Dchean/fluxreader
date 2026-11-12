@@ -61,6 +61,6 @@ export function endpointHint(message: string): string {
   if (!isMissingPathError(message)) return message;
   return (
     `${message}（已自动尝试该域名下的常见 API 路径：请确认域名是否正确，` +
-    '以及后端是否已启用 Google Reader / Fever API）'
+    '以及同步服务是否已启用 Google Reader / Fever API）'
   );
 }

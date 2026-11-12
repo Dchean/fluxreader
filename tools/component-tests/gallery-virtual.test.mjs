@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { componentTest, mount, unmount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
-import { installBackend, seedFromRows, mkRow, setCurrentRows, setPlan, resetPlan } from './fixtures.mjs';
+import { installBackend, seedFromRows, mkRow, setCurrentRows, resetPlan } from './fixtures.mjs';
 import {
   GALLERY_CARD_MIN_HEIGHT,
   GALLERY_COLUMN_GAP,
@@ -57,6 +57,16 @@ async function scrollToOffset(act, scroller, top) {
     scroller.dispatchEvent(new Event('scroll'));
   });
   await flush(3);
+  // 浏览器会随容器总高变化夹取 scrollTop；jsdom 的独立 scrollHeight 桩不会。
+  // 旧夹具允许 600 张约 4万 px 的画廊停在 8万 px，那里实际没有可见卡，
+  // 不能拿这个不可达几何要求 Tab 落到屏外最后一张。按生产容器实际高度收敛。
+  for (let i = 0; i < 3; i++) {
+    const extent = Number.parseFloat(scroller.querySelector('.gallery-masonry-grid')?.style.height ?? '');
+    const max = Math.max(0, extent - scroller.offsetHeight);
+    if (!Number.isFinite(extent) || scroller.scrollTop <= max) break;
+    await act(async () => { scroller.scrollTop = max; scroller.dispatchEvent(new Event('scroll')); });
+    await flush(3);
+  }
 }
 
 /** 窗口内挂载的画廊卡 wrapper（.gallery-virtual-item：带 data-index，供 measureElement）。 */
@@ -182,9 +192,21 @@ componentTest('OPT-017C 画廊键盘焦点：跨窗口滚动后仍有可 Tab 卡
     .map((w) => focusableOf(w))
     .filter((el) => el && el.getAttribute('tabindex') === '0');
   assert.equal(tabbables.length, 1,
-    `窗口内应恰有 1 张可 Tab 卡片（实际 ${tabbables.length}）——焦点卡不在窗口时兜底到窗口首卡`);
-  assert.equal(Number(tabbables[0].getAttribute('data-card-index')), firstIndex,
-    '兜底可 Tab 卡应为窗口首卡（保证 Tab 进入的是当前能看到的区域）');
+    `窗口内应恰有 1 张可 Tab 卡片（实际 ${tabbables.length}）——scroll=${scroller.scrollTop}, nodes=${JSON.stringify(wrappers.map(w=>({index:wrapperIndex(w),position:w.style.transform,tab:focusableOf(w)?.tabIndex})))}`);
+  const tabbableWrap = tabbables[0].closest('.gallery-virtual-item');
+  const top = Number(tabbableWrap.style.transform.match(/translateY\(([-\d.]+)px\)/)?.[1]);
+  assert.ok(top >= scroller.scrollTop && top + tabbableWrap.offsetHeight <= scroller.scrollTop + scroller.offsetHeight,
+    '兜底可 Tab 卡应实际完整可见；overscan 的窗口首项可能在屏外');
+  const actionTabs = wrappers.map((wrap) => ({
+    index: wrapperIndex(wrap),
+    tabs: [...wrap.querySelectorAll('button')].map((button) => button.tabIndex),
+  }));
+  const tabbableActions = actionTabs.find(({ index }) => index === wrapperIndex(tabbableWrap));
+  assert.ok(tabbableActions.tabs.every((tab) => tab === 0),
+    `当前可 Tab 卡的两个操作按钮应顺序可达：${JSON.stringify(tabbableActions)}`);
+  assert.ok(actionTabs.filter(({ index }) => index !== wrapperIndex(tabbableWrap))
+    .every(({ tabs }) => tabs.every((tab) => tab === -1)),
+  `屏外 overscan 卡的操作按钮不得进入 Tab 顺序：${JSON.stringify(actionTabs)}`);
 
   /* 反例 2b：方向键按行优先 lanes 的几何语义移动（W4，C-P2-2 修复后口径）：
      ArrowRight/Left = 同排相邻（±1）、ArrowDown/Up = 同列跨排（±列数）；
@@ -276,8 +298,7 @@ componentTest('OPT-017C 画廊灯箱：打开→关闭后滚动位置不动、�
 
 componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、窗口下标不错位、无重复挂载', { timeout: 60000 }, async () => {
   installBackend();
-  /* 本用例覆写 list_articles 的分页行为（keyset 续页）——先复位再覆写，
-     结束（含断言失败路径）必须还原，避免污染后续 App 级用例的启动装载。 */
+  /* 以已加载60/完整120成员的既定会话隔离渲染追加边界；首屏500另有生产会话回归。 */
   resetPlan();
   resetStore();
 
@@ -285,19 +306,7 @@ componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、�
   const firstBatch = pool.slice(0, 60);
   seedFromRows(firstBatch, { layout: 'image' });
   setCurrentRows(pool);
-  /* 假后端按 keyset 续页（与后端 ORDER BY published_at, id 的 newest 口径一致）。 */
-  setPlan({
-    list_articles: (args) => {
-      const a = args?.args ?? {};
-      const sorted = [...pool].filter((r) => r.feed_id === IMAGE_FEED)
-        .sort((x, y) => (Date.parse(y.published_at) - Date.parse(x.published_at)) || (y.id - x.id));
-      const rest = a.last_published != null && a.last_id != null
-        ? sorted.filter((r) => r.published_at < a.last_published
-          || (r.published_at === a.last_published && r.id < Number(a.last_id)))
-        : sorted;
-      return Promise.resolve(rest.slice(0, a.limit ?? rest.length));
-    },
-  });
+  const { createReadingSession, captureReadingQuery } = await import('../../dist-test/store/readingSession.js');
 
   try {
     const { createElement, act } = await import('react');
@@ -312,6 +321,7 @@ componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、�
     const anchorRow = firstBatch[firstBatch.length - 1];
     await act(async () => {
       useAppStore.setState({
+        readingSession: { ...createReadingSession(-1, captureReadingQuery({ layout: 'image', view: 'all', scope: 'all', filter: 'unread', sort: 'newest' }), pool.map(row => String(row.id))), ready: true, loadedCount: 60 },
         articlesExhausted: false,
         articlesLimit: 60,
         articlesCursor: {
@@ -402,7 +412,8 @@ componentTest('OPT-017C 画廊列布局：列分配与列宽/列距公式一致�
   assert.equal(byLane.size, lanes, `首屏应覆盖全部 ${lanes} 列（实际 ${byLane.size}）`);
 
   /* 同列内：左缘完全一致，纵向 top（translateY）严格递增且间隔 = 卡片高 + gap（不重叠）。 */
-  const ys = (w) => Number((w.style.transform.match(/translateY\(([-0-9.]+)px\)/) ?? [])[1]);
+  const ys = (w) => Number((w.style.transform.match(/translateY\(([-0-9.]+)px\)/)
+    ?? w.style.transform.match(/translate3d\(0, ([-0-9.]+)px, 0\)/) ?? [])[1]);
   for (const [lane, list] of byLane) {
     for (let i = 1; i < list.length; i++) {
       assert.equal(list[i].style.left, list[i - 1].style.left, `列 ${lane} 内左缘应一致`);
@@ -433,5 +444,5 @@ componentTest('OPT-017C 画廊列布局：列分配与列宽/列距公式一致�
   assert.equal(entry.container.querySelectorAll('.gallery-card').length, 0, '空集合不应残留挂载卡片');
   assert.equal(entry.container.querySelector('.gallery-masonry-grid')?.style.height, '0px',
     '空集合时网格高度应为 0');
-  assert.ok(entry.container.textContent.includes('暂无匹配内容'), '空态文案应照旧显示');
+  assert.ok(entry.container.textContent.includes('没有未读文章'), '空态文案应说明当前视图没有未读内容');
 });
