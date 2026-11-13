@@ -73,7 +73,7 @@ export type UiSlice = Pick<
    `feed:refresh:10`、`mark:all-read:<context>`；全部带重试动作的调用点都已迁移），
    缺省回落文案——同文案不同实体/上下文不得合并成一条。重试 run 由调用点捕获
    失败时实体、范围、游标或表单草稿；迁移与快照完整性由域回归 (e9)/OPT-020 钉住。
-   取舍与替代方案见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md。 */
+   取舍与替代方案见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md。 */
 export const ERROR_CENTER_MAX = 20;
 export const ERROR_CENTER_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -126,7 +126,7 @@ export function clearToastTimers() {
 export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get) => {
   // 每个 store 单调递增；close、单图打开和新请求都使旧响应失效。测试清状态也不重用代次。
   let galleryRequestId = 0;
-  // Note: 集合/请求归灯箱持有，不改阅读成员与正文缓存 — 见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md
+  // Note: 集合/请求归灯箱持有，不改阅读成员与正文缓存 — 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md
   const loadGallery = async (entry: ArticleEntry, previous: GalleryLightboxState | null) => {
     if (get().libraryRestoreBusy) return;
     const libraryGeneration = get().libraryGeneration;

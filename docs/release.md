@@ -21,7 +21,7 @@ main bump 后 dev 版本短暂落后是分支内容一致约定的临时例外�
 
 ## 说明来源与格式
 
-新版本 Release 正文以 annotated tag 附注为唯一来源。工作流通过 GitHub API 读取 tag 对象 `message` 并原样传递；轻量 tag 或空附注会失败。附注作为数据编码传递，不插进 shell 命令。手动重试同样只能在 tag ref 上运行：`gh workflow run release.yml --ref vX.Y.Z`；在分支上手动运行会失败，不再生成静态回退说明。工作流须先存在于默认分支，手动运行才可用。
+新版本 Release 正文以 annotated tag 附注为唯一来源。工作流通过 GitHub API 读取 tag 对象 `message` 并原样传递；轻量 tag 或空附注会失败。附注作为数据编码传递，不插进 shell 命令。手动重试同样只能在 tag ref 上运行：`gh workflow run release.yml --ref vX.Y.Z`；在分支上手动运行会失败。
 
 ```text
 FluxReader vX.Y.Z
@@ -41,7 +41,7 @@ FluxReader vX.Y.Z
 - …
 ```
 
-按实际内容取舍小节，不写提交数、门禁数字、审查流程或 TASK/REQ 编号；内部证据留在对应验收记录。版本范围或提交数如用于内部核对，必须用 Git 实测，不能写进用户发布说明充当收益。
+按实际内容取舍小节，不写提交数、门禁数字、审查流程或 TASK/REQ 编号；内部证据留在对应验收记录。版本范围或提交数如用于内部核对，必须用 Git 实测，不能写进用户发布说明充当收益。提交信息格式见 [AGENTS.md](../AGENTS.md)。
 
 ## 草稿与失败恢复
 
@@ -61,10 +61,6 @@ FluxReader vX.Y.Z
 
 不重写历史提交哈希或重打历史 tag。这样会破坏既有 SHA 引用，并可能触发旧 Release 重构建、覆盖既有资产；旧提交也未必通过当前门禁。
 
-2026-11-02 曾对 v0.8.0–v0.18.7 的 28 个 Release web 正文作面向用户的规范化，历史 tag 附注未动。因此这些版本允许 web 正文与旧附注不同；“来源单点”约束后续新发布，不能倒称旧文本一直相同。该历史决定见[文案与提交史边界](../.agents/notes/implemented/process/2026-11-02-历史文案规范化与提交史边界.md)。本次文档整理没有重新编辑这些外部 Release。
+2026-11-02 曾对 `v0.8.0`–`v0.18.7` 的 28 个 Release web 正文作面向用户的规范化，历史 tag 附注未动。因此这些版本允许 web 正文与旧附注不同；“来源单点”约束后续新发布，不能倒称旧文本一直相同。该历史决定见[文案与提交史边界](../.agents/notes/implemented/process/2026-11-02-历史文案规范化与提交史边界.md)。本次文档整理没有重新编辑这些外部 Release。
 
 需要明确授权修正某个旧版 web 正文时使用 `gh release edit vX.Y.Z --notes-file <正文文件>`，不重打 tag。原由见[发布说明来源决定](../.agents/notes/implemented/process/2026-09-29-发布说明取自-tag-附注.md)。
-
-## 提交信息
-
-`<type>(<scope>): <中文主题>`，type 为 feat / fix / docs / style / refactor / perf / test / build / ci / chore。主题一行说清内容，细节与动机放正文；破坏性变更以 `BREAKING CHANGE:` 开头说明。

@@ -92,7 +92,7 @@ async fn resolve_close(
         /* 设置页的开关镜像由前端在 `answerCloseAsk` 调用点自行同步
         （store/slices/ui.ts，本次会话即时一致；下次启动由 bootstrapSettings
         恢复）。OPT-017F：原 `close-resolved` emit 全仓零监听，已删除——见
-        .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
+        .agents/notes/implemented/simplification/2026-11-13-零消费清理.md。 */
     }
     if let Some(win) = app.get_webview_window("main") {
         if to_tray {

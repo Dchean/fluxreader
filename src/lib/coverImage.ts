@@ -1,5 +1,5 @@
 // Note: Only qualified permanent failures may clear persistent cover metadata — see
-// .agents/notes/implemented/feature/2026-10-07-封面代理与失败占位.md
+// .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 import { api } from './api';
 import { imageEpoch, imagesSuspended, IMAGE_LIMITS, resetImagesForTest, type ImageLease } from './imageProxy';
 const reported = new Map<string, number>();

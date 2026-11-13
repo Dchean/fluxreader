@@ -458,7 +458,7 @@ pub(super) fn merge_pulled_entry(
     }
 
     // 已知 entry 的稀疏回包可走①；新身份没有归属则不能消费列举窗口。
-    // Note: 精确身份与 URL 兜底边界 — 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
+    // Note: 精确身份与 URL 兜底边界 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
     let Some(feed_remote) = feed_remote else {
         return Err(crate::error::AppError::new(
             "protocol",

@@ -402,7 +402,7 @@ pub(super) async fn push_feeds(
             // 字符串与本地入库的 URL 常有尾斜杠/www. 差异，精确匹配会漏判成
             // 「本地已删除」→ 永不绑定。DB 错误不再 `.ok()` 吞掉：沿用 folder_label
             // 的处置（warn + report.errors + continue，队项不进 done，下轮重试）。
-            // Note: 绑定查找必须走规范化 URL 且 DB 错误不得吞 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅绑定规范化与旁路16MiB界与SMTC浮点饱和.md
+            // Note: 绑定查找必须走规范化 URL 且 DB 错误不得吞 — 见 .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md
             match db::feed_id_by_url_normalized(conn, &url) {
                 Ok(Some(local_id)) => {
                     // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull

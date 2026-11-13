@@ -103,7 +103,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       if (get().libraryGeneration === generation) callback(...args);
     };
   };
-  /* Note: 正文重试只认失败文章 id；allowDetached 允许视图外/已切走的目标继续走 by-id 详情链 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md */
+  /* Note: 正文重试只认失败文章 id；allowDetached 允许视图外/已切走的目标继续走 by-id 详情链 — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md */
   const retryArticleContentFor = (id: string): void => {
     get().ensureArticleContent(id, { extractFulltext: true, allowDetached: true });
   };
@@ -134,7 +134,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     return 'current';
   };
 
-  // Note: 全文重试只使用失败时文章 id，不得回读 activeArticleId — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  // Note: 全文重试只使用失败时文章 id，不得回读 activeArticleId — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
   const extractFulltextFor = (
     id: string,
     opts?: { announce?: boolean; allowDetached?: boolean; url?: string },
@@ -370,7 +370,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          但复位前打开新文章会让自动翻译触发（!st.translating）被他篇在途误拦
          （effect 依赖不含 translating，错过即整篇不再自动翻译）；同篇在途仍由
          translatingIds[id] 守卫，复位不构成双发窗口。
-         — 见 .agents/notes/implemented/bug-fix/2026-11-01-translating终态复位与全局单布尔.md */
+         — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
       translating: false,
     }));
     /* 打开文章：触发「智能全文」判定（摘要型源才提取原文；列表卡片水合不触发） */

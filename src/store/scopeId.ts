@@ -1,4 +1,4 @@
-// Note: 单点解析的收敛与依赖方向（叶子模块、selectors re-export / internals import） — 见 .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md
+// Note: 单点解析的收敛与依赖方向（叶子模块、selectors re-export / internals import） — 见 .agents/notes/implemented/simplification/2026-11-13-零消费清理.md
 /* ============================================================
    OPT-017F：字符串 id → 后端数字 id 的单点解析
 

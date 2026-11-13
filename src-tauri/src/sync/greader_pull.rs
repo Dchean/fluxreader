@@ -271,7 +271,7 @@ pub(super) async fn pull_entries_greader(
         return Ok(());
     }
 
-    // Note: published 是源发布时间，不能当服务端入库墙钟；晚到旧文由完整 unread/starred 集合回补 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+    // Note: published 是源发布时间，不能当服务端入库墙钟；晚到旧文由完整 unread/starred 集合回补 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
     // ot 在固定 Miniflux 实现上是 published > ot，起点墙钟只缩小普通增量窗口。
     // 它不能保证抓到晚收录旧文或旧文章状态变化；完整权威集合负责状态与缺文发现。
     // 已读且未收藏的旧文章仍由 full 的 ot=0 列举覆盖，不把发布时间用作冲突时钟。
@@ -451,7 +451,7 @@ pub(super) async fn pull_entries_greader(
         let starred_ids = authority.starred.clone();
         authority_cursor_failures +=
             usize::from(curr_unread.is_none()) + usize::from(starred_ids.is_none());
-        // Note: 两个完整集合都补缺身份/正文，保持 pending/版本守卫 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+        // Note: 两个完整集合都补缺身份/正文，保持 pending/版本守卫 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
         if let Some(ids) = curr_unread.as_ref() {
             if !backfill_authority_collection(db, session, client, "unread", ids, &mut maps, report)
                 .await?

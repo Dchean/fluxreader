@@ -1,4 +1,4 @@
-// Note: 「远端已确认」不可累计溯源，不得虚构总数 — 见 .agents/notes/implemented/feature/2026-10-06-同步四态与失败可见性.md
+// Note: 「远端已确认」不可累计溯源，不得虚构总数 — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
 // Note: 队列生命周期、local-only 保留与 waiting 口径 — 见 .agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md
 use super::*;
 use rusqlite::params;
@@ -190,7 +190,7 @@ pub fn take_sync_queue(conn: &Connection) -> AppResult<Vec<SyncQueueItem>> {
 /// 锁，网络往返只由 PUSH_LOCK 串行保护，而本地入队不经过 PUSH_LOCK——窗口内
 /// 复用 id 会让旧计划返回后按 id prune 误删新的用户意图（审计 F01；v18 起
 /// sync_queue 为 AUTOINCREMENT，见 db/migrations.rs 的 v18 迁移）。
-// Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
+// Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 pub fn prune_sync(conn: &Connection, ids: &[i64]) -> AppResult<()> {
     let _writer = crate::db::writer_guard(conn)?;
     if ids.is_empty() {
@@ -255,7 +255,7 @@ pub struct ExpiredRetryResult {
     pub remaining_expired: usize,
 }
 
-// Note: 恢复复核摘要代际、按当前本地目标创建新操作身份 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+// Note: 恢复复核摘要代际、按当前本地目标创建新操作身份 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 pub fn retry_expired_intents(
     conn: &mut Connection,
     expected_account_generation: i64,
@@ -383,7 +383,7 @@ pub fn mark_push_verification_failed(conn: &Connection, failed: &[(i64, String)]
 /// 本地读/藏意图供用户处理。当前 GReader/Fever 读回端点没有权威删除信号，
 /// 200 空/短响应不得调用本入口；它保留给未来端点或明确的协议错误分类。
 // Note: 该入口只接受可证明的目标不存在；空/短响应走 verification/inconclusive — 见
-// .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
+// .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 pub fn mark_queue_target_missing(conn: &Connection, failed: &[(i64, String)]) -> AppResult<()> {
     let _writer = crate::db::writer_guard(conn)?;
     if failed.is_empty() {

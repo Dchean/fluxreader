@@ -50,7 +50,7 @@ interface MarkAllReadContext {
 function markAllReadContextKey(
   context: Omit<MarkAllReadContext, 'key'>,
 ): string {
-  // Note: 范围类失败按“范围 × 视图 × 布局 × 时间界”分条 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  // Note: 范围类失败按“范围 × 视图 × 布局 × 时间界”分条 — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
   return [
     'mark:all-read',
     context.scope,

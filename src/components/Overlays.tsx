@@ -395,7 +395,7 @@ export function Lightbox() {
   const imageUrl = current && gallery.status === 'ready' ? gallery.urls[gallery.index]
     : current && gallery.status === 'loading' ? gallery.firstImageUrl : null;
   const canStep = current && gallery.status === 'ready' && gallery.urls.length > 1;
-  // Note: 只接回本灯箱状态转换所失去的焦点，不抢其它模态/portal 的焦点 — 见 .agents/notes/implemented/feature/2026-11-01-模态焦点陷阱与dialog语义.md
+  // Note: 只接回本灯箱状态转换所失去的焦点，不抢其它模态/portal 的焦点 — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
   useLayoutEffect(() => {
     if (!lightboxUrl) { focusedNodeRef.current = null; return; }
     const panel = overlayRef.current;
@@ -961,7 +961,7 @@ export function CloseAskDialog() {
   const dismissCloseAsk = useAppStore((s) => s.dismissCloseAsk);
   const [remember, setRemember] = useState(true);
 
-  // Note: 遮罩/Esc 只取消询问，只有显式按钮提交关闭动作 — 见 .agents/notes/implemented/bug-fix/2026-11-04-关闭取消语义与授权关闭守卫.md
+  // Note: 遮罩/Esc 只取消询问，只有显式按钮提交关闭动作 — 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md
   return (
     <ModalOverlay open={visible} onClose={dismissCloseAsk} ariaLabel="关闭 FluxReader">
       <div className="mini-dialog">

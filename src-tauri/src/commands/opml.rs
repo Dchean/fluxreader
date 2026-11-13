@@ -89,7 +89,7 @@ fn import_feeds(
         let folder_id = match folder_ids.get(name) {
             Some(id) => *id,
             None => {
-                // Note: 导入复用既有同名目录而非静默新建 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
+                // Note: 导入复用既有同名目录而非静默新建 — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md
                 let id = match db::find_folder_by_name(&tx, name)? {
                     Some(existing) => existing,
                     None => db::create_folder(&tx, name, "article")?,

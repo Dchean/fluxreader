@@ -775,7 +775,7 @@ let countsReconcileAfterWrites = false;
     （commands/articles.rs），快照读取与写提交的服务端先后序由锁竞争决定，前端
     无法从响应到达顺序推断快照是否已含该写——「取数窗口内发生过结算」⇒ 快照
     相对终态可能陈旧，拒落并补一次权威对账（宁可多一次 IPC，不落可能陈旧的数字）。
-    Note: 计数落地第三判据（写结算序号）— 见 .agents/notes/implemented/bug-fix/2026-10-31-计数落地写结算判据与窄列视觉修复.md */
+    Note: 计数落地第三判据（写结算序号）— 见 .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md */
 let localFlagWriteSettleSerial = 0;
 
 /** TASK-B3：读当前写结算序号（计数读取发起时快照、落地时比对，判据见上）。 */

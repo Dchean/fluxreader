@@ -41,7 +41,7 @@ export function mergePromptsOnly(persisted: string | null, prompts: PromptFields
    selectModel）共用一条模块级在途链。前序写完成后，队列里的后写者才执行——
    执行时**重新读取**库内最新配置、只重放自己的字段变更（mergeConfigFields），
    并发时不再发生「后完成者用旧快照整包覆盖先写者」。
-   Note: 取舍与替代方案 — 见 .agents/notes/implemented/bug-fix/2026-11-01-AI配置读改写卡内串行化.md */
+   Note: 取舍与替代方案 — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
 let aiConfigWriteChain: Promise<void> = Promise.resolve();
 let aiConfigLibraryEpoch = 0;
 

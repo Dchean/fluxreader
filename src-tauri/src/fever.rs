@@ -479,7 +479,7 @@ impl FeverClient {
         let groups_env = self.call("groups", &[]).await?;
 
         // Note: Fever 集合字段按 action 校验；缺失是协议错误，显式空数组合法 — 见
-        // .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
+        // .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
         let feeds = feeds_env.feeds.ok_or_else(|| {
             AppError::new(
                 "protocol",

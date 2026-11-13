@@ -23,7 +23,7 @@ pub async fn list_folders(state: State<'_, AppState>) -> AppResult<Vec<db::Folde
 /// 不拦截会把手工创建静默分裂成两个同名目录（订阅分裂、快照按名歧义放大）；
 /// 类型化 duplicateFolderName 供前端按 code 识别。内部创建路径不走本命令：
 /// sink 与 pull 查重复用；schema2 身份优先，同名不同身份按设计并存（plan.rs 预警）。
-/// Note: 目录重名的复用与同名拒绝 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
+/// Note: 目录重名的复用与同名拒绝 — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md
 fn create_folder_checked(conn: &rusqlite::Connection, name: &str, layout: &str) -> AppResult<i64> {
     let name = name.trim();
     if name.is_empty() {

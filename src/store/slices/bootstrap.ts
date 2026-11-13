@@ -1,6 +1,6 @@
 import { resetImagesForLibraryRestore, resumeImages } from '../../lib/imageProxy';
 import { resetCoverReports } from '../../lib/coverImage';
-// Note: 会话成员固定、属性按 ID 回读 — 见 .agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md
+// Note: 会话成员固定、属性按 ID 回读 — 见 docs/architecture.md
 import type { StateCreator } from 'zustand';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListArgs } from '../../lib/api';

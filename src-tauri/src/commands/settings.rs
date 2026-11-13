@@ -20,7 +20,7 @@ pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<O
 /// 对落盘密文透明解密（db::get_setting），等于把静态加密的明文交回 webview；
 /// 前端被攻破或任何恶意 IPC 调用即拿走凭据。合法消费方走专用命令
 /// （get_ai_config / save_ai_config、本地资料库与 RSS 同步连接的后端内核）。
-// Note: 通用 IPC 敏感键收口 — 见 .agents/notes/implemented/bug-fix/2026-10-31-安全横向面收口.md
+// Note: 通用 IPC 敏感键收口 — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md
 pub fn read_setting(conn: &rusqlite::Connection, key: &str) -> AppResult<Option<String>> {
     if crate::credentials::is_sensitive_key(key)
         || key.starts_with("local_sync_peer_")
@@ -647,7 +647,7 @@ async fn fetch_image_inner(
                     // decode_body_bytes。超限 = responseTooLarge（与 favicon/
                     // 全文提取同口径）；前端对 fetchImage 失败统一 catch 降级
                     // （可重试占位）；预算、取消与网络失败不能清持久封面。
-                    // Note: 图片代理旁路闭合 — 见 .agents/notes/implemented/bug-fix/2026-11-02-封面图流式收体闭合旁路.md
+                    // Note: 图片代理旁路闭合 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
                     let bytes = crate::ingestion::read_body_capped(resp, MAX_IMAGE_BYTES).await?;
                     return Ok(bytes);
                 }

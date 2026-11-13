@@ -39,7 +39,7 @@ export function AiTab() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   /* 初始回读只拥有尚未被用户意图接管的字段；编辑和显式操作均会接管。
      接管直到卸载才结束，成功/失败不能把字段重新交给更早的初始快照。
-     Note: .agents/notes/implemented/bug-fix/2026-11-01-AI配置读改写卡内串行化.md */
+     Note: .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
   const cfgRef = useRef(cfg);
   const claimedFields = useRef(new Set<keyof AiConfigState>());
   const endpointRevision = useRef(0);

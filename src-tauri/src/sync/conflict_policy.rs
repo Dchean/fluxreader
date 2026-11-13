@@ -45,7 +45,7 @@
 //! 本地四种动作原子写入同一源的全部等价成员、版本和队项；每个远端 ID 独立 ACK。
 //! 组内任一成员该字段仍 pending 时，陈旧远端快照不能回滚显示组。不同源互不传播。
 //! Note: 2026-11-09 新契约替代历史跨源 read-wins — 见
-//! .agents/notes/proposed/architecture/2026-11-09-源内等价组与持久条目状态.md
+//! docs/architecture.md
 
 use rusqlite::Connection;
 

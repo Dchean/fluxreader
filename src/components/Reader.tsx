@@ -81,7 +81,7 @@ export function Reader() {
      RSS 原文/提取全文/已消毒译文，未经图片代理——显示代理 base64 会冒充源码），
      渲染态按节点获取图片资源，不重写正文缓存。流式未消毒译文两路都是纯文本。
      Note: 为何源码不能继续走 dangerouslySetInnerHTML、分离契约与取舍 —— 见
-     .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
+     .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md */
   const renderHtml = isShowingTranslatedProse
     ? body.translatedContent
     : baseHtml;

@@ -52,7 +52,7 @@
 //! OPT-015N 严格驱动（真实 HWND 消息级观测）验收，单测不冒充原生证据。
 //!
 //! Note: 决策、替代方案与证据边界见
-//! .agents/notes/implemented/bug-fix/2026-10-08-窗口首帧恢复与媒体命令幂等.md
+//! .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md
 
 use tauri::Manager;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};

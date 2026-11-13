@@ -466,7 +466,7 @@ pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> Ap
 
 /// 订阅拉取的强身份匹配与短事务更新。URL 仅兜底未绑定行；已绑定远端源
 /// 可改 URL，保留本地 id、布局、分类和文章。歧义/唯一 URL 冲突整段回滚。
-// Note: 源与条目的强身份边界 — 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
+// Note: 源与条目的强身份边界 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 pub fn match_remote_feed(
     conn: &Connection,
     remote_id: i64,
@@ -845,7 +845,7 @@ pub fn get_article_remote_id(conn: &Connection, article_id: i64) -> AppResult<Op
 /// 同名多条（存量重复目录，folders.name 无 UNIQUE）时取 id/rowid 升序最旧
 /// 一条：按名映射的落点必须确定且跨次一致，与 config_sync 的
 /// list_folder_id_by_name、ensure_uncategorized_folder 同一不变量。
-/// Note: 目录重名的复用与落点确定性 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
+/// Note: 目录重名的复用与落点确定性 — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md
 pub fn find_folder_by_name(conn: &Connection, name: &str) -> AppResult<Option<i64>> {
     let id = conn
         .query_row(

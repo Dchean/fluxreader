@@ -17,7 +17,7 @@
 //! 全部队项（[`abandon_stale_outbox`]）；同身份重连与断开保留。旧「换号暂停、
 //! 回原账号恢复」的语义已放弃（2026-11-02 产品拍板：已消失账号的 pending 行
 //! 不再永久滞留）。
-// Note: 同身份保留、身份切换清账（语义放弃的取舍） — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
+// Note: 同身份保留、身份切换清账（语义放弃的取舍） — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 //!
 //! ## 合并与确认
 //! 连续修改合并「最后 desired」= 删除同 URL 旧行 + 插入新行。id 为 AUTOINCREMENT
@@ -26,7 +26,7 @@
 //! 移动的移除基准（wire 的 `r=`）必须指向「远端实际持有的 label」：未发送链折叠
 //! 保留链起点；发送成功后由执行器把替代行重定为已发送目标（B1-R3 复审 P2-1）。
 // Note: 移除基准/合并与重定语义 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
-// Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
+// Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 
 use super::*;
 use rusqlite::{params, OptionalExtension};
@@ -459,7 +459,7 @@ pub fn rebind_outbox_generation_for_ids(
 /// 旧语义「换号暂停、回原账号恢复」就此放弃：已消失账号的 pending 行连同
 /// attempts/last_error 不再永久滞留；代价是 A 在途 quick_add 已建的远端订阅
 /// 可能成为无人退订的孤儿（取舍见 Note）。
-// Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
+// Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 pub fn abandon_stale_outbox(conn: &Connection, current_key: &str) -> AppResult<usize> {
     let _writer = crate::db::writer_guard(conn)?;
     let n = conn.execute(
