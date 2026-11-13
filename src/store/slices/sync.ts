@@ -427,7 +427,7 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
 
       let stage: ManualSyncStage = 'feeds';
       /* Note: 手动同步的阶段/远端确认/终态必须在同一推进点更新 — 见
-         .agents/notes/implemented/feature/2026-10-06-同步四态与失败可见性.md */
+         .agents/notes/implemented/feature/2026-11-13-前端交互契约.md */
       advance(stage);
       const syncFailures: string[] = [];
       let failureStage: ManualSyncStage = 'states';

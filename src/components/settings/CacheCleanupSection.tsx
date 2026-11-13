@@ -6,7 +6,7 @@ import { CACHE_PERIODS } from './shared';
 
 /* ---------- 缓存清理（文章 / AI 产物） ---------- */
 
-// Note: 未读永不清理与远端回灌语义 — 见 .agents/notes/implemented/bug-fix/2026-11-05-缓存清理语义与未读保护.md
+// Note: 未读永不清理与远端回灌语义 — 见 .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md
 export function CacheCleanupSection() {
   const showToast = useAppStore((s) => s.showToast);
   const dataMode = useAppStore((s) => s.dataMode);

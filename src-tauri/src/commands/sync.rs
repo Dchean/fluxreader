@@ -380,7 +380,7 @@ fn commit_account_settings(
         // 订阅 outbox 生命周期终点：身份切换即清旧账号队项（同一事务、
         // bump 代际之前）。旧「换号暂停、回原账号恢复」语义就此放弃——
         // 已消失账号的 pending 行不再永久滞留。
-        // Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
+        // Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
         let new_key = crate::sync::account_key(&plan.protocol, &plan.endpoint, &plan.username);
         let removed = db::abandon_stale_outbox(&tx, &new_key)?;
         if removed > 0 {
@@ -400,7 +400,7 @@ fn commit_account_settings(
         // 断开前的身份：本次连接身份不同则一并清理（对齐 identity_changed
         // 路径，旧账号删除意图不得压制新账号同 URL 订阅——F05）；重连同一
         // 身份则保留（TASK-055 防复活）。身份判定复用 account_key 单点指纹。
-        // Note: 断开→新身份清理墓碑 — 见 .agents/notes/implemented/bug-fix/2026-11-01-断开重连墓碑身份见证.md
+        // Note: 断开→新身份清理墓碑 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
         if let Some(last_key) = db::get_setting(&tx, LAST_DISCONNECTED_ACCOUNT_KEY)? {
             let new_key = crate::sync::account_key(&plan.protocol, &plan.endpoint, &plan.username);
             if last_key != new_key {

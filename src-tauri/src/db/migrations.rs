@@ -1,5 +1,5 @@
 //! Current format initialization. Old files are refused before WAL or credential writes.
-// Note: 新格式不自动升级/删除旧库 — 见 .agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md
+// Note: 新格式不自动升级/删除旧库 — 见 docs/architecture.md
 use super::*;
 use crate::error::AppError;
 

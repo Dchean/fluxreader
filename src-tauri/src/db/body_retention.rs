@@ -1,5 +1,5 @@
 //! Device-local body cache maintenance. Never changes read/star, identity or wire state.
-//! Note: .agents/notes/implemented/bug-fix/2026-11-05-缓存清理语义与未读保护.md
+//! Note: .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md
 use super::*;
 use crate::error::AppError;
 use rusqlite::params;

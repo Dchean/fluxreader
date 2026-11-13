@@ -283,7 +283,7 @@ fn smart_dedup_on(_conn: &Connection) -> bool {
     true
 }
 
-// Note: 源内非空RSS内容等价组；真实身份保留，四向动作同组事务 — 见 .agents/notes/proposed/architecture/2026-11-09-分区阅读与源内身份及持续同步契约.md
+// Note: 源内非空RSS内容等价组；真实身份保留，四向动作同组事务 — 见 docs/architecture.md
 const SAME_RSS_GROUP: &str = "b.feed_id = a.feed_id AND a.rss_content_id IS NOT NULL AND b.rss_content_id = a.rss_content_id AND b.title = a.title AND COALESCE(b.enclosure_url, '') = COALESCE(a.enclosure_url, '') AND COALESCE(b.enclosure_mime, '') = COALESCE(a.enclosure_mime, '')";
 const DIRECT_VISIBLE_GROUP_MEMBER: &str =
     "(b.is_starred=1 OR COALESCE((SELECT active FROM feeds WHERE id=b.feed_id),0)=1)";
@@ -1223,7 +1223,7 @@ pub(crate) fn purge_remote_data_in(tx: &rusqlite::Transaction<'_>) -> AppResult<
 /// 下一次全量同步会按服务器状态重新拉回（Miniflux 端仍是 unread），数据
 /// 打架等于白删；scope='ai' 只清 AI 摘要与翻译缓存（正文保留，重新打开
 /// 可再生成）。返回 (删文章数, 清 AI 字段数)。
-// Note: 清理边界与远端回灌文案 — 见 .agents/notes/implemented/bug-fix/2026-11-05-缓存清理语义与未读保护.md
+// Note: 清理边界与远端回灌文案 — 见 .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md
 pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
     let tx = crate::db::write_transaction(conn)?;
     // P3[5]（REQ-104）：cutoff 此前是 datetime('now','-N days','localtime')，而 published_at
@@ -2422,7 +2422,7 @@ pub struct ReadWriteReceipt {
     pub feed_id: i64,
 }
 
-// Note: 状态写入与同步入队必须同事务；批量路径全有全无 — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
+// Note: 状态写入与同步入队必须同事务；批量路径全有全无 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 /// 已读状态「写入 + 入队」的事务内核（TASK-108）：调用方负责事务边界——
 /// 单条入口 [`set_read_with_enqueue`] 与批量入口 [`set_read_bulk_with_enqueue`]
 /// 各自开事务后调用本函数。语句顺序与参数同 commands 层既有逐条提交形态
@@ -2615,7 +2615,7 @@ pub fn set_read_bulk_with_enqueue(
 ///
 /// 失效上报按当前图片URL精确CAS对全来源清本机封面，不推远端；成功缓存由
 /// 同一AppState持有并随失败上报撤销，避免刚清空又把同一个坏缓存填回。
-// Note: 覆盖面扩展与请求预算的完整理由 — 见 .agents/notes/implemented/feature/2026-10-16-封面补全覆盖面与预算边界.md
+// Note: 覆盖面扩展与请求预算的完整理由 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 pub fn articles_without_cover(
     conn: &Connection,
     limit: i64,

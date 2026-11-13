@@ -1,4 +1,4 @@
-// Note: 图片编码bytes预算与使用中URL租约 — 见 .agents/notes/implemented/feature/2026-10-07-封面代理与失败占位.md
+// Note: 图片编码bytes预算与使用中URL租约 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 import { api, extractErrorCode } from './api';
 
 const PROXY_HOSTS = new Set(['cdnfile.sspai.com', 'rssfile.sspai.com']);

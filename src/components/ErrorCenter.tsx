@@ -10,7 +10,7 @@ import { ModalOverlay } from './primitives';
    普通 toast 不经过这里；面板开态 errorCenterOpen 已登记进浮层让路清单
    （shortcutYield.ts）并由 App 的 Esc 链关闭。
    上限/去重键/重试消费语义与取舍见
-   .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+   .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
    ============================================================ */
 
 export function ErrorCenterDialog() {

@@ -15,7 +15,7 @@
 //! 5. 生命周期链：A 重新入队 → 断开（行保留）→ 同身份重连（行仍在、恢复可见）
 //!    → 换用户名重连（旧行清账）。
 //!
-//! Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
+//! Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 //!
 //! 运行：cargo test --test opt009_phaseb3_e2e
 

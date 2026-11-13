@@ -1,6 +1,6 @@
 import { useEffect, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
 
-// Note: 模态焦点陷阱契约与归因（含「为什么 trap 现在做」） — 见 .agents/notes/implemented/feature/2026-11-01-模态焦点陷阱与dialog语义.md
+// Note: 模态焦点陷阱契约与归因（含「为什么 trap 现在做」） — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',

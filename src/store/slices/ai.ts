@@ -275,7 +275,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     /* 清除×流式互斥的自愈侧：流式在途期间标记被任何路径丢掉（如 clearAiProduct
        的 await 返回后删除），下一个 delta 必须先补回标记再追加——
        「凡 translatedContent 可能含未消毒 delta，rawTranslatedIds[id] 必为 true」
-       — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+       — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
     if (field === 'translatedContent' && get().rawTranslatedIds[id] !== true) {
       set((st) => (st.rawTranslatedIds[id] === true
         ? st
@@ -850,7 +850,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
                切走时三处复位全被拦下，布尔永久卡 true（自动翻译触发与错误行
                均被阻断）。并发他篇仍在生成时本复位会提前收掉共享布尔，按 id
                在途真值在 translatingIds（五态/流式渲染消费它），展示态不受影响。
-               — 见 .agents/notes/implemented/bug-fix/2026-11-01-translating终态复位与全局单布尔.md */
+               — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
             return {
               translating: false,
               translatingIds: nextIds,
@@ -997,7 +997,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
       /* 清除×流式互斥的硬闸侧：该 (条目, 产物) 有在途请求（验签+条件生成整链）
          时拒绝清除——否则 await 返回后删除 rawTranslatedIds，后续未消毒 delta
          走 HTML 渲染（XSS 窗口）；后端清除也会与生成落库互相复活/清空。
-         — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+         — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
       if (aiInFlight.has(aiKeyOf(id, kind))) {
         /* 文案不承诺「停止」：全库无停止生成入口，挂死的 IPC 会让该
            (条目, 产物) 的清除被永久拒绝，只给可自愈的出路。 */
@@ -1031,7 +1031,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         /* 未消毒标记只属于译文产物：summary 清除不得跨 kind 删除——否则译文侧
            「半截+标记」的失败重试语义被拆开，无后续 delta 的未消毒半截长期
            滞留 Timeline 的 HTML 渲染路径（持续态，非竞态窗口）。
-           — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+           — 见 .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md */
         if (kind === 'translation') delete nextRaw[id];
         const prev = previousStatus;
         const status = {

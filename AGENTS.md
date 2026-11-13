@@ -43,16 +43,9 @@ git push origin main
 
 ## 门禁
 
-| 检查 | 在哪跑 |
-| --- | --- |
-| `npm run lint`（oxlint）、`npm run build`（tsc + vite）、`npm run test:frontend`（前端状态回归）、`npm run test:components`（组件真实挂载回归） | 本地与 CI |
-| `npm run test:ui-layout`（Windows Edge headless + CDP：五布局 footer、七类社交正文（长文、data URI 图、HTTP 延迟图、HTTP 失败图、视频、短文、空正文）的固定外高/空态/展开往返/裁切/横向溢出、视频 `readyState=0 → metadata 自然尺寸 → poster 撑高`、1440×900 与 980×640；画廊两视口分波异步自然比例图片与指定可见锚漂移；另加 1536×900 / 1280×800 / 980×640 三档 J/K、Tab/Space、源行 padding 鼠标热区、AX 与响应式回归） | 本地与 CI（windows-latest `ui-layout` job；失败证据由 artifact 上传） |
-| `cargo fmt --all -- --check`（在 `src-tauri/` 下执行） | 本地与 CI |
-| `cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo check`（在 `src-tauri/` 下执行） | CI（windows-latest）；当前工作区的 `tmp/rust-env/` 隔离环境亦可本地执行 |
+本地必跑 `npm run lint`、`npm run build`、`npm run test:frontend`、`npm run test:components`、`npm run test:ui-layout`（Windows Edge headless）与 `cargo fmt --all -- --check`（在 `src-tauri/` 下执行）。Rust 全量 `cargo clippy --all-targets -- -D warnings`、`cargo check`、`cargo test --no-fail-fast` 由 CI 的 windows-latest job 承担，本地可用 `tmp/rust-env/` 隔离环境执行。
 
-2026-11-03 起，当前工作区的隔离 Rust/MSVC 环境（`tmp/rust-env/`，rustc/cargo `1.98.1` + clang-cl/lld-link）已可真实执行 `cargo test` / `cargo check` / `cargo clippy`。这是当前工作区的证据，不外推到其他机器；CI 的 rust job（windows-latest）仍是最终跨环境门禁。本地必须跑 `cargo fmt --all -- --check` 与前端门禁，Rust 全量检查可由隔离环境执行或由 CI 承担——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 执行一次 `cargo test --no-fail-fast`，覆盖全部未忽略的单元与集成测试（含 6 个受约束的 mock 套件及 ingestion/scheduler 自托管测试）；测试目标失败后仍执行其余目标，最终退出仍非零。`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
-
-CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加密与 SMTC 媒体控制等 Windows 专有功能只在 Windows 编译；在 Linux 上检查的是 `#[cfg(not(windows))]` 降级分支，真正的生产代码路径反而被跳过。
+每一项检查都必须有承担者，不能出现“本地不跑、CI 也不跑”。`#[ignore]` 的真实服务端与容量测试需在具体任务里单独约定读写边界后执行，不作为统一门禁；不得为变绿删测试、加跳过或放宽断言。命令、脚本与 CI job 的对应、测试分层、证据纪律与常见故障见 [docs/development.md](docs/development.md)。
 
 ## 仓库卫生
 

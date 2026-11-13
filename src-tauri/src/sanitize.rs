@@ -259,7 +259,7 @@ fn clone_children(src: NodeRef<'_, Node>, dst: &mut NodeMut<'_, Node>) {
 /// script、style 本就不在保留标签内），body_text 必须与「用户可见」同口径，
 /// 否则内联脚本/样式文本会混入搜索索引与 AI 摘要输入。
 // Note: B4 安全横向收口（body_text 剔除 script/style 子树） — 见
-// .agents/notes/implemented/bug-fix/2026-10-31-安全横向面收口.md
+// .agents/notes/implemented/architecture/2026-11-13-AI与设置边界.md
 pub fn html_to_text(html: &str) -> String {
     let doc = Html::parse_document(html);
     let selector: LazyLock<Selector> =

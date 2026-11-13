@@ -79,7 +79,7 @@ function focusedCardDescriptor(target: Element | null): Omit<FocusedCard, 'filte
    新 dataset 的 commit 在同一提交、paint 前把 transform 一并写齐；挂载当帧同样
    由本 effect 与 measureRowElement 落位。Notify/父级 layout effect 仍负责
    commit 间隙（RO 驱动的 resizeItem）与全窗口兜底。
-   Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+   Note: 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
 function TimelineRowItem({ vi, item, measureRef, children }: {
   vi: VirtualItem;
   item: ArticleEntry;
@@ -272,7 +272,7 @@ export function Timeline() {
      用户焦点在筛选控件/侧栏时不抢焦点。恢复仅在产生焦点的同一阅读上下文内
      生效：filterKey 变化的 items 替换是另一套条目，旧下标恢复会与上下文归零
      竞争把列表滚向陈旧深滚位置。
-     Note: 根因与运行时证据见 .agents/notes/implemented/bug-fix/2026-11-07-画廊重启用时虚拟化offset对齐.md */
+     Note: 根因与运行时证据见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
   useEffect(() => {
     const previousItems = previousItemsRef.current;
     const focusedCard = focusedCardRef.current;
@@ -376,7 +376,7 @@ export function Timeline() {
     getScrollElement: () => scrollRef.current,
     /* 折叠态是统一固定外高，所有社交行共用同一估算；不再读取摘要/封面特征。
        展开后的真实高度仍由 SocialCard 的 layout effect 显式回写。Note: 见
-       .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
+       .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
     estimateSize: () => activeContentLayout === 'social' ? SOCIAL_COLLAPSED_ROW_HEIGHT : 160,
     overscan: 8,
     getItemKey: (index) => items[index]?.id ?? index,
@@ -394,7 +394,7 @@ export function Timeline() {
          内部测量；transform 与容器高必须在同一次 notify 里直写 DOM，否则慢调度
          下会 paint 出「卡片已变高、邻居仍在旧位置」的一帧。滚动消费仍按契约
          排在坐标发布之后。
-         Note: 行坐标单一写入者与采样对齐 — 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+         Note: 行坐标单一写入者与采样对齐 — 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
       syncRowGeometryNow();
       consumeDeferredScroll(rowPendingScrollRef, instance);
     },
@@ -435,7 +435,7 @@ export function Timeline() {
      key 守卫只拒绝不匹配条目的坐标写入（测量/缓存注册仍照常进行）；正常
      enabled、key 匹配的挂载定位由此保证，更新路径由 geom 直写与行项
      layout effect 收敛。
-     Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+     Note: 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
   const measureRowElement = useCallback((element: HTMLDivElement | null) => {
     rowVirtualizer.measureElement(element);
     if (!element) return;
@@ -482,7 +482,7 @@ export function Timeline() {
        网格读一次布局，让本同步点先收敛布局再发布滚动；不等待帧、不改补偿量与
        锚语义。只挂在画廊补偿消费上——普通滚动、无补偿 onChange 与 row 路径不
        增加同步布局读取。可测试候选，有效性由目标 CI 证明。Note: 见
-       .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+       .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
     readLayoutBeforePublish?.();
     instance.scrollElement?.scrollTo?.({ top: pending.offset + pending.adjustments, behavior: pending.behavior });
   };
@@ -527,7 +527,7 @@ export function Timeline() {
     /* 测量后的主轴位置与总高由虚拟化直接写 DOM，React 只拥有列宽/左缘，
        避免 scrollTop 已补偿、旧 render 快照又写回上一帧 transform。已离开新
        窗口但尚未卸载的节点也同步位置，避免卸载前保留一帧旧坐标。
-       Note: 取舍与异步图片实证见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md */
+       Note: 取舍与异步图片实证见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
     useFlushSync: false,
     directDomUpdates: true,
     onChange: (instance) => {
@@ -560,7 +560,7 @@ export function Timeline() {
       };
       galleryMeasureAnchorRef.current = anchor;
     }
-    // Note: 多列测量只补偿同一可见锚的同列前驱，不能累加其他列的高度差 — 见 .agents/notes/implemented/feature/2026-10-16-画廊有界渲染.md
+    // Note: 多列测量只补偿同一可见锚的同列前驱，不能累加其他列的高度差 — 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md
     const adjust = item.lane === anchor.lane && item.index < anchor.index;
     if (adjust) anchor.scrollTop += delta;
     return adjust;
@@ -598,7 +598,7 @@ export function Timeline() {
        offset 计算，会短暂挂载深部卡片并把懒加载判定引向屏外。布局变化时派发
        scroll 让两个实例立即对齐元素真实位置；合成事件不带输入闩，不会被误判
        为用户滚动。
-       Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-画廊重启用时虚拟化offset对齐.md */
+       Note: 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
     if (activeLayoutRef.current === activeContentLayout) return;
     activeLayoutRef.current = activeContentLayout;
     scrollRef.current?.dispatchEvent(new Event('scroll'));
@@ -1028,7 +1028,7 @@ export function Timeline() {
              旧快照/空数组，只看 articlesLoading 会闪空态假文案；
              故并入后端 reload 在途计数。Note: 计数含兄弟窗口在途 reload，
              不能改用 isBackendReloadInFlight 之类的「有没有」判据 —
-             见 .agents/notes/implemented/bug-fix/2026-11-02-启动抢占期假空态.md */
+             见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
           articlesLoading || backendReloadsInFlight > 0 ? (
             <div className="timeline-empty-state" role="status" aria-label="加载中">
               <span className="load-more-spinner" aria-hidden="true" />
@@ -1285,7 +1285,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   /* 折叠态正文区固定 150px：无论正文是否含图、行 imageUrl 是否存在、摘要多短，
      占位与水合后的正文外高都相同。短文和空正文保留同一区域，测量只决定展开
      按钮是否出现，不再参与高度决策。
-     Note: 折叠外高是不变量 — 见 .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
+     Note: 折叠外高是不变量 — 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
   const textRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const [measurement, setMeasurement] = useState<{ content: string; long: boolean } | null>(null);
@@ -1296,7 +1296,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   /* 内联 {__html} 每次 render 都是新对象，React 会据此重设 innerHTML，连带重建
      正文里的 <video>。展开/收起等无关 render 一旦重设，视频就重新加载并把
      自然高度打回零；按正文内容锁住对象引用，媒体节点才能跨 render 存活。
-     Note: 见 .agents/notes/implemented/bug-fix/2026-11-03-列表页脚压缩与社交水合首帧折叠.md */
+     Note: 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
   const contentHtml = useMemo(() => ({ __html: body.content }), [body.content]);
   const translatedHtml = useMemo(
     () => ({ __html: body.translatedContent }),
@@ -1619,7 +1619,7 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
                Down/Up = 同列跨排 ±列数。边界 clamp：目标越界（首尾卡）不动——
                不跳列、不回绕（moveCardFocus 的越界 no-op 即 clamp，最小惊讶）。
                贪心最短列分配在卡片高度不均时会偏离严格行列网格，±列数是同列
-               语义的工程近似。Note: 见 .agents/notes/implemented/bug-fix/2026-11-01-画廊方向键行优先语义.md */
+               语义的工程近似。Note: 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
             if (e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
             else if (e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
             else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }

@@ -106,7 +106,7 @@ pub struct CategoryRef {
 
 /// 标签列表（tag/list 响应）
 /// Note: 缺 `tags` 是协议错误，显式空数组才代表权威空集 — 见
-/// `.agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md`
+/// `.agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md`
 #[derive(Debug, Deserialize)]
 pub struct TagListResponse {
     pub tags: Vec<TagRef>,
@@ -123,7 +123,7 @@ pub struct TagRef {
 
 /// 订阅列表（subscription/list 响应）。
 /// Note: 缺 `subscriptions` 是协议错误，显式空数组才代表权威空集 — 见
-/// `.agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md`
+/// `.agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md`
 #[derive(Debug, Deserialize)]
 pub struct SubscriptionListResponse {
     pub subscriptions: Vec<Subscription>,
@@ -802,7 +802,7 @@ impl GReaderClient {
     /// 拉条目正文（按十进制 id，可重复）。返回 items 含状态/正文/enclosure。
     pub async fn item_contents(&self, ids: &[i64]) -> AppResult<Vec<ItemContent>> {
         let items = self.fetch_item_contents(ids).await?;
-        // Note: 正文按请求 ID 覆盖验证，重复/无关项不能掩盖缺条 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+        // Note: 正文按请求 ID 覆盖验证，重复/无关项不能掩盖缺条 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
         let requested: std::collections::HashSet<i64> = ids.iter().copied().collect();
         let returned: std::collections::HashSet<i64> = items
             .iter()
@@ -826,7 +826,7 @@ impl GReaderClient {
 
     /// 状态写回后的专用读回：保留响应是否覆盖全部请求 id 的完整性标记。
     // Note: ACK 不是应用成功；空/短响应只能进 inconclusive — 见
-    // .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
+    // .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
     ///
     /// 与 [`Self::item_contents`] 的差别只在「短响应」的解释：拉取正文时缺条
     /// 是窗口截断，必须失败并保留游标；写后验证仍返回条目，但缺条只能记为
@@ -998,7 +998,7 @@ impl GReaderClient {
 /// 与条目 id 解析（[`parse_item_id`]，经 `sync/entries.rs::item_numeric_id`）是
 /// **两个协议形态**、不共用也不互为副本：这里只认 `feed/<十进制>` 前缀，条目
 /// 解析另有「长格式 tag 尾十六进制 / 无前缀纯十进制」规则（OPT-017F 逐一核对，
-/// 不收敛——见 .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md）。
+/// 不收敛——见 .agents/notes/implemented/simplification/2026-11-13-零消费清理.md）。
 pub fn parse_feed_numeric_id(stream_id: &str) -> Option<i64> {
     stream_id.strip_prefix("feed/")?.parse().ok()
 }

@@ -294,7 +294,7 @@ pub fn apply_refresh_result(
             last_modified,
             ..
         } => {
-            // Note: Body 写回的源元数据/条目/条件头/失败状态必须同一短事务提交（HTTP 已锁外完成） — 见 .agents/notes/implemented/architecture/2026-09-19-后端模块拆分与并发纪律.md
+            // Note: Body 写回的源元数据/条目/条件头/失败状态必须同一短事务提交（HTTP 已锁外完成） — 见 docs/architecture.md
             // OPT-003：三段式只保证 HTTP 在锁外；写回内部此前逐语句自动提交，
             // 中途任一失败（条目插入/触发器/磁盘错误）会留下「标题与条件头已换新、
             // 条目只进一半」的半提交状态。包进单一事务后，数据与状态同生共死；

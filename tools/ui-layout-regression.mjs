@@ -2155,7 +2155,7 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
            字体/重排）在该帧 RO 回调里已被测量+坐标直写收敛，paint 前完成，
            用户不可见；在 rAF 相位采样会记录一个从未上屏的中间态。延到渲染
            步进结束（setTimeout(0)）再采样，在本帧 RO 收敛后采样，过滤相位中间态；重叠阈值仍为 0。
-           Note: 采样语义与坐标单一写入者 — 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+           Note: 采样语义与坐标单一写入者 — 见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
         requestAnimationFrame(() => setTimeout(() => {
           if (!running) return;
           recordFrame();

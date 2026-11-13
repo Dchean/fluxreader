@@ -65,7 +65,7 @@ function normalizedSyncRoot(endpoint: string): string {
 }
 
 function saveStageKey(draft: SaveAndSyncDraft): string {
-  // Note: 表单失败按 opaque 草稿 id 分阶段复报，重试重放草稿而非当前输入 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  // Note: 表单失败按 opaque 草稿 id 分阶段复报，重试重放草稿而非当前输入 — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
   return `sync:save-and-sync:${draft.id}:save`;
 }
 

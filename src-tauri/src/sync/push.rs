@@ -1,4 +1,4 @@
-// Note: 队列状态变化要主动发事件；认证失败与网络失败必须分类上报 — 见 .agents/notes/implemented/feature/2026-10-06-同步四态与失败可见性.md
+// Note: 队列状态变化要主动发事件；认证失败与网络失败必须分类上报 — 见 .agents/notes/implemented/feature/2026-11-13-前端交互契约.md
 //! sync 的 push 子模块（TASK-045 从 sync.rs 按既有章节拆分）。
 
 use super::*;
@@ -86,7 +86,7 @@ impl PushPlan {
     /// states 同一轮的 pull 后补推只处理新绑定/新入队项；已经在本轮首推尝试过的
     /// queue id 不得再次发送（尤其 Fever toggle）。
     // Note: 同轮重试只补新绑定项，attempted 集合跨首推/补推保留 — 见
-    // .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
+    // .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
     pub(super) fn remove_attempted(&mut self, attempted: &HashSet<i64>) {
         self.status
             .retain(|status| !attempted.contains(&status.queue_id));
@@ -284,7 +284,7 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
 /// 读回后的单目标判定。只有「目标存在且状态字段明确等于目标态」才算确认；
 /// 缺条/短响应的结果是无证据，不是 target_missing。
 // Note: 200 空/短/缺 items 响应一律 inconclusive — 见
-// .agents/notes/implemented/bug-fix/2026-11-03-状态写回ACK验证与条目三态.md
+// .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 #[derive(Debug)]
 enum TargetCheck {
     Confirmed,

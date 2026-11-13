@@ -72,7 +72,7 @@ fn is_x_status_url(u: &url::Url) -> bool {
 /// 但可用。规则从宽到严排序：只做「无损压缩」，绝不合并可能不同的文章
 /// （通用参数是否剥除按 X 状态页例外保守区分）。
 /// Note: 算法语义变化必须递增 新数据格式标识，存量键随版本重建 —
-/// 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
+/// 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 pub fn normalize_url(url: &str) -> String {
     let Ok(mut u) = url::Url::parse(url.trim()) else {
         return url.trim().to_lowercase();

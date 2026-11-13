@@ -953,7 +953,7 @@ pub fn legacy_feed_tombstones(conn: &Connection) -> AppResult<Vec<String>> {
     read_tombstones(conn, FEED_TOMBSTONE_LEGACY_V1_KEY)
 }
 
-// Note: 墓碑是 pull 防复活的唯一防线；清除判据是「远端列表已不含该 URL」而非 2xx — 见 .agents/notes/implemented/bug-fix/2026-09-18-双向同步的写入接线与墓碑.md
+// Note: 墓碑是 pull 防复活的唯一防线；清除判据是「远端列表已不含该 URL」而非 2xx — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 /// 写入删除墓碑（幂等，按当前算法规范化 URL 去重）。
 pub fn add_feed_tombstone(conn: &Connection, feed_url: &str) -> AppResult<()> {
     let norm = super::normalize_url(feed_url);

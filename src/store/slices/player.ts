@@ -66,7 +66,7 @@ export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (s
      幂等 ≠ 失效：暂停后按 Play 会置回 isPlaying=true 从暂停点恢复；
      音频元素 play() 失败的回退（PlayerBar 翻回暂停 + toast）保留，
      再按 Play 仍是一次真实状态变化，会重新驱动元素重试。
-     Note: 语义与证据边界见 .agents/notes/implemented/bug-fix/2026-10-08-窗口首帧恢复与媒体命令幂等.md */
+     Note: 语义与证据边界见 .agents/notes/implemented/architecture/2026-11-13-界面布局与启动时序.md */
   applyMediaAction: (action: MediaAction) => {
     if (action === 'stop') {
       get().closePodcastBar();

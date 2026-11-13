@@ -535,7 +535,7 @@ export const api = {
   /* OPT-017F：feedCounts / scopeCounts 两个分项读取包装已删（全仓零调用方；
      OPT-008B R2 起计数统一走下方 countsSnapshot 组合快照）。对应 IPC 命令
      （feed_counts / scope_counts）保留在 Rust 注册表，命令签名不随包装器删除
-     ——见 .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
+     ——见 .agents/notes/implemented/simplification/2026-11-13-零消费清理.md。 */
   /** OPT-008B R2（N2/P3-4）：**计数组合快照**——同一开关值、同一 DB 锁内返回
       源计数（布局无关）+ scope 精确计数（按布局）。对账/启动装载只发这一条
       IPC，源键与聚合键不会来自两个时刻。 */
@@ -736,7 +736,7 @@ export const api = {
      起的唯一真值入口是下方三态 setFeedAiModes）。对应 IPC 命令
      set_feed_ai_flags 保留（旧 bool→显式 on/off 的映射语义在 Rust 侧有单测
      锁定），命令签名不随包装器删除——见
-     .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
+     .agents/notes/implemented/simplification/2026-11-13-零消费清理.md。 */
   /** OPT-011：源级 AI 开关三态（新真值入口；只动给出的字段，undefined 不改）。
    * 与后端旧 bool 入口（set_feed_ai_flags，命令保留）的边界一致：只写本地，
    * 不推远端。 */

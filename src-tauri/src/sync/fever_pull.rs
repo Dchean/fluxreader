@@ -1,5 +1,5 @@
 //! sync 的 fever_pull 子模块（TASK-045 从 sync.rs 按既有章节拆分）。
-// Note: 任一集合拉取失败即整轮跳过对账（失败 ≠ 空集合） — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
+// Note: 任一集合拉取失败即整轮跳过对账（失败 ≠ 空集合） — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
 
 use super::*;
 use crate::db;
@@ -368,7 +368,7 @@ pub(super) async fn pull_entries_fever(
     }
 
     // Note: 零远端 feed 绑定不得初始化历史、请求集合或推进游标 — 见
-    // .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
+    // .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
     if maps.feed_mf_to_id.is_empty() {
         log::debug!("fever pull: 尚无远端 feed 绑定，本轮跳过条目拉取");
         return Ok(());
@@ -787,7 +787,7 @@ pub(super) async fn pull_entries_fever(
     // 状态对账由 ⑤ 的权威集合独立承担，不依赖本次正文往返。DB 读失败 =
     // 无法判定哪些已有正文 = has_body 视为空集（fail-open 退回全量重拉：
     // 宁多打请求，不漏补正文）。
-    // Note: 预过滤口径与 fail-open 方向的取舍 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
+    // Note: 预过滤口径与 fail-open 方向的取舍 — 见 .agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md
     let has_body: HashSet<i64> = if candidates.is_empty() {
         HashSet::new()
     } else {

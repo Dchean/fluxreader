@@ -19,7 +19,7 @@ import { useProseImages } from './useProseImages';
    - 渲染态   ：现有 .article-prose + dangerouslySetInnerHTML（消毒后 HTML），
                 链接/图片点击代理由调用方传入的 onClick 照旧处理。
 
-   决定与取舍见 .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md；
+   决定与取舍见 .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md；
    真实 SSR 输出回归见 tools/frontend-regression.mjs 的 OPT-012 块。
    ============================================================ */
 
@@ -54,7 +54,7 @@ export function ReaderProse({
   const { ref: imagesRef, markup } = useProseImages(isSourceMode || isStreamingTranslation ? '' : renderHtml, imagePageUrl, imageOwner, imagesEnabled && !isSourceMode && !isStreamingTranslation);
   if (isSourceMode) {
     /* Note: 源码态必须是文本节点插值（React 负责转义）——改回 dangerouslySetInnerHTML
-       即恢复 F14（源码被当 HTML 创建/执行）。见 .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
+       即恢复 F14（源码被当 HTML 创建/执行）。见 .agents/notes/implemented/architecture/2026-11-13-身份时间与协议边角.md */
     return (
       <div className="article-prose raw-render-mode" style={style} onClick={onClick}>
         <pre className="reader-source-view">{sourceText}</pre>

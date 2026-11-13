@@ -1043,7 +1043,7 @@ fn notify_new_articles(app: &AppHandle, count: usize) {
 ============================================================ */
 
 // Note: 候选覆盖面（全来源）、请求预算与退出终止语义 — 见
-// .agents/notes/implemented/feature/2026-10-16-封面补全覆盖面与预算边界.md
+// .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 
 /// 每轮最多补全的封面数（防一次性扫全库 + 轰炸源站）。
 const COVER_BACKFILL_BATCH: i64 = 20;
@@ -1310,7 +1310,7 @@ pub fn spawn_cover_backfill(app: AppHandle, shutdown: ShutdownToken) {
 /// 只看 ORDER BY published_at DESC 的第一页，最新一批全部拿不到图时更老的
 /// 候选在本进程内永远轮不到。这里按 (LIMIT, OFFSET) 往后翻页并跳过 tried，
 /// 用 COVER_BACKFILL_SCAN_PAGES 约束单轮扫描量。
-// Note: 窗口推进与负缓存时序的原决策 — 见 .agents/notes/implemented/bug-fix/2026-09-23-封面补全的候选窗口饥饿.md
+// Note: 窗口推进与负缓存时序的原决策 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
 /// 游标推进（R1-P2-2）：offset 从 [`CoverBackfillState::scan_offset`] 继续、
 /// 每轮按已扫描行数前移、读到空页回绕到 0——负缓存命中的行同样推进，避免
 /// 「窗口内全部已尝试」时逐轮重扫同一窗、更老候选冻结到重启。行因补全成功

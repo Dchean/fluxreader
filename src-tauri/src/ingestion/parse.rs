@@ -143,7 +143,7 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
     let published_at = source_date.map(|d| clamp_publish_date(d).to_rfc3339());
 
     // Note: 弱观察须同时保留URL和原始源日期，空字节不提供内容证明 — 见
-    // .agents/notes/proposed/architecture/2026-11-09-源内等价组与持久条目状态.md
+    // docs/architecture.md
     let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {
         e.id.clone()
     } else {
