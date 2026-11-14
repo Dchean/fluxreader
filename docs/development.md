@@ -22,7 +22,7 @@
 | 布局/交互真实浏览器 | `npm run test:ui-layout` | 本地与 CI（windows-latest） | UI layout & social hydration (Edge CDP) |
 | 文档结构（索引/链接/锚点/行号禁令） | `npm run docs:check` | 本地与 CI | Lint, build & frontend regressions |
 | Rust 格式 | `cargo fmt --all -- --check`（`src-tauri/`） | 本地与 CI | Check & test Rust (src-tauri) |
-| Rust 全量 | `cargo clippy --all-targets -- -D warnings`、`cargo test --no-fail-fast`、`cargo check` | CI（windows-latest）；本地可用隔离环境 | Check & test Rust (src-tauri) |
+| Rust 全量 | `cargo clippy --all-targets -- -D warnings`、`cargo test --no-fail-fast`、`cargo check --all-targets` | CI（windows-latest）；本地可用隔离环境 | Check & test Rust (src-tauri) |
 
 - `ci.yml` 对 `dev`/`main` push、面向 `main` 的 PR 及 `workflow_call` 触发；`release.yml` 在 tag 上调用同一提交的 `ci.yml`，不另起一套检查。
 - 每个检查必须有承担者：本地不跑 Rust 全量时，由 CI 的 Rust job 承担；不能出现“本地不跑、CI 也不跑”。
@@ -30,7 +30,7 @@
 - 本机结果只代表本机与当前源码；发布前的最终跨环境结论以固定 SHA 的 CI 为准。
 
 - **CI 固定 Windows 跑 Rust**：这是纯 Windows 客户端，DPAPI 凭据加密与 SMTC 媒体控制等 Windows 专有功能只在 Windows 编译；在 Linux 上检查的是 `#[cfg(not(windows))]` 降级分支，真正的生产代码路径反而被跳过。
-- **Rust 全量覆盖范围**：CI 执行一次 `cargo test --no-fail-fast`，覆盖全部未忽略的单元与集成测试（含 6 个受约束的 mock 套件及 ingestion/scheduler 自托管测试）；测试目标失败后仍执行其余目标，最终退出仍非零。
+- **Rust 全量覆盖范围**：CI 执行一次 `cargo test --no-fail-fast`，覆盖全部未忽略的单元与集成测试（含自托管 mock 的集成测试及 ingestion/scheduler 自托管测试）；测试目标失败后仍执行其余目标，最终退出仍非零。
 
 ## 测试分层
 
@@ -38,7 +38,8 @@
 - **组件回归**（`tools/component-regression.mjs` + `tools/component-tests/`）：真实 React 挂载、真实 DOM 事件与焦点；分 `business` 与 `selfcheck` 两个子进程，任一失败整体非 0。`selfcheck` 用黑盒探针验证 runner 的看门狗、清理与错误账本本身。
 - **布局/交互回归**（`tools/ui-layout-regression.mjs`）：真实 Edge headless + CDP，覆盖五布局、社交流式正文、画廊两视口、J/K 与 Tab/Space、模态焦点、窄窗与 reduced-motion；失败证据由 CI artifact 上传。
 - **Rust 单元与集成**：`src-tauri/src/` 内的 `#[cfg(test)]` 模块与 `src-tauri/tests/` 的端到端/受控 HTTP 测试；运行 `cargo test --no-fail-fast` 覆盖全部未忽略目标。
-- **容量与真实服务端**：`#[ignore]` 的 10k distinct-body、50k 状态与 live 服务端测试按任务单独运行；当前规模验证标准见 [performance.md](performance.md)。
+- **单文件人工回归入口**：`tools/ai-lifecycle-regression.mjs`、`tools/ai-policy-regression.mjs`、`tools/gallery-media-regression.mjs` 未接入 npm scripts 与 CI，按需人工运行，不作为统一门禁。
+- **容量与真实服务端**：`#[ignore]` 的 10k distinct-body、50k 正文容量与 live 服务端测试按任务单独运行；50k 状态初始分片是普通 `#[test]`，随 CI 全量执行。当前规模验证标准见 [performance.md](performance.md)。
 
 ## 证据纪律
 
@@ -53,7 +54,7 @@
 ## 常见故障
 
 - **git/npm 代理不可达**：本机可能设置 `HTTP_PROXY=http://127.0.0.1:7897`，代理程序未运行时所有 HTTPS 失败。确认直连可用后，用单次 `git -c http.proxy= -c https.proxy= ...` 或清空当前进程的代理变量；不要擅自改全局 git 配置。
-- **文件符号链接权限**：非提权 Windows 会话中，Rust 构建的子进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314）。备份保留测试可用目录 junction 做等价 reparse-point 夹具；真实 symlink 路径由 CI 的 windows-latest 覆盖，本地不能声称已覆盖。
+- **文件符号链接权限**：非提权 Windows 会话中，Rust 构建的子进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314）。备份保留测试可用目录 junction 做等价 reparse-point 夹具；真实 symlink 路径的唯一测试 `writer_windows_symlink_alias_resolves_actual_file_identity` 带 `#[ignore]`，CI 也不运行 ignored 用例——本地与 CI 都未覆盖，只在具体任务约定后运行。
 - **Node 版本导致 TAP 输出差异**：`.node-version` 是 22；Node 24 的 `node:test` 默认 reporter 输出 `ℹ fail 0`，而项目自检按 Node 22 的 `# pass/# fail` TAP 契约断言。临时用 `NODE_OPTIONS=--test-reporter=tap` 复现 Node 22 契约并在报告中注明；不要把改测试当作修复。
 - **cargo 不在 PATH**：隔离环境激活后仍可能需要把 `C:\Users\<user>\.cargo\bin` 前置；命令报 `cargo not found` 时先查 PATH，不要重装工具链。
-- **测试临时目录**：容量/Rust 测试需要可清理的 `TEMP` 与测试根；运行后清理 `.rust-window-r1/{temp,test}` 等私有目录，不要把构建产物提交。
+- **测试临时目录**：容量/Rust 测试需要可清理的 `TEMP` 与测试根；隔离环境构建产物统一进 `tmp/rust-env/target-xwin-msvc/`，不要把构建产物提交。

@@ -31,7 +31,7 @@ FluxReader 是一款本地优先的 Windows 桌面 RSS 客户端：全部数据�
 
 新增订阅的「同步到账户」开关仅在已连接 Google Reader 时显示，默认关闭，只控制本次新增。侧栏显示同步账户与状态灯，具体等待、失败和过期未确认项可在同步设置查看。跟随服务端（hybrid）模式的刷新只抓本地订阅源；本机抓取（direct）模式刷新全部来源。
 
-FreshRSS 根地址无法登录时，可按服务器实际部署填写 Google Reader 的 `/api/greader.php` 或 Fever 的 `/api/fever.php` 地址；位于子目录的安装需保留其路径。已验证版本与路径边界见[实测矩阵](docs/sync-compat-matrix.md#live-deployments)。
+FreshRSS 根地址无法登录时，可按服务器实际部署填写 Google Reader 的 `/api/greader.php` 或 Fever 的 `/api/fever.php` 地址；位于子目录的安装需保留其路径。已验证版本与路径边界见[同步兼容矩阵](docs/sync-compat-matrix.md)的"真实服务端的限定实测"一节。
 
 ## 开发
 
@@ -64,7 +64,7 @@ Rust 侧命令在 `src-tauri/` 下执行，本地须运行 `cargo fmt --all -- -
 | `src/` | React 组件、Zustand 状态、IPC 封装与样式 |
 | `src-tauri/src/` | Tauri 入口、Rust 业务、协议客户端与 SQLite 数据访问 |
 | `src-tauri/tests/` | Rust 集成、迁移、回归及服务端协议测试 |
-| `tools/` | 前端状态回归与组件挂载回归的运行器 |
+| `tools/` | 前端状态回归、组件挂载回归、UI 布局门禁与文档结构检查的运行器，发布校验器（`tools/release/`），及三个人工单文件回归入口 |
 
 ## 项目文档
 

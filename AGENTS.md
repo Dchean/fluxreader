@@ -57,7 +57,7 @@ git push origin main
 
 ## 门禁
 
-本地必跑 `npm run lint`、`npm run build`、`npm run test:frontend`、`npm run test:components`、`npm run test:ui-layout`（Windows Edge headless）、`npm run docs:check` 与 `cargo fmt --all -- --check`（在 `src-tauri/` 下执行）。Rust 全量 `cargo clippy --all-targets -- -D warnings`、`cargo check`、`cargo test --no-fail-fast` 由 CI 的 windows-latest job 承担，本地可用 `tmp/rust-env/` 隔离环境执行。
+本地必跑 `npm run lint`、`npm run build`、`npm run test:frontend`、`npm run test:components`、`npm run test:ui-layout`（Windows Edge headless）、`npm run docs:check` 与 `cargo fmt --all -- --check`（在 `src-tauri/` 下执行）。Rust 全量 `cargo clippy --all-targets -- -D warnings`、`cargo check --all-targets`、`cargo test --no-fail-fast` 由 CI 的 windows-latest job 承担，本地可用 `tmp/rust-env/` 隔离环境执行。
 
 每一项检查都必须有承担者，不能出现“本地不跑、CI 也不跑”。`#[ignore]` 的真实服务端与容量测试需在具体任务里单独约定读写边界后执行，不作为统一门禁；不得为变绿删测试、加跳过或放宽断言。命令、脚本与 CI job 的对应、测试分层、证据纪律与常见故障见 [docs/development.md](docs/development.md)。
 

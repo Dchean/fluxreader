@@ -13,11 +13,11 @@ React store/components (src/)
     → sync/（RSS 服务双向同步：Content/State/Push 三通道）
     → local_sync/（纯本地 WebDAV 持续同步 + 便携导出/恢复）
     → ingestion/（直连抓取、解析、分段落库）
-    → scheduler/（定时刷新、封面补全、保留维护）
-    → ai/、ai_segments/、sanitize/、media/、image_requests/
+    → scheduler.rs（定时刷新、封面补全、保留维护；窗口聚焦触发的同步与新文章通知也在此）
+    → ai.rs、ai_segments.rs、sanitize.rs、media.rs、image_requests.rs（均为单文件模块）
 ```
 
-- `lib.rs` 只做模块声明、托盘/窗口生命周期与命令注册；业务在领域模块。
+- `lib.rs` 负责模块声明、托盘/窗口生命周期与命令注册；业务主体在领域模块。例外：关闭询问命令 `resolve_close`（读写 closeToTray/closePromptShown）与进程退出排空编排（停双 runtime、各 3 秒 drain、记诊断）直接写在 `lib.rs`。
 - 命令层短小：取状态锁 → 调用 `db::` 类型化函数或运行协调器 → 返回可序列化行。
 - HTTP 与文件处理不持数据库锁；数据库写入走统一的写预留入口（见下）。
 - `webdav_transport.rs` 是不依赖应用数据库与同步策略的独立传输层；`local_sync` 在其上实现协议与状态机。
@@ -25,10 +25,10 @@ React store/components (src/)
 
 ## 数据库与 schema 归属
 
-- 单文件 SQLite（bundled），单写连接由 `state::AppState.db` 持有；连接生命周期与 schema 升级集中在 `src-tauri/src/db.rs`。
+- 单文件 SQLite（bundled），单写连接由 `state::AppState.db` 持有；连接建立、WAL/foreign_keys/busy_timeout 与格式拒绝集中在 `db/migrations.rs` 的 `open_with_report`；`db.rs` 是门面再导出与 writer 接线。
 - `db/schema.sql` 是当前格式的权威结构；`db/migrations.rs` 只保留已发布格式的必要升级。当前格式用独立 application_id/schema version 识别，旧库与旧格式文件只读拒绝，不自动迁移。
-- 领域模块：`db/articles.rs`（列表、搜索、读藏、计数、缓存清理）、`db/feeds.rs`/`folders.rs`（订阅与分类）、`db/contents.rs`（正文与媒体引用）、`db/identity.rs`/`url_norm.rs`（身份与规范化）、`db/settings.rs`（设置策略）、`db/sync_queue.rs`/`sync_map.rs`/`outbox.rs`（同步队项、映射与订阅写回）、`db/backup.rs`/`body_retention.rs`（快照与正文保留）、`db/writer.rs`（写预留）。
-- 本地同步状态表（`local_sync_*`）由 `local_sync/database.rs` 定义并注册 SQL 函数；逻辑赢家、候选、journal、工作队列、正文 hold/receipt、对象缓存与接收状态都在这组表中。
+- 领域模块：`db/articles.rs`（列表、搜索、读藏、计数、缓存清理）、`db/feeds.rs`/`folders.rs`（订阅与分类）、`db/contents.rs`（正文与媒体引用）、`db/ai_segments.rs`（AI 分段缓存）、`db/identity.rs`/`url_norm.rs`（身份与规范化）、`db/settings.rs`（设置策略）、`db/sync_queue.rs`/`sync_map.rs`/`outbox.rs`（同步队项、映射与订阅写回）、`db/backup.rs`/`body_retention.rs`（快照与正文保留）、`db/writer.rs`（写预留）。
+- 本地同步状态表（`local_sync_*`）的 CREATE 语句都在 `db/schema.sql`；`local_sync/database.rs` 注册 `flx_*` SQL 函数并补建局部索引。逻辑赢家、候选、journal、工作队列、正文 hold/receipt、对象缓存与接收状态都在这组表中。
 - `db/settings.rs` 一次定义设置名、值域与同步/便携/本机可见范围；`app_settings` 的整包写入只经 `patch_app_settings`，坏包与未知键保留原值。
 
 ## 同步边界
@@ -37,6 +37,7 @@ RSS 服务同步（`sync/`）与纯本地 WebDAV 同步（`local_sync/`）互斥
 
 ### RSS 服务同步
 
+- 协议内核按服务分成两套实现：`greader.rs`/`sync/greader_pull.rs`（Google Reader 兼容）与 `fever.rs`/`sync/fever_pull.rs`（Fever）；协议差异与真实服务端证据见 [同步兼容矩阵](sync-compat-matrix.md)。
 - 三个通道：Content（订阅/条目/正文）、State（读藏状态与权威集合）、Push（本地意图发送与 ACK 读回）。同一 runtime 内每类最多一个运行操作，并只允许 Content → State → Push 方向嵌套。
 - 账号代际（generation）固定在整轮起点；每个真实 HTTP 前与 ACK 落库前复核。断开或换号后迟到结果不能写回新账号。
 - 本地读藏写入在事务内递增字段版本并登记本地意图；远端落地只接受字段版本未变、无 pending、来源生命周期仍有效的值。冲突方向由 `sync/conflict_policy.rs` 单点定义。

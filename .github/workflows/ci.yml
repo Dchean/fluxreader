@@ -157,7 +157,7 @@ jobs:
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      # 默认 cargo test 自动发现 tests/*.rs；六套自托管 mock 与 ingestion/
+      # 默认 cargo test 自动发现 tests/*.rs；自托管 mock 的集成测试与 ingestion/
       # scheduler 均无 #[ignore]，由这一步完整执行一次。真实账户 live 测试
       # 继续保持 ignored，只有具体任务另行约定外部读写边界后才显式运行。
       - name: Run tests (unit and all non-ignored integrations)
