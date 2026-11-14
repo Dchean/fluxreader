@@ -15,6 +15,7 @@
 | 做发布 | [发布流程](release.md) | [开发与门禁](development.md) 的 CI 对应表 |
 | 定位"这个功能在哪、改了会影响谁" | [契约单点](contracts.md) | [架构](architecture.md) 的模块与依赖方向 |
 | 查已知缺口或什么没验证 | [当前缺口](roadmap.md) | 对应主题篇的"验证边界" |
+| 改前端组件、类名或令牌 | [前端结构台账](frontend.md) | [架构](architecture.md) 的前端结构与数据流、[契约单点](contracts.md) |
 | 查历史决定为什么这么做 | [.agents/notes/](../.agents/notes/) | 该 Note 的 Alternatives 与 Consequences |
 | 接手审计或修复基线 | [审计记录](audits.md) | 该轮的审计报告与证据位置 |
 
@@ -32,6 +33,7 @@
 | [发布流程](release.md) | 分支、CI、tag 附注与 Release 正文的关系 | `.github/workflows/release.yml`、`tools/release/` | 发布步骤、tag 或资产策略变化 | 未标 |
 | [当前缺口](roadmap.md) | 仍成立的开放缺口、接受的边界与未验收范围 | 各条目的主题篇 | 缺口关闭、新增或范围变化 | 2026-11-14 |
 | [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-14 |
+| [前端结构台账](frontend.md) | 组件清单、类名账目、令牌使用与动态拼接契约、控件层现状 | `src/components/`、`src/store/`、`src/styles/`、`src/lib/syncPill.ts` | 增删组件、类名体系或令牌变化 | 2026-11-15（基线 77c1964） |
 
 ## 决定记录
 
