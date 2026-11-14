@@ -4,7 +4,7 @@
 
 ## 本地环境
 
-- Windows x64；Node 版本由 `.node-version` 固定（当前 22），CI 用 `actions/setup-node@v4` 的 `node-version-file` 读取同一文件。不要用本机更新的 Node 大版本直接判定门禁结果。
+- Windows x64；Node 版本由 `.node-version` 固定（当前 24），CI 用 `actions/setup-node@v4` 的 `node-version-file` 读取同一文件。不要用与 `.node-version` 不同的 Node 大版本直接判定门禁结果。
 - 安装依赖与脚本：`npm ci`（或 `npm install`）后使用 `package.json` 中的 `lint`、`build`、`test:frontend`、`test:components`、`test:ui-layout`。
 - Edge headless 由 `npm run test:ui-layout` 自动查找；本机路径通常是 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`。
 - Rust 使用工作区隔离环境 `tmp/rust-env/`（rustc/cargo `1.98.1` + clang-cl/lld-link），入口 `activate-rust-env.ps1`；它只服务当前工作区，不外推到其他机器。
@@ -55,6 +55,6 @@
 
 - **git/npm 代理不可达**：本机可能设置 `HTTP_PROXY=http://127.0.0.1:7897`，代理程序未运行时所有 HTTPS 失败。确认直连可用后，用单次 `git -c http.proxy= -c https.proxy= ...` 或清空当前进程的代理变量；不要擅自改全局 git 配置。
 - **文件符号链接权限**：非提权 Windows 会话中，Rust 构建的子进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314）。备份保留测试可用目录 junction 做等价 reparse-point 夹具；真实 symlink 路径的唯一测试 `writer_windows_symlink_alias_resolves_actual_file_identity` 带 `#[ignore]`，CI 也不运行 ignored 用例——本地与 CI 都未覆盖，只在具体任务约定后运行。
-- **Node 版本导致 TAP 输出差异**：`.node-version` 是 22；Node 24 的 `node:test` 默认 reporter 输出 `ℹ fail 0`，而项目自检按 Node 22 的 `# pass/# fail` TAP 契约断言。临时用 `NODE_OPTIONS=--test-reporter=tap` 复现 Node 22 契约并在报告中注明；不要把改测试当作修复。
+- **node:test reporter 与 TAP 契约**：runner 自检探针断言 `# pass/# fail` 汇总行，探针子进程已在 `runner-selfcheck.test.mjs` 的 `runProbe` 中用 `NODE_OPTIONS=--test-reporter=tap` 固定输出格式，不随 Node 默认 reporter 变化漂移（历史背景：Node 24 起默认输出 `ℹ` 形式的 spec 报告）。新增探针沿用手写 spawn 的同一 env，不要依赖默认 reporter。
 - **cargo 不在 PATH**：隔离环境激活后仍可能需要把 `C:\Users\<user>\.cargo\bin` 前置；命令报 `cargo not found` 时先查 PATH，不要重装工具链。
 - **测试临时目录**：容量/Rust 测试需要可清理的 `TEMP` 与测试根；隔离环境构建产物统一进 `tmp/rust-env/target-xwin-msvc/`，不要把构建产物提交。

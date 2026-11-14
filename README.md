@@ -35,7 +35,7 @@ FreshRSS 根地址无法登录时，可按服务器实际部署填写 Google Rea
 
 ## 开发
 
-开发统一使用 Node 22（主版本记录在仓库根目录 [.node-version](.node-version)）：
+开发统一使用 Node 24（主版本记录在仓库根目录 [.node-version](.node-version)）：
 
 ```bash
 npm ci

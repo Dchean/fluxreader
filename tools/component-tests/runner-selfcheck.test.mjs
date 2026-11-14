@@ -29,9 +29,11 @@ const MARKER = fileURLToPath(new URL('../../tmp/opt016b-runner-probes/good-clean
 
 /** 子进程黑盒运行探针：注入短看门狗，收集退出码与合并输出。 */
 function runProbe(name, args = []) {
+  // Note: 探针断言 node:test 的 TAP 汇总行（# pass/# fail），在此固定 reporter，
+  // 不依赖 Node 默认格式（Node 24 起 --test 默认输出 spec），详见 audit-reporter 契约 — 见 docs/development.md 常见故障。
   const r = spawnSync(process.execPath, [PROBE_DIR + name, ...args], {
     cwd: ROOT,
-    env: { ...process.env, COMPONENT_WATCHDOG_MS: '1500' },
+    env: { ...process.env, COMPONENT_WATCHDOG_MS: '1500', NODE_OPTIONS: '--test-reporter=tap' },
     encoding: 'utf8',
     timeout: 30000,
   });

@@ -348,5 +348,5 @@ test('workflow wiring keeps complete CI before build and never passes release in
   assert.match(release, /uses: \.\/\.github\/workflows\/ci\.yml/);
   assert.doesNotMatch(release, /^\s+(tagName|releaseName|releaseId|releaseDraft):/m);
   for (const command of ['npm run lint', 'npm run build', 'npm run test:frontend', 'npm run test:components', 'npm run test:ui-layout', 'cargo fmt', 'cargo check', 'cargo clippy', 'cargo test']) assert.ok(ci.includes(command), command);
-  assert.equal(readFileSync(new URL('../../.node-version', import.meta.url), 'utf8').trim(), '22');
+  assert.equal(readFileSync(new URL('../../.node-version', import.meta.url), 'utf8').trim(), '24');
 });

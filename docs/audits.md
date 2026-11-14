@@ -14,7 +14,7 @@
 ## 复跑入口
 
 - 前端全量状态回归：`npm run test:frontend`（2026-11-14 本机 1516/1516 通过）。
-- 组件回归：`npm run test:components`（Node 24 下因 reporter 文本断言失败，见报告 N-8；Node 22 未复跑）。
+- 组件回归：`npm run test:components`（2026-11-15 起探针 reporter 固定 tap，Node 24 原生通过；项目 Node 基线随 `.node-version` 升至 24）。
 - 审计条目复核方式：按报告 §1 的位置列 grep/read；静态结论的触发前提写在条目内。
 
 ## 覆盖矩阵（累计表；每轮只更新行，不整体替换）
