@@ -9,7 +9,7 @@
 - Edge headless 由 `npm run test:ui-layout` 自动查找；本机路径通常是 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`。
 - Rust 使用工作区隔离环境 `tmp/rust-env/`（rustc/cargo `1.98.1` + clang-cl/lld-link），入口 `activate-rust-env.ps1`；它只服务当前工作区，不外推到其他机器。
 - 隔离环境里跑 Cargo 时通常前置 `C:\Users\<user>\.cargo\bin` 到 `PATH`，并设 `CARGO_NET_OFFLINE=true`；不要在没有授权时联网更新依赖。
-- 本机临时证据放忽略的 `tmp/`；当前只保留 `tmp/rust-env/`、`tmp/refactor-2026-11-09/` 与 `tmp/ui-layout-evidence/`。
+- 本机临时证据放忽略的 `tmp/`，内容随任务变化，**不在文档里枚举目录清单**（枚举会过期）；需要长期保留的结论摘要登记到 [审计记录](audits.md)。
 
 ## 门禁与 CI job 对应
 
@@ -20,6 +20,7 @@
 | 前端状态回归 | `npm run test:frontend` | 本地与 CI | Lint, build & frontend regressions |
 | 组件真实挂载回归 | `npm run test:components` | 本地与 CI | Lint, build & frontend regressions |
 | 布局/交互真实浏览器 | `npm run test:ui-layout` | 本地与 CI（windows-latest） | UI layout & social hydration (Edge CDP) |
+| 文档结构（索引/链接/锚点/行号禁令） | `npm run docs:check` | 本地与 CI | Lint, build & frontend regressions |
 | Rust 格式 | `cargo fmt --all -- --check`（`src-tauri/`） | 本地与 CI | Check & test Rust (src-tauri) |
 | Rust 全量 | `cargo clippy --all-targets -- -D warnings`、`cargo test --no-fail-fast`、`cargo check` | CI（windows-latest）；本地可用隔离环境 | Check & test Rust (src-tauri) |
 
@@ -44,8 +45,10 @@
 - 证据必须带日期、构建方式、语料/输入、测量范围与限制；“测试通过”只说明当时命令的退出码，不外推为 product 可用或已发布。
 - 失败运行保留日志与原始输出，不用后续成功覆盖；重跑要说明是环境原因还是代码变化，并保留两次结果。
 - 同一 SHA 的 CI 结果才可绑定该提交；本地工作树有未提交改动时，CI 不代表未提交内容。
-- 断言与阈值不得为通过而放宽；需要改变门禁标准时先有依据与确认，并同步本页与 [AGENTS.md](../AGENTS.md)。
-- 临时探针放 `tmp/` 并在结束后删除；不能把一次性脚本或完整输出提交进主线。
+- 断言与阈值不得为通过而放宽；需要改变门禁标准时先有依据与确认，**并按上位规则过独立审计**，再同步本页与 [AGENTS.md](../AGENTS.md)。
+- 可复现的最小集是五样：基线 SHA、命令、输入、结果、性质（运行验证 / 静态推导 / 未验证）。缺任一样只算线索，不算证据；细则见 [维护与文档纪律](maintenance.md)。
+- 审计与证伪：新发现必须由另一个独立上下文再证伪一次；被推翻的结论要留档，结论摘要登记到 [审计记录](audits.md)。
+- 临时探针放 `tmp/` 并在结束后删除；不能把一次性脚本或完整输出提交进主线。**审计证据不同**：原始输出要保留到该轮摘要复核完成，确认 [审计记录](audits.md) 已含复跑命令与最小结果快照后再清理。
 
 ## 常见故障
 

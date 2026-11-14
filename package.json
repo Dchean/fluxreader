@@ -11,7 +11,8 @@
     "tauri": "tauri",
     "test:frontend": "tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs",
     "test:components": "tsc -p tsconfig.test.json && node ./tools/component-regression.mjs",
-    "test:ui-layout": "node ./tools/ui-layout-regression.mjs"
+    "test:ui-layout": "node ./tools/ui-layout-regression.mjs",
+    "docs:check": "node ./tools/docs-check.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.10",

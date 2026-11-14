@@ -50,6 +50,7 @@ npm run build            # tsc -b + vite build，类型检查与构建
 npm run test:frontend    # Node 中的前端状态回归
 npm run test:components  # 组件真实挂载回归
 npm run test:ui-layout   # Windows Edge headless 的布局、键盘与异步图片回归
+npm run docs:check       # 文档结构：索引覆盖、链接与锚点、docs/ 内禁止行号
 ```
 
 Rust 侧命令在 `src-tauri/` 下执行，本地须运行 `cargo fmt --all -- --check`。2026-11-03 起，当前工作区的 `tmp/rust-env/` 隔离 Rust/MSVC 环境已可运行 `cargo test`、`cargo check --all-targets` 与 `cargo clippy --all-targets -- -D warnings`；这是本工作区的能力，不代表所有开发机器。CI 的 windows-latest rust job 仍承担最终跨环境门禁，完整分工见 [AGENTS.md](AGENTS.md)。
@@ -67,8 +68,13 @@ Rust 侧命令在 `src-tauri/` 下执行，本地须运行 `cargo fmt --all -- -
 
 ## 项目文档
 
+完整索引与按任务查哪几篇的阅读路由见 [docs/README.md](docs/README.md)；本表只列入口。
+
 | 文档 | 内容 |
 | --- | --- |
+| [docs/README.md](docs/README.md) | 文档索引与阅读路由（先看这里，不要通读全部文档） |
+| [docs/maintenance.md](docs/maintenance.md) | 维护与文档纪律：证据标准、审计与证伪、清理批次、耦合判据、视觉回归分层 |
+| [docs/contracts.md](docs/contracts.md) | 契约单点表：每类事实的唯一出处、消费者与改动同步面 |
 | [docs/sync-compat-matrix.md](docs/sync-compat-matrix.md) | Google Reader / Fever 协议与 FreshRSS、Miniflux 的兼容矩阵，及冲突政策与已知实现差异 |
 | [docs/backup.md](docs/backup.md) | 便携备份与换机、WebDAV边界及本机数据库故障恢复 |
 | [docs/roadmap.md](docs/roadmap.md) | 当前缺口与已知限制 |

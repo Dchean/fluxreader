@@ -41,6 +41,12 @@ jobs:
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' }}
         run: node --test tools/release/release.test.mjs
 
+      # Note: 文档结构门禁——索引覆盖、相对链接、锚点、docs/ 内禁止行号。
+      # 它只守结构，不判内容与代码是否一致（那靠 docs/maintenance.md 的流程与审计）。
+      - name: Docs index & links
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' }}
+        run: npm run docs:check
+
       # Note: 四个前端门禁各自可跑、失败信息指向自身——lint/build 的任一失败不得
       # 挡住后面的状态与挂载回归；安装失败时后续步骤没有可执行前提，才统一跳过。
       # 任一失败仍让 job 变红，不用 continue-on-error 掩盖。理由与断言纪律见
