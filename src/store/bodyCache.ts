@@ -409,7 +409,7 @@ export function invalidateContentRevision(
 export function markBodyMissing(id: string, stamp: number): void {
   const current = bodyById.get(id);
   if (!current || current.contentRevision !== stamp) return;
-  bodyById.set(id, { ...(current ?? emptyRecord('missing')), state: 'missing', message: BODY_MISSING_MESSAGE });
+  bodyById.set(id, { ...current, state: 'missing', message: BODY_MISSING_MESSAGE });
   touch(id);
 }
 
@@ -417,7 +417,7 @@ export function markBodyMissing(id: string, stamp: number): void {
 export function markBodyFailed(id: string, stamp: number, message: string): void {
   const current = bodyById.get(id);
   if (!current || current.contentRevision !== stamp) return;
-  bodyById.set(id, { ...(current ?? emptyRecord('failed')), state: 'failed', message });
+  bodyById.set(id, { ...current, state: 'failed', message });
   touch(id);
 }
 

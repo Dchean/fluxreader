@@ -4,7 +4,7 @@ import { useAppStore, selectArticleBody, selectFeedConfig, selectAiGenerationInp
 
 /** 连续700ms不滚动、卡片覆盖列表视觉中心才算停顿阅读。时间线共享一个候选、
  * timer和滚动监听；挂载/水合不会对每卡创建计时器，也不发起任何水合请求。 */
-export const AUTO_AI_DWELL_MS = 700;
+const AUTO_AI_DWELL_MS = 700;
 type Registration = { id: string; node: HTMLElement; reader: boolean };
 type Input = ReturnType<typeof selectAiGenerationInput>;
 type Lease = { registration: Registration; input: Input; scope: string; summary: boolean; translation: boolean; alive: boolean };

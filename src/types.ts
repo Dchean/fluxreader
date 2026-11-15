@@ -39,7 +39,6 @@ export const SYNC_MODES: ('direct' | 'hybrid')[] = ['direct', 'hybrid'];
    不兼容旧bool输入；缺失/非法mode回inherit，布局默认关闭。有效值唯一由
    store/aiPolicy.ts与selectFeedConfig解析，组件不能自行OR合并。 */
 export type FeedAiMode = 'inherit' | 'on' | 'off';
-export const FEED_AI_MODES: FeedAiMode[] = ['inherit', 'on', 'off'];
 
 /** 仅三态为真值；缺省继承布局/组，不读取旧bool列。 */
 export function normalizeFeedAiMode(raw: unknown): FeedAiMode {
@@ -149,13 +148,3 @@ export interface ArticleEntry {
   /** 本次轻属性是否提供url；区分缺省未知与明确null，供短期全文目标撤销。 */
   urlKnown?: boolean;
 }
-
-export type TabName =
-  | 'general'
-  | 'appearance'
-  | 'reading'
-  | 'feeds'
-  | 'ai'
-  | 'sync'
-  | 'shortcuts'
-  | 'about';
