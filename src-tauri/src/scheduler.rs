@@ -703,7 +703,9 @@ pub fn spawn_scheduler(app: AppHandle) {
 }
 
 /// Content/subscription work has its own bounded loop; its wait cannot hold the
-/// authority state reader. Existing cursor/discovery throttles remain here.
+/// authority state reader. Existing cursor/discovery throttles remain here: the
+/// periodic gate checks time since the pull cursor against the configured
+/// refreshInterval.
 async fn auto_sync_backend(
     db: &Arc<tokio::sync::Mutex<Connection>>,
     http: &reqwest::Client,
@@ -833,8 +835,7 @@ async fn backend_sync_plan(
     if !on || !connected {
         return Ok(None);
     }
-    let normal_due = focus
-        || (has_binding && backend_sync_due(now, interval_min.min(1), true, last_sync, false));
+    let normal_due = focus || (has_binding && backend_sync_due(now, interval_min, last_sync));
     if !normal_due && !discovery_due && !outbox_pending {
         return Ok(None);
     }
@@ -931,24 +932,17 @@ async fn run_background_sync(
         .await;
 }
 
-/// 有绑定时沿用条目游标间隔；零绑定时改用独立发现节流，避免 `last_sync_ts=0`
-/// 令 scheduler 每个 TICK 都发起认证/订阅请求。
-fn backend_sync_due(
-    now: i64,
-    interval_min: i64,
-    has_binding: bool,
-    last_sync: i64,
-    discovery_due: bool,
-) -> bool {
-    if has_binding {
-        now - last_sync >= interval_min * 60
-    } else {
-        discovery_due
-    }
+/// 有绑定时按配置间隔（refreshInterval 分钟数）判断到期：自上次同步（Pull 游标
+/// `last_sync_ts`）起满配置分钟数即判 due。配置即真值，不再钳制——2026-11-15
+/// 修订（审计 P1-1/D1）：删除原 `.min(1)`，它曾把配置的 5–720 分钟压成 1 分钟。
+/// 零绑定不走本判定：调用方已先判 `has_binding`，零绑定时改用独立发现节流，
+/// 避免 `last_sync_ts=0` 令 scheduler 每个 TICK 都发起认证/订阅请求。
+fn backend_sync_due(now: i64, interval_min: i64, last_sync: i64) -> bool {
+    now - last_sync >= interval_min * 60
 }
 
 /* ============================================================
-W3-3：窗口聚焦触发的 light 同步（60s 节流；30 分钟周期判据零改动）
+W3-3：窗口聚焦触发的 light 同步（60s 节流；周期判据零改动，按配置间隔判定）
 ============================================================ */
 
 /// 聚焦触发的最小间隔（秒）：距上次触发不足 60s 直接跳过。
@@ -991,8 +985,8 @@ pub fn on_window_focused(app: AppHandle) {
 
 /// 聚焦同步执行体：与 auto_sync_backend 的 normal_due 分支同链
 /// （outbox pending 检查 → 订阅写回 → sync_light → 数据变化事件），
-/// 但不做 30 分钟/发现节流判定——聚焦只受自身 60s 节流约束。周期同步的
-/// 到期判定、发现节流与调度循环节奏零改动。
+/// 但不做周期/发现节流判定——聚焦只受自身 60s 节流约束。周期同步的到期
+/// 判定（按配置间隔）、发现节流与调度循环节奏零改动。
 async fn focus_triggered_sync(app: &AppHandle) {
     let db = app.state::<AppState>().db.clone();
     let http = app.state::<AppState>().http.clone();
@@ -1632,22 +1626,19 @@ mod refresh_interval_tests {
         assert_eq!(read_refresh_interval(&json!({})), None);
     }
 
+    /// 周期到期判据（纯函数锁定）：自拉取游标起不足配置间隔不得判 due，满间隔
+    /// 判 due。判别力：比较方向写反或分钟换算写错会红。原
+    /// `zero_binding_gate_uses_discovery_throttle_not_last_sync_zero` 的零绑定
+    /// 断言随 P1-1 删除 `has_binding` 分支移入 `backend_plan_tests`，经
+    /// `backend_sync_plan` 真实调用路径锁定；有绑定两断言在此保留。
     #[test]
-    fn zero_binding_gate_uses_discovery_throttle_not_last_sync_zero() {
+    fn interval_gate_locks_elapsed_vs_configured_interval() {
         let now = 1_700_000_000;
         assert!(
-            !backend_sync_due(now, 30, false, 0, false),
-            "零绑定时 last_sync=0 不得让 scheduler 每个 TICK 启动"
+            !backend_sync_due(now, 30, now - 60),
+            "自拉取游标起 60 秒 < 配置间隔 30 分钟，不得判 due"
         );
-        assert!(
-            backend_sync_due(now, 30, false, 0, true),
-            "独立发现节流到期后仍应允许自动发现"
-        );
-        assert!(
-            !backend_sync_due(now, 30, true, now - 60, false),
-            "有绑定时继续按条目游标间隔节流"
-        );
-        assert!(backend_sync_due(now, 30, true, now - 30 * 60, false));
+        assert!(backend_sync_due(now, 30, now - 30 * 60));
     }
 
     /// W3-3：聚焦节流判据（纯函数锁定）——距上次触发 <60s 跳过，≥60s 允许；
@@ -1682,6 +1673,99 @@ mod backend_plan_tests {
             crate::db::set_setting(&conn, key, value).unwrap();
         }
         Arc::new(tokio::sync::Mutex::new(conn))
+    }
+
+    /// P1-1 验收（审计 2026-11-14）：调用点断言——`refreshInterval=720` 时，
+    /// 60 秒处不判整拉 due、720 分钟处判 due。必须经由真实调用路径
+    /// `backend_sync_plan`（纯函数测试删 `.min(1)` 前后都绿，无判别力）。
+    /// 判别力：恢复 `.min(1)` 钳制会在 60 秒断言变红；把间隔硬编码回 30 分钟
+    /// 默认会在 119 分钟断言变红。
+    #[tokio::test]
+    async fn periodic_due_follows_configured_interval_through_backend_sync_plan() {
+        let db = configured_db();
+        let now = chrono::Utc::now().timestamp();
+        {
+            let conn = db.lock().await;
+            crate::db::set_setting(
+                &conn,
+                "app_settings",
+                r#"{"autoSync":true,"refreshInterval":720}"#,
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO folders(id,name) VALUES(1,'F');
+                 INSERT INTO feeds(id,folder_id,feed_url,title,remote_id)
+                 VALUES(1,1,'https://example.com/rss','F',42);",
+            )
+            .unwrap();
+            crate::db::set_last_sync_ts(&conn, now - 60).unwrap();
+        }
+        let plan = backend_sync_plan(&db, false)
+            .await
+            .unwrap()
+            .expect("发现节流未记账应给出计划");
+        assert!(
+            !plan.normal_due,
+            "refreshInterval=720：60 秒处不得判整拉 due（min(1) 回归在此变红）"
+        );
+
+        {
+            let conn = db.lock().await;
+            crate::db::set_last_sync_ts(&conn, now - 119 * 60).unwrap();
+        }
+        let plan = backend_sync_plan(&db, false)
+            .await
+            .unwrap()
+            .expect("发现节流未记账应给出计划");
+        assert!(
+            !plan.normal_due,
+            "refreshInterval=720：119 分钟处仍未到期（钳成 30 分钟默认的回归在此变红）"
+        );
+
+        {
+            let conn = db.lock().await;
+            crate::db::set_last_sync_ts(&conn, now - 720 * 60).unwrap();
+        }
+        let plan = backend_sync_plan(&db, false)
+            .await
+            .unwrap()
+            .expect("满配置间隔应给出计划");
+        assert!(
+            plan.normal_due,
+            "refreshInterval=720：720 分钟处必须判整拉 due"
+        );
+    }
+
+    /// 原纯函数测试的零绑定断言移到真实调用路径锁定：零绑定 + `last_sync_ts=0`
+    /// 不得让 scheduler 每个 TICK 启动整拉；首次发现到期由独立节流给出计划，
+    /// 记账后节流窗口内完全静默（`last_sync_ts=0` 不得单独触发任何同步）。
+    #[tokio::test]
+    async fn zero_binding_gate_uses_discovery_throttle_not_last_sync_zero() {
+        let db = configured_db();
+        let now = chrono::Utc::now().timestamp();
+        {
+            let conn = db.lock().await;
+            crate::db::set_setting(&conn, "app_settings", r#"{"autoSync":true}"#).unwrap();
+        }
+        let plan = backend_sync_plan(&db, false)
+            .await
+            .unwrap()
+            .expect("发现首次到期应给出计划");
+        assert!(!plan.normal_due, "零绑定时 last_sync=0 不得让整拉判 due");
+        assert!(plan.discovery_due, "独立发现节流到期后仍应给出自动发现计划");
+
+        {
+            let conn = db.lock().await;
+            let key = crate::sync::current_account(&conn)
+                .unwrap()
+                .expect("测试库已配置账号")
+                .key;
+            crate::db::mark_zero_binding_discovery_attempt(&conn, &key, now).unwrap();
+        }
+        assert!(
+            backend_sync_plan(&db, false).await.unwrap().is_none(),
+            "发现节流窗口内零绑定 + last_sync=0 不得启动任何同步"
+        );
     }
 
     #[tokio::test]
