@@ -66,6 +66,61 @@ for (const [layout, feedId, selector] of [
   });
 }
 
+componentTest('N-5：NotifCard 译文含媒体，重复渲染不重建译文 DOM（渲染计数断言）', { timeout: 30000 }, async () => {
+  installBackend();
+  resetStore();
+  const MEDIA_TRANSLATED = '<p>译文段落 <img src="https://example.com/pic.png" alt="媒体探针"> '
+    + '<video src="https://example.com/clip.mp4"></video></p>';
+  const row = mkRow({
+    id: 772,
+    feed_id: 14,
+    content_html: '<p>正文</p>',
+    translated_content: MEDIA_TRANSLATED,
+  });
+  seedFromRows([row], { layout: 'notification' });
+  const feedIndex = new Map(useAppStore.getState().feedIndex);
+  const binding = feedIndex.get(String(14));
+  feedIndex.set(String(14), {
+    ...binding,
+    feed: { ...binding.feed, autoTranslate: true, translateMode: 'on' },
+  });
+  useAppStore.setState({ feedIndex });
+
+  const { createElement, act } = await import('react');
+  const { Timeline } = await import('../../src/components/Timeline.tsx');
+  const mounted = await mount(createElement(Timeline));
+  await waitFor(() => !!mounted.container.querySelector('.notif-translated-block.show video'), { label: 'NotifCard 译文媒体可见' });
+
+  /* N-5 验收：重复渲染时译文里的媒体节点不重建（同 SocialCard translatedHtml
+     范式——内联 {__html} 对象每次 render 新建会触发 React 重设 innerHTML）。
+     重渲染由 NotifCard 自己订阅的 translatingIds 翻转驱动；每次翻转都以
+     「翻译中…」文本出现/消失证明该次 render 真实发生（渲染计数），
+     防止「根本没重渲染」导致的空绿。 */
+  const mediaImg = mounted.container.querySelector('.notif-translated-block img');
+  const mediaVideo = mounted.container.querySelector('.notif-translated-block video');
+  assert.ok(mediaImg && mediaVideo, '译文媒体 img/video 必须真实进入 DOM');
+
+  let confirmedRenders = 0;
+  const confirmRerender = async (on) => {
+    await act(async () => { useAppStore.setState({ translatingIds: { '772': on } }); });
+    await flush(2);
+    const block = mounted.container.querySelector('.notif-translated-block');
+    assert.equal(block.textContent.includes('翻译中…'), on,
+      `第 ${confirmedRenders + 1} 次重渲染未发生（翻译中…文本未按预期切换）`);
+    confirmedRenders++;
+  };
+  await confirmRerender(true);
+  await confirmRerender(false);
+  await confirmRerender(true);
+  await confirmRerender(false);
+  assert.ok(confirmedRenders >= 4, `至少确认 4 次重渲染，实际 ${confirmedRenders}`);
+
+  const imgAfter = mounted.container.querySelector('.notif-translated-block img');
+  const videoAfter = mounted.container.querySelector('.notif-translated-block video');
+  assert.strictEqual(imgAfter, mediaImg, '译文 <img> 节点跨重复渲染被重建（translatedHtml 未按 SocialCard 范式 memo 化）');
+  assert.strictEqual(videoAfter, mediaVideo, '译文 <video> 节点跨重复渲染被重建（translatedHtml 未按 SocialCard 范式 memo 化）');
+});
+
 componentTest('外链委托：嵌套代理容器只处理一次，已阻止事件不再触发 opener', { timeout: 30000 }, async () => {
   resetStore();
   globalThis.__OPEN_URLS__ = [];

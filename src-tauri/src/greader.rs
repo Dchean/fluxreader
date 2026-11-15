@@ -18,6 +18,7 @@
 //!   - `ot`/`nt` 是 unix **秒**。
 
 use crate::error::{AppError, AppResult};
+use crate::ingestion::{read_body_capped, read_text_capped, MAX_BODY_BYTES};
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -200,10 +201,10 @@ impl ItemCategories {
         self.0.as_deref().unwrap_or(&[])
     }
 
-    pub fn state_for(&self, tag_suffix: &str) -> RemoteState {
+    pub fn state_for(&self, tag_id: &str) -> RemoteState {
         match self.0.as_ref() {
             None => RemoteState::Missing,
-            Some(categories) => RemoteState::from_bool(has_tag(categories, tag_suffix)),
+            Some(categories) => RemoteState::from_bool(has_tag(categories, tag_id)),
         }
     }
 }
@@ -262,14 +263,14 @@ impl ItemContent {
     pub fn read_state(&self) -> RemoteState {
         match self.read_state_override {
             Some(state) => state,
-            None => self.categories.state_for("/com.google/read"),
+            None => self.categories.state_for(tags::READ),
         }
     }
 
     pub fn starred_state(&self) -> RemoteState {
         match self.starred_state_override {
             Some(state) => state,
-            None => self.categories.state_for("/com.google/starred"),
+            None => self.categories.state_for(tags::STARRED),
         }
     }
 }
@@ -361,16 +362,27 @@ impl std::fmt::Debug for GReaderClient {
     }
 }
 
+/// GR 读体失败统一口径（P1-2）：四个响应读取点一律经 16 MiB 硬界收体。
+/// 收体实现超界返回 `responseTooLarge`（英文、非白名单码），而诊断分类
+/// （`diagnostics::error_class`）只认现行码——GR 读体失败必须保持 network
+/// 分类，超界文案译回中文并点明 16 MiB 上限；其余读体失败保持 network。
+fn body_read_error(label: &str, e: AppError) -> AppError {
+    if e.code == "responseTooLarge" {
+        AppError::network(format!("{label} 响应超过 16 MiB 上限"))
+    } else {
+        AppError::network(format!("{label} 读取响应体失败（{e}）"))
+    }
+}
+
 /// HTTP 传输/读取失败仍是 network；成功响应的 JSON 解码或 schema 失败是
 /// protocol。不能继续用 `Response::json()`，其错误统一被 reqwest 包装成 network。
 async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     resp: reqwest::Response,
     request: &str,
 ) -> AppResult<T> {
-    let body = resp
-        .bytes()
+    let body = read_body_capped(resp, MAX_BODY_BYTES)
         .await
-        .map_err(|e| AppError::network(format!("{request} 成功但读取响应体失败（{e}）")))?;
+        .map_err(|e| body_read_error(request, e))?;
     serde_json::from_slice(&body)
         .map_err(|e| AppError::new("protocol", format!("{request} 响应解析失败：{e}")))
 }
@@ -486,7 +498,9 @@ impl GReaderClient {
             .auth_if(AppError::is_auth_status(status)));
         }
         // 双格式：先 JSON（Miniflux），失败回退经典文本 Auth= 行（FreshRSS）。
-        let body = resp.text().await?;
+        let body = read_text_capped(resp, MAX_BODY_BYTES)
+            .await
+            .map_err(|e| body_read_error("ClientLogin", e))?;
         let token = parse_client_login(&body)?;
         Ok(Some(Self {
             base: base.to_string(),
@@ -578,9 +592,9 @@ impl GReaderClient {
             .auth_if(AppError::is_auth_status(status)));
         }
         // 不把响应体裁剪进错误/日志：token 与凭据同属敏感值。
-        let body = resp.text().await.map_err(|e| {
-            AppError::network(format!("获取 action token 失败：读取响应失败（{e}）"))
-        })?;
+        let body = read_text_capped(resp, MAX_BODY_BYTES)
+            .await
+            .map_err(|e| body_read_error("获取 action token", e))?;
         let token = body.trim();
         if token.is_empty() {
             return Err(AppError::network(
@@ -703,10 +717,9 @@ impl GReaderClient {
                     .auth_if(AppError::is_auth_status(status)),
             );
         }
-        let body = resp
-            .text()
+        let body = read_text_capped(resp, MAX_BODY_BYTES)
             .await
-            .map_err(|e| AppError::network(format!("POST {path} 成功但读取响应体失败（{e}）")))?;
+            .map_err(|e| body_read_error(&format!("POST {path}"), e))?;
         if body.trim() != "OK" {
             return Err(AppError::network(format!(
                 "POST {path} → 200 但响应体不是 OK（协议错误，写操作未生效）"
@@ -1027,9 +1040,25 @@ pub fn parse_item_id(id: &str) -> Option<i64> {
     None
 }
 
-/// 判断 item 的 categories 是否含某 tag（read/starred 状态判断）。
-pub fn has_tag(categories: &[String], tag_suffix: &str) -> bool {
-    categories.iter().any(|c| c.ends_with(tag_suffix))
+/// 判断 item 的 categories 是否含某 state tag（read/starred 状态判断）。
+///
+/// `tag_id` 是完整 tag id（`tags::READ` 形态，`user/-/state/com.google/read`）。
+/// 必须按 tag 路径**全等**匹配，不能对尾部 `/com.google/read` 做 `ends_with`
+/// 后缀匹配（P2-1，读与星标同病）：用户可自建名为 `com.google/read` 的
+/// label（id `user/<id>/label/com.google/read`），后缀匹配会把同名 label
+/// 误判成「已读」/「星标」state tag。
+/// user 段不参与比较：服务端回显真实 id（FreshRSS/Miniflux：`user/2/…`），
+/// 请求侧惯例写 `-`（`tags::*`），两种形态都必须命中。非 `user/-/` 形态的
+/// `tag_id` 一律不命中（调用点只传 `tags::*`）。
+pub fn has_tag(categories: &[String], tag_id: &str) -> bool {
+    let Some(expected) = tag_id.strip_prefix("user/-/") else {
+        return false;
+    };
+    categories.iter().any(|c| {
+        c.strip_prefix("user/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, path)| path == expected)
+    })
 }
 
 /// 从分类 id 解析 label 后缀：`user/<user>/label/<name>` → `<name>`。
@@ -1232,15 +1261,44 @@ mod tests {
         assert_eq!(category_label_from_id("user/-/label/"), None);
     }
 
+    /// P2-1：tag 判别必须全等而非后缀——数字 user 段（服务端回显形态）与
+    /// `-`（请求侧惯例形态）都命中；reading-list / label 等非目标 tag 不得命中。
     #[test]
-    fn has_tag_matches_suffix() {
+    fn has_tag_matches_state_tag_exactly() {
         let cats = vec![
             "user/2/state/com.google/reading-list".to_string(),
             "user/2/label/图片".to_string(),
             "user/2/state/com.google/read".to_string(),
         ];
-        assert!(has_tag(&cats, "/com.google/read"));
-        assert!(!has_tag(&cats, "/com.google/starred"));
+        assert!(has_tag(&cats, tags::READ));
+        assert!(has_tag(
+            &["user/-/state/com.google/read".to_string()],
+            tags::READ
+        ));
+        assert!(!has_tag(&cats, tags::STARRED));
+    }
+
+    /// P2-1：用户自建名为 `com.google/read` 的 label 不得被当成已读 state
+    /// tag（星标同理）——后缀匹配时代这是真实误判路径。显式 categories 下
+    /// 无 state tag = 明确 False（不是 Missing，更不是误判 True）。
+    #[test]
+    fn has_tag_rejects_label_named_like_state_tag() {
+        let cats = vec![
+            "user/2/state/com.google/reading-list".to_string(),
+            "user/2/label/com.google/read".to_string(),
+            "user/2/label/com.google/starred".to_string(),
+        ];
+        assert!(!has_tag(&cats, tags::READ), "同名 label 不是已读 state tag");
+        assert!(
+            !has_tag(&cats, tags::STARRED),
+            "同名 label 不是星标 state tag"
+        );
+        let item: ItemContent = serde_json::from_str(
+            r#"{"id":"1","title":"t","categories":["user/2/label/com.google/read"]}"#,
+        )
+        .unwrap();
+        assert_eq!(item.read_state(), RemoteState::False);
+        assert_eq!(item.starred_state(), RemoteState::False);
     }
 
     #[test]

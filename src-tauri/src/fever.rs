@@ -22,8 +22,8 @@
 //!   循环 `items_before` 直到返回空数组，即取尽服务端保留历史（TASK-125 审计
 //!   P2-8；「历史是否仍被服务端保留另当别论」）；分页失败 / 页预算到达 /
 //!   游标不前进都保留 checkpoint，下一次同步（含自动 light）自动续取。
-//! - **资源界限**：响应体读取有 16 MiB 上限（`MAX_RESPONSE_BYTES`），超限
-//!   显式协议错误；历史回溯在 `sync/fever_pull.rs` 逐页落库并释放正文，
+//! - **资源界限**：响应体读取有 16 MiB 上限（与 `ingestion::http` 同一收体
+//!   实现），超限显式协议错误；历史回溯在 `sync/fever_pull.rs` 逐页落库并释放正文，
 //!   不累计全历史。
 //! - **id 类型（审计 F03）**：FreshRSS 的 Fever 端把 64 位 id 作为 PHP
 //!   numeric-string 序列化（`json_encode` 输出 JSON **字符串**，如
@@ -210,43 +210,25 @@ struct FeverItem {
 客户端
 ============================================================ */
 
-/// Fever 响应体读取上限：16 MiB。单页 50 条的正常响应远小于此；超过即视为
-/// 协议/实现异常，显式失败而不是把整段读入内存再解析。
+/// 读取并解析 Fever 信封（16 MiB 上限，P1-2 收敛到 `ingestion::http` 的同一
+/// 收体实现 `read_body_capped`，单页 50 条的正常响应远小于此）。
 ///
-/// 实现说明（R2）：`Content-Length` 预检（快路径）+ `Response::chunk()` 逐块
-/// 累计的**读取中硬界**；chunk 上自动解压透明生效，覆盖 chunked（无长度）与
-/// 压缩膨胀两种形态。不新增 reqwest feature/依赖。
-const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
-
-/// 读取并解析 Fever 信封（带 16 MiB 上限）。
-///
-/// R2：按 `Response::chunk()` **逐块累计**（reqwest 的 chunk 无需 `stream`
-/// feature；解压也在其上透明生效）——不是「先 `bytes()` 读全再量长度」。
-/// Content-Length 只是提前拒绝的快路径；无长度（chunked）/压缩（解压后膨胀）
-/// 的响应同样在读取过程中被硬界拦住。
-async fn read_envelope(mut resp: reqwest::Response, action: &str) -> AppResult<FeverEnvelope> {
+/// R2：按 chunk 逐块累计的**读取中硬界**——`Content-Length` 预检只是提前
+/// 拒绝的快路径；chunked（无长度）/压缩（解压后膨胀）的响应同样在读取
+/// 过程中被硬界拦住。超限保留 Fever 既有语义：**protocol** 分类，文案含
+/// "16 MiB"（`tests/fever_compat_e2e.rs` 三处断言它）；chunk 读取失败仍是
+/// network（`From<reqwest::Error>`），语义与收敛前一致。
+async fn read_envelope(resp: reqwest::Response, action: &str) -> AppResult<FeverEnvelope> {
     let label = if action.is_empty() { "探针" } else { action };
-    if let Some(len) = resp.content_length() {
-        if len > MAX_RESPONSE_BYTES {
-            return Err(AppError::new(
-                "protocol",
-                format!("Fever {label} 响应超过 16 MiB 上限（Content-Length={len}）"),
-            ));
-        }
-    }
-    let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        if body.len() as u64 + chunk.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(AppError::new(
-                "protocol",
-                format!(
-                    "Fever {label} 响应超过 16 MiB 上限（读取中累计超过 {} 字节）",
-                    MAX_RESPONSE_BYTES
-                ),
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
+    let body = crate::ingestion::read_body_capped(resp, crate::ingestion::MAX_BODY_BYTES)
+        .await
+        .map_err(|e| {
+            if e.code == "responseTooLarge" {
+                AppError::new("protocol", format!("Fever {label} 响应超过 16 MiB 上限"))
+            } else {
+                e
+            }
+        })?;
     serde_json::from_slice(&body)
         .map_err(|e| AppError::new("protocol", format!("Fever {label} 响应解析失败：{e}")))
 }
@@ -950,11 +932,8 @@ mod tests {
         assert_eq!(ic.id, "5705");
         assert_eq!(ic.read_state(), crate::greader::RemoteState::True);
         assert_eq!(ic.starred_state(), crate::greader::RemoteState::True);
-        assert!(crate::greader::has_tag(&ic.categories, "/com.google/read"));
-        assert!(crate::greader::has_tag(
-            &ic.categories,
-            "/com.google/starred"
-        ));
+        assert!(crate::greader::has_tag(&ic.categories, tags::READ));
+        assert!(crate::greader::has_tag(&ic.categories, tags::STARRED));
         assert_eq!(
             ic.origin.as_ref().map(|o| o.stream_id.as_str()),
             Some("feed/21")

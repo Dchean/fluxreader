@@ -1793,6 +1793,13 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
     ? body.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
     : '';
   const displayText = expanded && fullText ? fullText : item.snippet;
+  /* N-5（同 SocialCard 的 translatedHtml 范式）：内联 {__html} 每次 render 都是新对象，
+     React 会据此重设 innerHTML，连带重建译文里的媒体节点；按译文内容锁住对象引用，
+     重复渲染时媒体节点才能跨 render 存活。 */
+  const translatedHtml = useMemo(
+    () => ({ __html: body.translatedContent }),
+    [body.translatedContent],
+  );
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
   /* fix-8：摘要框跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但
      尚无摘要时按收起处理，不再渲染空壳摘要框（自动生成仅在中心连续停顿
@@ -1956,7 +1963,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
           /* TASK-122：cleared 判别态呈现「已清空」 */
           <span className="hydrate-placeholder">AI 缓存已清空，可重新生成</span>
         ) : (
-          <span dangerouslySetInnerHTML={{ __html: body.translatedContent }} />
+          <span dangerouslySetInnerHTML={translatedHtml} />
         )}
         {translatingCard ? <span>翻译中…</span> : null}
         {/* fix-5：翻译失败内联错误行 + 重试（与 SocialCard 同形态） */}
