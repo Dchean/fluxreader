@@ -276,6 +276,9 @@ OPT-008B 第一阶段：smartDedup 的显示聚合谓词
   去重——那会跳过页、hidden 集合随页边界变化）：列表、`article_index`、
   搜索、`mark_all_read`、`list_unread_ids_scoped`、`feed_counts`、
   `scope_counts` 全部消费同一生成器 `dedup_exists_clause` 或其等价常量。
+- 语义边界：本节的 url_norm 聚合只服务**显示层**；读闭包的状态传播（标读回执）
+  是另一套语义——按源内 RSS 等价组连接（见 [`read_targets_with_state`]），不消费
+  url_norm，两套集合不可互推。
 ============================================================ */
 
 /// 新格式固定按源内非空 RSS 等价组显示；旧 smartDedup 设置不再控制该契约。
@@ -2168,7 +2171,9 @@ pub fn set_read(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
     Ok(())
 }
 
-/// AI 产物落库（缓存）：完成后写入，重复打开不重算。
+/// Note: 零生产消费，仅测试载体 — 见 tests/ai_e2e.rs 等测试文件；生产 AI 落库走
+/// [`set_article_ai_fields_checked`]（P3-18 补账，2026-11-15）。
+/// AI 产物直写（不带提交前提校验、不写缓存签名）：完成后写入，重复打开不重算。
 /// UPDATE 触发器自动同步 FTS 索引（ai_summary/translated_content 可被搜索）。
 pub fn set_article_ai_fields(
     conn: &Connection,
@@ -2410,7 +2415,7 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
 TASK-108：状态写入 + 同步入队 的复合事务（同生共死，REQ-002）
 ============================================================ */
 
-/* OPT-008B R2（N1）：读写入回执——读闭包（主行 ∪ 同 url_norm 未读副本）一次
+/* OPT-008B R2（N1）：读写入回执——读闭包（主行 ∪ 同源内 RSS 等价组的未读副本）一次
 可能翻转多行，命令层把**真实翻转行**（操作前未读）回执给前端；前端据此让
 受影响条目/视图缓存/按源计数本地收敛，不依赖全量 reload（也无需计数对账
 覆盖条目；布局无关的源键可按回执逐行扣减）。
@@ -2453,14 +2458,16 @@ fn set_read_enqueue_in_tx(
     Ok(receipts)
 }
 
-// Note: 读闭包查询计划由 v30 部分索引 `idx_articles_url_norm_unread`
-// （`(url_norm) WHERE is_read = 0`）支撑（等值前缀 + 免排序覆盖扫描）；索引缺失
-// 或损坏时回落旧计划（`idx_articles_unread` 全未读扫描），结果集不变 — 见
-// docs/performance.md「OPT-017G」与 .agents/notes/implemented/architecture/
-// 2026-10-12-订阅条目与共享内容身份.md 的「OPT-017G 追加」。
-/// 读闭包目标查询：同 `url_norm` 且未读的兄弟行（排除自身），按 id 升序。
-/// 提取为常量使 EXPLAIN 计划回归测试与生产**同字节**（`opt017g_read_closure_tests`
-/// 直接复用本常量）——测试不得另抄一份 SQL。
+// Note: 读闭包查询计划由 `idx_articles_rss_group`（去重显示聚合与闭包共用的等价组
+// 索引）支撑；该索引缺失时经 prepare_with_dedup_index_fallback 回落为不引用它的
+// 计划（运行时回落只覆盖此索引，结果集不变、只变慢）。v30 曾建的 url_norm 部分
+// 索引 `idx_articles_url_norm_unread` 已于 2026-11-15 删除（全库无消费查询，自始
+// 无运行时回落实现）：新库不再建立、无迁移，既有库不自动删 — 见 docs/performance.md
+// 与 .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md。
+/// 读闭包目标查询：同源内 RSS 等价组（feed + rss_content_id + 标题/附件一致）且
+/// 未读的兄弟行（排除自身），按 id 升序。提取为常量供 `opt017g_read_closure_tests`
+/// 直接复用——测试不得另抄一份 SQL；与生产 [`read_targets_with_state`] 的闭包集合
+/// 语义同源（SAME_RSS_GROUP 连接），投影不同（本常量仅供测试）。
 #[cfg(test)]
 pub(crate) const READ_CLOSURE_SQL: &str = "SELECT b.id FROM articles a JOIN articles b ON b.feed_id=a.feed_id AND b.rss_content_id=a.rss_content_id AND b.title=a.title AND COALESCE(b.enclosure_url,'')=COALESCE(a.enclosure_url,'') AND COALESCE(b.enclosure_mime,'')=COALESCE(a.enclosure_mime,'') WHERE a.id=?1 AND b.id!=a.id AND b.is_read=0 ORDER BY b.id";
 
@@ -5668,8 +5675,10 @@ mod opt017b_search_tests {
 
 /* ============================================================
 OPT-017G：读闭包查询规划与批量标读成本回归。
-（先红后绿：本模块在实现 v30 部分索引 `idx_articles_url_norm_unread` 前运行于
-未迁移库上——「计划引用新索引」断言为红，语义等值组恒为守卫、以变异证明有效。）
+（先红后绿：本模块在索引落地前运行于未迁移库上——「计划引用等价组索引」断言为红，
+语义等值组恒为守卫、以变异证明有效。历史：模块为 v30 的 url_norm 部分索引而设；
+该索引零消费、已于 2026-11-15 删除（审计 P1-3/D2=A），现行计划断言钉在
+`idx_articles_rss_group`。）
 ============================================================ */
 #[cfg(test)]
 mod opt017g_read_closure_tests {
@@ -5715,9 +5724,13 @@ mod opt017g_read_closure_tests {
         g2: [i64; 2],
         unique: i64,
         null_norm: i64,
+        /// 同 feed、同 RSS 等价组但 url_norm 为 NULL 的一对：判别「url_norm 不是
+        /// 闭包键」——若助手/实现误把 url_norm 为空当无闭包，这两行翻红。
+        null_group: [i64; 2],
     }
 
-    /// 夹具：同 url_norm 跨源组（读传播主场）、独立组、独条、NULL url_norm。
+    /// 夹具：同 url_norm 跨源组（读传播主场）、独立组、独条、NULL url_norm 独条、
+    /// NULL url_norm 但同 RSS 等价组的一对。
     /// 另补 200 条唯一 url_norm 底噪行，保证规划器有统计空间选择索引
     /// （小表整表扫描可能压过索引，与生产形态不符）。
     fn seed_fixture(conn: &Connection) -> Fixture {
@@ -5790,6 +5803,8 @@ mod opt017g_read_closure_tests {
             false,
         );
         let null_norm = mk(feed_a, "null-1", None, false, false);
+        let np1 = mk(feed_a, "null-2", None, false, false);
+        let np2 = mk(feed_a, "null-3", None, false, false);
         for i in 0..200 {
             let norm = format!("https://probe.invalid/noise/{i}");
             conn.execute(
@@ -5800,7 +5815,12 @@ mod opt017g_read_closure_tests {
             .unwrap();
         }
         // Same-source nonempty RSS content forms groups; matching URLs in other sources do not.
-        for (ids, body) in [(&[a1, a2, a3][..], "group-a"), (&[b1, b2][..], "group-b")] {
+        // group-null 的两行 url_norm 为 NULL：闭包按 RSS 等价组成立，与 url_norm 无关。
+        for (ids, body) in [
+            (&[a1, a2, a3][..], "group-a"),
+            (&[b1, b2][..], "group-b"),
+            (&[np1, np2][..], "group-null"),
+        ] {
             let input = super::super::contents::ContentInput {
                 content_html: None,
                 body_text: body.into(),
@@ -5818,25 +5838,17 @@ mod opt017g_read_closure_tests {
             }
         }
         Fixture {
-            all: vec![a1, a2, a3, b1, b2, unique, null_norm],
+            all: vec![a1, a2, a3, b1, b2, unique, null_norm, np1, np2],
             g1: [a1, a2, a3],
             g2: [b1, b2],
             unique,
             null_norm,
+            null_group: [np1, np2],
         }
     }
 
+    /// 闭包行集按生产语义查询：url_norm 是否为空不影响闭包（闭包键是 RSS 等价组）。
     fn closure_rowset(conn: &Connection, id: i64) -> Vec<i64> {
-        let norm: Option<String> = conn
-            .query_row(
-                "SELECT url_norm FROM articles WHERE id = ?1",
-                rusqlite::params![id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .unwrap();
-        let Some(_norm) = norm else {
-            return Vec::new();
-        };
         let mut stmt = conn.prepare(READ_CLOSURE_SQL).unwrap();
         stmt.query_map(rusqlite::params![id], |r| r.get::<_, i64>(0))
             .unwrap()
@@ -5866,20 +5878,18 @@ mod opt017g_read_closure_tests {
         serde_json::json!({"articles": rows, "queue": queue})
     }
 
-    /// 反例 1（先红后绿）：读闭包查询在最新 schema 下必须由 v30 部分索引
-    /// `idx_articles_url_norm_unread` 驱动（等值前缀 + 免排序覆盖扫描），
-    /// 不得再扫全未读行，也不得引入临时排序。
+    /// 反例 1（先红后绿）：读闭包查询在最新 schema 下必须由等价组索引
+    /// `idx_articles_rss_group` 驱动（等值前缀 + 免排序），不得扫全未读行，
+    /// 也不得引入临时排序。
     #[test]
-    fn closure_plan_uses_partial_url_norm_unread_index() {
+    fn closure_plan_uses_rss_group_index() {
         let conn = conn();
         let _fx = seed_fixture(&conn);
         assert!(
             index_present(&conn, NEW_INDEX),
-            "v30 必须在最新 schema 建立 {NEW_INDEX}"
+            "最新 schema 必须建立 {NEW_INDEX}"
         );
         let plan = explain_plan(&conn, READ_CLOSURE_SQL, 1);
-        let plan_ref = explain_plan(&conn, READ_CLOSURE_SQL, 1);
-        assert_eq!(plan, plan_ref, "同库同查询计划必须稳定");
         assert!(
             plan.iter().any(|s| s.contains(NEW_INDEX)),
             "闭包计划必须引用 {NEW_INDEX}：{plan:?}"
@@ -5894,8 +5904,8 @@ mod opt017g_read_closure_tests {
         );
     }
 
-    /// 反例 3（缺失回落）：删掉新索引后——
-    /// 计划回落旧现场（idx_articles_unread 全未读扫描），但闭包**结果集**与
+    /// 反例 3（缺失回落）：删掉等价组索引后——
+    /// 计划回落为不引用该索引的计划，但闭包**结果集**与
     /// 生产状态迁移保持逐字正确（回落只变慢、不变义）。
     #[test]
     fn fallback_when_index_dropped_keeps_results_and_transitions() {
@@ -5937,7 +5947,7 @@ mod opt017g_read_closure_tests {
         assert_eq!(read_state(fx.g1[1]), 1, "已读兄弟不受影响");
     }
 
-    /// 反例 2（语义等值）：同一夹具双库——库 1 带新索引、库 2 删新索引——
+    /// 反例 2（语义等值）：同一夹具双库——库 1 带等价组索引、库 2 删该索引——
     /// 完整操作序列（批量标读/单条标读/取消标读/收藏）后：
     /// 逐项闭包结果集、回执行、逐行状态（read/read_version/star）与队列、计数快照
     /// 全部逐字一致；收藏保持独立（不随读传播）。
@@ -5959,6 +5969,28 @@ mod opt017g_read_closure_tests {
                 "库1/库2 闭包结果集必须一致（id={id}）"
             );
         }
+        // url_norm 不是闭包键：NULL url_norm 但同 RSS 等价组的一对仍互相闭包。
+        // 若助手恢复「url_norm 为空 ⇒ 无闭包」早退，这四条断言立即翻红（判别力）。
+        assert_eq!(
+            closure_rowset(&db1, fx1.null_group[0]),
+            vec![fx1.null_group[1]],
+            "NULL url_norm 行仍须按 RSS 等价组闭包到兄弟行"
+        );
+        assert_eq!(
+            closure_rowset(&db1, fx1.null_group[1]),
+            vec![fx1.null_group[0]],
+            "NULL url_norm 行的兄弟视角闭包同样成立"
+        );
+        assert_eq!(
+            closure_rowset(&db2, fx1.null_group[0]),
+            vec![fx1.null_group[1]],
+            "无索引库 NULL url_norm 行闭包同判"
+        );
+        assert_eq!(
+            closure_rowset(&db2, fx1.null_group[1]),
+            vec![fx1.null_group[0]],
+            "无索引库 NULL url_norm 行兄弟视角闭包同判"
+        );
 
         let mut receipts1: Vec<ReadWriteReceipt> = Vec::new();
         let mut receipts2: Vec<ReadWriteReceipt> = Vec::new();
@@ -5977,7 +6009,8 @@ mod opt017g_read_closure_tests {
         // 5) 批量取消标读
         receipts1.extend(set_read_bulk_with_enqueue(&db1, &fx1.g2, false).unwrap());
         receipts2.extend(set_read_bulk_with_enqueue(&db2, &fx2.g2, false).unwrap());
-        // 6) NULL url_norm 条目（无闭包查询、主行直通）
+        // 6) NULL url_norm 且无 RSS 等价组的条目（无传播、主行直通；url_norm
+        //    本身不是闭包键——见上方 null_group 判别断言）
         receipts1.extend(set_read_with_enqueue(&db1, fx1.null_norm, true).unwrap());
         receipts2.extend(set_read_with_enqueue(&db2, fx2.null_norm, true).unwrap());
         // 7) 独条

@@ -65,11 +65,7 @@ pub fn parse_feed(bytes: &[u8], base_url: &str) -> AppResult<ParsedFeed> {
         .or_else(|| Some(base_url.to_string()));
 
     let base = site_url.as_deref().unwrap_or(base_url);
-    let articles = raw
-        .entries
-        .iter()
-        .filter_map(|e| map_entry(e, base))
-        .collect();
+    let articles = raw.entries.iter().map(|e| map_entry(e, base)).collect();
 
     Ok(ParsedFeed {
         title: raw.title.map(|t| t.content),
@@ -101,7 +97,7 @@ fn clamp_publish_date(date: DateTime<Utc>) -> DateTime<Utc> {
     }
 }
 
-fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
+fn map_entry(e: &feed_rs::model::Entry, base: &str) -> ParsedArticle {
     let url = e
         .links
         .iter()
@@ -233,7 +229,7 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
         .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
         .filter(|d| *d > 0);
 
-    Some(ParsedArticle {
+    ParsedArticle {
         article: NewArticle {
             guid,
             url,
@@ -250,7 +246,7 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
             source: "direct".into(),
         },
         published_at_clamped: is_future,
-    })
+    }
 }
 
 /// 从 URL 扩展名推断媒体 MIME（enclosure 无 type 属性时兜底）

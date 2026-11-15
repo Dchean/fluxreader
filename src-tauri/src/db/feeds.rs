@@ -505,7 +505,9 @@ pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
 }
 
 /// 刷新结果落库：成功清零失败计数并立即可再抓；失败则递增计数并按
-/// 指数退避（5min→30min→2h 封顶）推迟下次尝试。
+/// 指数退避（5/5/30/120 分钟，2h 封顶）推迟下次尝试。
+/// 注意：生产抓取管线（ingestion/staged.rs）走 [`set_feed_fetch_state_if_generation`]；
+/// 本函数当前仅 commands/folders.rs 添加源事务成功清零复用（P3-19 注释对齐，2026-11-15）。
 pub fn set_feed_fetch_state(
     conn: &Connection,
     id: i64,
@@ -536,6 +538,7 @@ pub fn set_feed_fetch_state(
 /// 带刷新代际的状态写回：只有 `feed_generation` 仍等于本请求开始时的值才写。
 /// 返回 false 表示本轮已被更新的一次抓取取代，调用方必须丢弃整个写回结果
 /// （包括文章），不能把旧 ETag/失败状态覆盖到新轮次上。
+/// 失败退避阶梯与 [`set_feed_fetch_state`] 相同（5/5/30/120 分钟，2h 封顶）。
 pub fn set_feed_fetch_state_if_generation(
     conn: &Connection,
     id: i64,

@@ -594,7 +594,7 @@ fn prepare(
     let mut buckets: BTreeMap<u8, Vec<(String, Row)>> = BTreeMap::new();
     for (key, row) in catalog_rows {
         let hash = digest(key.as_bytes());
-        let bucket = u8::from_str_radix(&hash[..2], 16).map_err(|_| invalid("目录桶无效"))? % 64;
+        let bucket = database::bucket_index(&hash);
         buckets.entry(bucket).or_default().push((key, row));
     }
     let mut pages = Vec::new();

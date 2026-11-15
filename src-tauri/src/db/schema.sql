@@ -233,9 +233,6 @@ CREATE INDEX idx_subscription_outbox_url ON subscription_outbox(feed_url);
 
 CREATE INDEX idx_subscription_outbox_pending ON subscription_outbox(status) WHERE status = 'pending';
 
-CREATE INDEX idx_articles_url_norm_unread
-            ON articles(url_norm) WHERE is_read = 0;
-
 CREATE INDEX idx_sync_queue_status ON sync_queue(status);
 
 CREATE TRIGGER trg_articles_published_fallback_ins AFTER INSERT ON articles

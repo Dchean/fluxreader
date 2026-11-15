@@ -90,7 +90,7 @@ impl Manifest {
             "{ROOT}actors/{}/{}/objects/{}/{}",
             self.actor,
             self.kind,
-            bucket(&object.digest),
+            format_args!("{:02x}", database::bucket_index(&object.digest)),
             object.name
         )
     }
@@ -111,12 +111,6 @@ pub(super) fn validate_object(object: &ObjectRef) -> AppResult<()> {
         return Err(invalid("库对象名称或长度无效"));
     }
     Ok(())
-}
-fn bucket(hash: &str) -> String {
-    format!(
-        "{:02x}",
-        u8::from_str_radix(&hash[..2], 16).unwrap_or(0) % 64
-    )
 }
 pub fn random_id(conn: &Connection) -> AppResult<String> {
     Ok(conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?)

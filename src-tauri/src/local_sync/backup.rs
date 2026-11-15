@@ -980,17 +980,6 @@ pub fn restore(conn: &Connection, path: &Path, expected: &str) -> AppResult<Port
     }
     database::register_functions(conn)?;
     let tx = crate::db::write_transaction(conn)?;
-    // Preserve row-ID freshness against in-flight fetch/AI work from the old library.
-    let _next_folder: i64 =
-        tx.query_row("SELECT MAX(COALESCE((SELECT MAX(id) FROM folders),0),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='folders'),0))+1", [], |r| {
-            r.get(0)
-        })?;
-    let _next_source: i64 =
-        tx.query_row("SELECT MAX(COALESCE((SELECT MAX(id) FROM feeds),0),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='feeds'),0))+1", [], |r| r.get(0))?;
-    let _next_article: i64 =
-        tx.query_row("SELECT MAX(COALESCE((SELECT MAX(id) FROM articles),0),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='articles'),0))+1", [], |r| {
-            r.get(0)
-        })?;
     clear_for_restore(&tx)?;
     tx.execute(
         "UPDATE local_sync_control SET seq=?1,lamport=?1 WHERE id=1",

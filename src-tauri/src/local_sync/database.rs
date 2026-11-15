@@ -10,6 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const BOOTSTRAP_SLICE_ROWS: usize = 16;
 
+/// 共享桶函数：digest 前两位 hex 解析后对 64 取模。本文件 flx_bucket、
+/// storage::bucket、body_archive 内联三份旧实现由此收口为单一实现。
+/// 短于 2 位或非 hex 时回退桶 0 而非 panic：正常入口有 digest() 定长 64 位
+/// hex 与 valid_hex 校验，此处为纵深防御（get 安全切片替代 &hash[..2]）。
+pub(super) fn bucket_index(digest_hex: &str) -> u8 {
+    digest_hex
+        .get(..2)
+        .and_then(|prefix| u8::from_str_radix(prefix, 16).ok())
+        .map_or(0, |value| value % 64)
+}
+
 pub fn register_functions(conn: &Connection) -> AppResult<()> {
     use rusqlite::functions::FunctionFlags;
     conn.create_scalar_function(
@@ -18,9 +29,7 @@ pub fn register_functions(conn: &Connection) -> AppResult<()> {
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| {
             let key: String = ctx.get(0)?;
-            Ok(i64::from(
-                u8::from_str_radix(&digest(key.as_bytes())[..2], 16).unwrap_or(0) % 64,
-            ))
+            Ok(i64::from(bucket_index(&digest(key.as_bytes()))))
         },
     )?;
     conn.create_scalar_function(
@@ -435,6 +444,7 @@ pub fn read_body(conn: &Connection, id: i64) -> AppResult<Option<BodyRecord>> {
     body.validate()?;
     Ok(Some(body))
 }
+/// Note: 零生产消费，仅回归测试载体 — 见 src-tauri/src/local_sync/database_tests.rs
 pub fn protected_bodies(conn: &Connection) -> AppResult<Vec<BodyRecord>> {
     let mut stmt=conn.prepare(&format!("SELECT a.id FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN local_sync_article_state l ON l.id=a.id WHERE {} AND ((l.is_read=0 AND l.active=1) OR l.is_starred=1 OR EXISTS(SELECT 1 FROM local_sync_body_hold h WHERE h.article_id=a.id)) ORDER BY a.id",local_source("f")))?;
     let ids = stmt
@@ -590,15 +600,13 @@ pub fn merge_apply(conn: &Connection, expected: i64, incoming: &Checkpoint) -> A
     super::logical::drain_local(conn)?;
     Ok(super::logical::revision(conn)? != before)
 }
+/// Note: 零生产消费，仅回归测试载体 — 见 src-tauri/src/local_sync/database_tests.rs
 pub fn merge_small(
     conn: &Connection,
     expected: i64,
     incoming: &Checkpoint,
 ) -> AppResult<Option<bool>> {
     merge_apply(conn, expected, incoming).map(Some)
-}
-pub fn store_checkpoint(conn: &Connection, state: &Checkpoint) -> AppResult<()> {
-    merge_apply(conn, generation(conn)?, state).map(|_| ())
 }
 fn string<'a>(
     fields: &'a BTreeMap<String, Register>,
@@ -935,6 +943,7 @@ pub(super) fn apply_projection(
     Ok(())
 }
 
+/// Note: 零生产消费，仅回归测试载体 — 见 src-tauri/src/db/body_retention_tests.rs、src-tauri/src/local_sync/database_tests.rs
 pub fn apply_bodies(conn: &Connection, expected: i64, bodies: &[BodyRecord]) -> AppResult<usize> {
     let tx = crate::db::write_transaction(conn)?;
     let count = apply_bodies_in(&tx, expected, bodies)?;
