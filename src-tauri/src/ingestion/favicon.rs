@@ -1,4 +1,6 @@
 //! favicon 自动发现：站点 `<link rel~=icon>` 优先，退回 `<origin>/favicon.ico`。
+//! 边界（P2-2）：私网/保留段目标（含 loopback）不探测、失败并入负缓存静默，
+//! localhost/内网自托管源因此无图标；接受的边界与 DNS 重绑残余见 docs/roadmap.md「继续保留的边界」。
 
 use super::http::{decode_body_bytes, read_body_capped, MAX_BODY_BYTES};
 use super::parse::resolve_url;

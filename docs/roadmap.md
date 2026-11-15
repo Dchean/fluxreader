@@ -62,6 +62,8 @@
 - 源自定义标题仍无“恢复跟随源站标题”入口；已发出的退订无法撤回等历史上限不由新契约自动修复。
 - 无代码签名，Windows 未知发布者提示仍适用；action SHA pin 没有自动保活机制。
 - 历史提交哈希与 tag 不重写；旧版本说明的 2026-11-02 规范化例外继续有效，见 [release.md](release.md)。
+- favicon 探测只打 http/https 公网目标：私网/保留段（含 loopback）在守卫处拒绝，自托管于 localhost/内网的源因此不显示图标，失败并入 `FAVICON_TRIED` 负缓存静默（`ingestion/favicon.rs` 的 `discover_favicon`/`target_allowed`/`ip_disallowed`）。解析判定与建连是两次独立解析，理论上可被 DNS 重绑穿透——完整封堵需按 IP 连接并处理 Host/SNI，对 favicon 探测不成比例，接受该残余。
+- 跨源 favicon 由 WebView 直连渲染（探活 http(s)/2xx/非 HTML、no-referrer），不引入域名白名单：渲染引用外部资源与用户浏览器同级且已有探活门；白名单会静默吞掉合法 CDN 跨源图标、改变既有预期；无清单可维护，负向代价大于残余收益。若引入属产品决策，落点在 WebView 探活门并需用户例外途径。
 
 <a id="maintenance"></a>
 ## 文档待办
