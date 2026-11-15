@@ -278,6 +278,13 @@ pub fn seal_state(conn: &Connection, generation: i64) -> AppResult<Option<Pendin
             shards.push(spool.put(&tx, &serde_json::to_vec(&fields)?, &known)?);
         }
     }
+    // Note: 链深不变式为 depth ≥ 1+deltas（2026-11-14 审计 N-19）。正常路径下
+    // 初始全量基线 1 行、deltas=0，此后每个非空增量 +1 行且 +1 deltas；但空增量
+    // （delta=true 而 fields/shards 为空）同样按下方非 receipt_only 分支插入基线
+    // 行加深链，而这里的 `usize::from(!shards.is_empty())` 不增 deltas——代码
+    // 不禁止链深超过 1+deltas，仅有 selected_fields 视图 depth<32 的截断兜底
+    // （与 deltas<32 的增量上限同源）。截断后表现为增量重发与回收推迟；非
+    // 正确性缺陷，触发需中断窗口，未实测。
     let deltas = if receipt_only {
         previous.as_ref().map_or(0, |p| p.deltas)
     } else if delta {

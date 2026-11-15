@@ -4839,6 +4839,32 @@ fn portable_export_snapshot_excludes_writes_committed_while_it_runs() {
     std::fs::remove_file(&file).unwrap();
 }
 
+#[test]
+fn bucket_index_survives_short_or_invalid_digest() {
+    // The consolidated bucket fn must not panic on short/invalid digests and
+    // must stay in sync with the SQL flx_bucket scalar.
+    assert_eq!(database::bucket_index(""), 0);
+    assert_eq!(database::bucket_index("f"), 0);
+    assert_eq!(database::bucket_index("zz"), 0);
+    assert_eq!(database::bucket_index("ff"), 63);
+    assert_eq!(database::bucket_index("00"), 0);
+    let full = crate::local_sync::model::digest(b"bucket-key");
+    assert_eq!(
+        database::bucket_index(&full),
+        u8::from_str_radix(&full[..2], 16).unwrap() % 64
+    );
+    let c = conn();
+    let value: i64 = c
+        .query_row("SELECT flx_bucket('bucket-key')", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        value,
+        i64::from(database::bucket_index(&crate::local_sync::model::digest(
+            b"bucket-key"
+        )))
+    );
+}
+
 #[path = "review_segment1_tests.rs"]
 mod review_segment1_tests;
 
