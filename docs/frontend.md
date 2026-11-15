@@ -11,8 +11,8 @@
 
 ## 类名账目
 
-- 已定义 CSS 类 366 个（扫描口径见文末）。
-- 零引用类 12 个（`src/`、`tools/`、`src-tauri/` 静态零引用，已排查动态拼接）：`timeline-actions-row`、`social-feed-wrap`、`podcast-feed-wrap`、`notif-feed-wrap`、`layout-svg-badge`、`config-plan-warning`、`feed-leaf-right`、`search-modal-results`、`search-group-label`、`search-result-item`、`search-result-title`、`search-result-meta`。删除属清理批次，不在台账内自行处理。
+- 已定义 CSS 类 354 个（2026-11-15 S3a 清理 12 个零引用类后；扫描口径见文末）。
+- 零引用类：无（原 12 个零引用类已于 2026-11-15 批 F-1 删除，见 docs/audits.md；此后新增死类按清理批次流程处理并同步本台账）。
 - 动态拼接契约：同步指示器变体类由 `src/components/Sidebar.tsx` 以 `sync-status-row--{tone}` / `sync-dot--{tone}` 模板拼接；tone 取值以 `src/lib/syncPill.ts` 的 `SyncIndicatorTone` 为准（`local`/`pending`/`syncing`/`success`/`error` 五值）。四值各有变体类定义；`local` 值复用基类灰样式、无 `--local` 变体。改动 tone 集合必须同步：`syncPill.ts`、`Sidebar.tsx`、`base.css`、`tools/component-tests/sync-indicator.test.mjs`。
 - 无样式 className 锚点：`error-center-dialog`、`hydrate-failure-text`、`load-more-btn` 是组件/契约测试的选择器或字符串锚（`tools/component-tests/`、`tools/frontend-tests/ui-contracts.mjs`）；`player-full-progress` 是 PlayerBar 的无样式包装层。这些类名不是样式载体，重命名前先查 `tools/` 引用。
 
