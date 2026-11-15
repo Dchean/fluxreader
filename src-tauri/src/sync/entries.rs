@@ -616,8 +616,14 @@ fn upsert_remote_entry(
         // R3/R4：状态写用值条件原语，命中行数当场进标记（守卫通过但值未变仍按
         // 旧口径计入 pulled_entries，保持统计兼容；写 Err 不置位——失败不是变化）。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
+        // Missing 门留在调用侧：apply_*_by_policy 只消费 bool 方向，Missing（远端
+        // 未表达该字段）不得折成 false 当「远端说未读/未收藏」应用。
         let apply_read = remote_read != greader::RemoteState::Missing;
         let apply_star = remote_starred != greader::RemoteState::Missing;
+        // 守卫结果单独留下：pulled_entries 旧口径按「守卫通过」计数——守卫拒绝不计、
+        // 通过但 0 行也计（pull_field_versions_e2e 两向锁定）；apply_*_by_policy 的
+        // 返回行数区分不了这两种 0 行，故调用侧先判一次，同一 DB 临界区内它与
+        // 函数内部复核结果一致。
         let read_ok = apply_read
             && conflict_policy::field_accepts_remote(
                 conn,
@@ -634,25 +640,31 @@ fn upsert_remote_entry(
                 snap_star,
                 maps.pending_star_ids.contains(&aid),
             )?;
+        // 方向判定走政策单点 apply_*_by_policy。本路径 GR/Fever 共用而协议未传入：
+        // 两协议四格当前同值（单变体枚举），引用 GR 格；格分叉时须先把协议传入
+        // 本路径再分派。
         if read_ok {
-            if remote_read == greader::RemoteState::True {
-                let rows = db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?;
-                if rows > 0 {
-                    report.entries_data_changed = true;
-                }
-            } else {
-                let rows = db::sync_mark_unread_if_read_at_version(conn, aid, snap_read)?;
-                if rows > 0 {
-                    report.entries_data_changed = true;
-                }
+            let rows = conflict_policy::apply_read_by_policy(
+                conn,
+                conflict_policy::GR_READ_DIRECTION,
+                remote_read == greader::RemoteState::True,
+                aid,
+                snap_read,
+                maps.pending_read_ids.contains(&aid),
+            )?;
+            if rows > 0 {
+                report.entries_data_changed = true;
             }
         }
         if star_ok {
-            let rows = if remote_starred == greader::RemoteState::True {
-                db::sync_mark_starred_if_unstarred_at_version(conn, aid, snap_star)?
-            } else {
-                db::sync_mark_unstarred_if_starred_at_version(conn, aid, snap_star)?
-            };
+            let rows = conflict_policy::apply_star_by_policy(
+                conn,
+                conflict_policy::GR_STAR_DIRECTION,
+                remote_starred == greader::RemoteState::True,
+                aid,
+                snap_star,
+                maps.pending_star_ids.contains(&aid),
+            )?;
             if rows > 0 {
                 report.entries_data_changed = true;
             }

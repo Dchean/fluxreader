@@ -489,8 +489,8 @@ pub(super) async fn pull_entries_fever(
             if !unbound_feeds.is_empty() {
                 report.binding_incomplete = true;
                 report.errors.push(format!(
-                    "Fever 增量页含尚无本地绑定的远端 feed，未提交任何条目/游标: {:?}",
-                    unbound_feeds
+                    "Fever 增量页含尚无本地绑定的远端 feed {} 个：本页未提交，本轮已提交条目保留；游标与历史状态回滚至轮前值",
+                    unbound_feeds.len()
                 ));
                 return restore_after_binding_failure(
                     db,
@@ -574,8 +574,8 @@ pub(super) async fn pull_entries_fever(
                     if !unbound_feeds.is_empty() {
                         report.binding_incomplete = true;
                         report.errors.push(format!(
-                            "Fever 历史顶部页含尚无本地绑定的远端 feed，未提交条目/游标: {:?}",
-                            unbound_feeds
+                            "Fever 历史顶部页含尚无本地绑定的远端 feed {} 个：本页未提交，本轮已提交条目保留；游标与历史状态回滚至轮前值",
+                            unbound_feeds.len()
                         ));
                         return restore_after_binding_failure(
                             db,
@@ -678,8 +678,8 @@ pub(super) async fn pull_entries_fever(
                 if !unbound_feeds.is_empty() {
                     report.binding_incomplete = true;
                     report.errors.push(format!(
-                        "Fever 历史页含尚无本地绑定的远端 feed，未提交条目/checkpoint: {:?}",
-                        unbound_feeds
+                        "Fever 历史页含尚无本地绑定的远端 feed {} 个：本页未提交，本轮已提交条目保留；游标与历史状态回滚至轮前值",
+                        unbound_feeds.len()
                     ));
                     return restore_after_binding_failure(
                         db,
@@ -868,8 +868,8 @@ pub(super) async fn pull_entries_fever(
                     if !unbound_feeds.is_empty() {
                         report.binding_incomplete = true;
                         report.errors.push(format!(
-                            "Fever with_ids 补齐页含尚无本地绑定的远端 feed，未合并且游标不动: {:?}",
-                            unbound_feeds
+                            "Fever with_ids 补齐页含尚无本地绑定的远端 feed {} 个：本页未合并，本轮已合并条目保留；游标与历史状态回滚至轮前值",
+                            unbound_feeds.len()
                         ));
                         return restore_after_binding_failure(
                             db,

@@ -1381,10 +1381,10 @@ pub(super) async fn record_outbox_session_block(
 }
 
 /// 会话构建失败的落账摘要单点（W2 复审 P3-1/P3-4）。
-/// 判定与 push.rs `push_block_summary` 同判据——**code=auth 之外还必须认
+/// 判定复用 push.rs `is_auth_block` 单点——**code=auth 之外还必须认
 /// ClientLogin 文案**：GReader 凭据错误经 ClientLogin 报出，错误 code 实为
-/// network（push.rs `push_block_summary_distinguishes_auth_from_network`
-/// 锁定的协议事实），只判 code 会把 GReader 认证失败标成「网络/端点失败」。
+/// network（判据依据与锁定测试见 `is_auth_block` 文档），只判 code 会把
+/// GReader 认证失败标成「网络/端点失败」。
 /// `session_*` 是失败会话的凭据快照（见 `ClientBuildFailure::Failed`）；
 /// 两者皆空（解密失败、身份未知）时不伪造标注。
 fn outbox_block_summary(
@@ -1393,7 +1393,7 @@ fn outbox_block_summary(
     session_username: &str,
 ) -> String {
     let msg = err.message.trim();
-    let core = if err.code == "auth" || msg.contains("ClientLogin") {
+    let core = if super::push::is_auth_block(err) {
         format!("订阅写回认证失败：{msg}")
     } else {
         format!("订阅写回被阻塞（网络/端点失败）：{msg}")
@@ -1987,6 +1987,9 @@ pub(super) async fn pull_feeds(
                 return Ok(None);
             }
         };
+        // 批量时点的保护集合快照（writer 锁内读取）。writer 锁随即释放，到
+        // 逐源删除之间本地可能新增未推送意图——删除段对每个候选源另有 TOCTOU
+        // 复检兜底（见循环内注释），两处查询不是重复。
         let pending_feed_ids = match pending_protected_feed_ids(conn, &account_key) {
             Ok(v) => v,
             Err(e) => {
@@ -2009,6 +2012,9 @@ pub(super) async fn pull_feeds(
             if remote_id_set.contains(&remote_id) {
                 continue; // 远端仍订阅：保留
             }
+            // TOCTOU 复检，不是上面快照的重复查询：从批量读取到逐源删除之间，
+            // 本地可能新增未推送意图（含文章级队项）——只有此刻重查才能看见；
+            // 两处合并会重开「本地有未推送变更仍被误删」的窗口。
             let now_protected = match pending_protected_feed_ids(conn, &account_key) {
                 Ok(ids) => ids.contains(&feed_id),
                 Err(error) => {

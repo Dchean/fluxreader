@@ -1148,8 +1148,8 @@ fn reconcile_reader_state_at(
         // OPT-007：字段版本快照（pull 起点）+ 字段 pending 交给政策守卫；
         // 快照缺失（理论不可达）按 (0,0) 保守处理——与旧行版本一致。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
-        // TASK-112 政策（GR_READ_DIRECTION = RemoteReadWins 单向 read-wins）：
-        // 远端已读 → 本地已读；远端未读不回写（不复活未读）。
+        // TASK-112 政策（GR_READ_DIRECTION = UnreadSetBidirectional，未读集合双向权威）：
+        // 远端已读 → 本地已读；远端未读 → 本地未读（双向收敛，可复活未读）。
         // R3：apply_* 返回的是**值条件写命中行数**（值实际改变）——据此置数据
         // 变化标记；merged_states 仍按旧口径累计（对外统计兼容）。
         let read_rows = match read_set.as_ref() {
@@ -1194,7 +1194,7 @@ mod tests {
     // doc_lazy_continuation（-D warnings 下致命），故改普通注释（文字不变）。
     // TASK-112 政策锁定测试：GR 轻量对账的「操作 × 协议」格逐格锁死。
     // 判别力声明（「修前红」语义：对应政策被翻转/守卫被移除时必红）——
-    // - 单向格：GR_READ_DIRECTION 被改成双向 → remote_unread 用例红；
+    // - 双向格：GR_READ_DIRECTION 被改成单向 → remote_unread 用例红；
     // - 双向格：GR_STAR_DIRECTION 被改成单向 → 两个 star 用例红；
     // - pending 保护：守卫被移除 → pending 用例红。
     // 本卡行为零变化，故全部用例在显式化前后都绿；CI（cargo test）承担执行。
@@ -1298,8 +1298,8 @@ mod tests {
             != 0
     }
 
-    /// GR 单向格锁定：远端「未读」（read 集合未命中）不得复活本地已读。
-    /// 政策被翻成双向时本用例红（sync_mark_unread_if_read 会把 is_read 打回 0）。
+    /// GR 未读集合双向格未读侧锁定：远端「未读」（read 集合未命中）把本地已读翻回未读。
+    /// 政策被改成单向时本用例红（本地已读不再被翻回未读）。
     #[test]
     fn gr_reconcile_remote_unread_restores_local_unread() {
         let conn = conn();
@@ -1323,7 +1323,7 @@ mod tests {
         assert_eq!(report.merged_states, 1, "双向：远端未读产生一次状态写入");
     }
 
-    /// GR 单向格命中侧：远端已读 → 本地已读（read-wins 收敛路径）。
+    /// GR 未读集合双向格命中侧：远端已读 → 本地已读（双向收敛路径）。
     #[test]
     fn gr_reconcile_remote_read_marks_local_read() {
         let conn = conn();

@@ -299,7 +299,6 @@ enum QueueCheck {
 
 struct ReadbackStates {
     states: HashMap<i64, crate::greader::ItemContent>,
-    complete: bool,
 }
 
 fn check_target(
@@ -309,12 +308,13 @@ fn check_target(
     desired: bool,
 ) -> TargetCheck {
     let Some(item) = states.states.get(&entry_id) else {
-        let reason = if states.complete {
-            "读回响应完整但没有目标；协议没有提供可证明目标已删除的信号"
-        } else {
-            "读回响应为空或短于请求，无法区分目标删除与短响应"
-        };
-        return TargetCheck::Inconclusive(format!("verification/inconclusive: {reason}"));
+        // 「complete 但缺条」不可达：调用方只会传入本轮已发送读回查询的 id，
+        // 而 VerificationItems.complete 是逐 id 覆盖口径——缺条必然伴随
+        // complete=false（空/短响应），故只保留这一条 inconclusive 文案。
+        return TargetCheck::Inconclusive(
+            "verification/inconclusive: 读回响应为空或短于请求，无法区分目标删除与短响应"
+                .to_string(),
+        );
     };
     match field.state(item) {
         crate::greader::RemoteState::Missing => TargetCheck::Inconclusive(format!(
@@ -353,7 +353,6 @@ async fn readback_states(
     // 读回失败（retry_wait），不会把被服务端截断的 id 误判成 target_missing。
     const VERIFICATION_CHUNK: usize = 50;
     let mut states = HashMap::new();
-    let mut complete = true;
     for chunk in ids.chunks(VERIFICATION_CHUNK) {
         let ids = chunk.to_vec();
         let bindings: Vec<_> = plan
@@ -380,7 +379,6 @@ async fn readback_states(
             Ok(current)
         })
         .await?;
-        complete &= current.len() == chunk.len();
         if current.is_empty() {
             continue;
         }
@@ -388,7 +386,6 @@ async fn readback_states(
             .client
             .items_for_state_verification(&current)
             .await?;
-        complete &= read.complete;
         for item in read.items {
             let Some(id) = crate::greader::parse_item_id(&item.id) else {
                 return Err(crate::error::AppError::new(
@@ -399,7 +396,7 @@ async fn readback_states(
             states.insert(id, item);
         }
     }
-    Ok(ReadbackStates { states, complete })
+    Ok(ReadbackStates { states })
 }
 
 async fn current_push_items(
@@ -516,6 +513,7 @@ pub(super) async fn exec_push(
         )
         .await
         else {
+            // 凭据复核失败即早退（队列保留待重推），跳过末尾 pushed_states 累计——统计偏低是有意副作用
             return outcome;
         };
         statuses.retain(|status| current.contains(&status.queue_id));
@@ -530,6 +528,7 @@ pub(super) async fn exec_push(
             .collect();
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（{action}）");
+            // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
             return outcome;
         }
         let result = if matches!(session.client, Backend::Fever(_)) {
@@ -551,6 +550,7 @@ pub(super) async fn exec_push(
                 )
                 .await
                 else {
+                    // 凭据复核失败即早退（队列保留待重推），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                     return outcome;
                 };
                 if current.is_empty() {
@@ -592,6 +592,7 @@ pub(super) async fn exec_push(
         }
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（{action}）");
+            // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
             return outcome;
         }
         match result {
@@ -600,6 +601,7 @@ pub(super) async fn exec_push(
                     Ok(states) => states,
                     Err(e) => {
                         if !session_is_current(db, session).await {
+                            // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                             return outcome;
                         }
                         let summary =
@@ -619,6 +621,7 @@ pub(super) async fn exec_push(
                 };
                 if !session_is_current(db, session).await {
                     log::warn!("sync: 状态读回返回时账号代际已变更，丢弃该批次确认（{action}）");
+                    // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                     return outcome;
                 }
                 let Some(current) = current_push_items(
@@ -630,6 +633,7 @@ pub(super) async fn exec_push(
                 )
                 .await
                 else {
+                    // 凭据复核失败即早退（队列保留待重推），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                     return outcome;
                 };
                 statuses.retain(|status| current.contains(&status.queue_id));
@@ -663,6 +667,7 @@ pub(super) async fn exec_push(
     // 在 api_version<4 时先探测再发送，避免 toggle 重发翻反。
     for (qid, remote_id, want_star) in &plan.stars {
         let Some(current) = current_push_items(db, session, plan, [*qid], report).await else {
+            // 凭据复核失败即早退（队列保留待重推），跳过末尾 pushed_states 累计——统计偏低是有意副作用
             return outcome;
         };
         if !current.contains(qid) {
@@ -671,6 +676,7 @@ pub(super) async fn exec_push(
         outcome.attempted.insert(*qid);
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（star）");
+            // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
             return outcome;
         }
         let result = match &session.client {
@@ -692,6 +698,7 @@ pub(super) async fn exec_push(
                 Ok(true) => {
                     let Some(current) = current_push_items(db, session, plan, [*qid], report).await
                     else {
+                        // 凭据复核失败即早退（队列保留待重推），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                         return outcome;
                     };
                     if !current.contains(qid) {
@@ -708,6 +715,7 @@ pub(super) async fn exec_push(
         };
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（star）");
+            // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
             return outcome;
         }
         match result {
@@ -716,6 +724,7 @@ pub(super) async fn exec_push(
                     Ok(states) => states,
                     Err(e) => {
                         if !session_is_current(db, session).await {
+                            // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                             return outcome;
                         }
                         record_failure(
@@ -733,10 +742,12 @@ pub(super) async fn exec_push(
                 };
                 if !session_is_current(db, session).await {
                     log::warn!("sync: 收藏读回返回时账号代际已变更，丢弃该批次确认（star）");
+                    // OPT-006：代际变更即早退（旧账号结果不落回），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                     return outcome;
                 }
                 let Some(current) = current_push_items(db, session, plan, [*qid], report).await
                 else {
+                    // 凭据复核失败即早退（队列保留待重推），跳过末尾 pushed_states 累计——统计偏低是有意副作用
                     return outcome;
                 };
                 if !current.contains(qid) {
@@ -869,6 +880,15 @@ pub(super) fn emit_sync_error(message: &str) {
     }
 }
 
+/// 「认证失败」判据单点（与 subscriptions.rs `outbox_block_summary` 共用）：
+/// code=auth 之外还必须认 ClientLogin 文案——GReader 凭据错误经 ClientLogin
+/// 报出且错误 code 实为 network（协议事实由
+/// `push_block_summary_distinguishes_auth_from_network` 测试锁定），只判
+/// code 会把 GReader 认证失败标成「网络/端点失败」。
+pub(super) fn is_auth_block(err: &crate::error::AppError) -> bool {
+    err.code == "auth" || err.message.trim().contains("ClientLogin")
+}
+
 /// build_client 失败摘要（TASK-124）：区分「认证失败」与「网络/端点失败」。
 /// - Fever 认证错误 code="auth"（fever.rs AUTH_FAILED_MSG）；
 /// - GReader 凭据错误都经 ClientLogin 报出（greader.rs login_at：401/403/400 →
@@ -879,7 +899,7 @@ pub(super) fn emit_sync_error(message: &str) {
 /// mark_push_blocked 统一承担（200 字符）。
 pub fn push_block_summary(err: &crate::error::AppError) -> String {
     let msg = err.message.trim();
-    if err.code == "auth" || msg.contains("ClientLogin") {
+    if is_auth_block(err) {
         format!("认证失败：{msg}")
     } else {
         format!("推送被阻塞（网络/端点失败）：{msg}")

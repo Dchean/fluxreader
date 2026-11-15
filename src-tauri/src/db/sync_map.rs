@@ -309,7 +309,8 @@ pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppR
 （sync_disconnect）在同一事务里 +1；同步会话在同一个短 DB 临界区里
 捕获「凭据 + 代际」，此后每个 HTTP→DB 回写边界在**同一次持锁内**复核
 代际——不等 = 账号已变更，旧响应一律不落库（不复活旧绑定/游标/队列）。
-代际缺失/非法按 0 处理（旧库首次升级即 0，第一次账号提交推进到 1）。
+代际缺失按 0 处理（旧库首次升级即 0，第一次账号提交推进到 1）；键存在但
+空白/负数/不可解析一律 Err（R2 收紧，详见 sync_generation 文档注释）。
 ============================================================ */
 
 const SYNC_GENERATION_KEY: &str = "sync_generation";

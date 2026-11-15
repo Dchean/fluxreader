@@ -659,7 +659,7 @@ impl FeverClient {
             return Err(AppError::new(
                 "verification",
                 format!(
-                    "Fever 探测收藏态失败（verification/inconclusive）：条目 {id} 未出现在 with_ids 响应中，无法证明已删除"
+                    "Fever 探测收藏态失败（verification/inconclusive）：条目 {id} 未出现在 with_ids 响应中，无法确认当前收藏态"
                 ),
             ));
         };
