@@ -158,6 +158,7 @@ pub struct ItemContentsResponse {
 #[derive(Debug)]
 pub struct VerificationItems {
     pub items: Vec<ItemContent>,
+    /// Note: 零生产读者，仅测试/诊断载体（P2-6 删除唯一读者后成为只写字段）— 见 docs/audits.md 批 B 行，归口批 G 处置。
     pub complete: bool,
 }
 
