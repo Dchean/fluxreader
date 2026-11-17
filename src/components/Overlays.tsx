@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
-import { api, articleRowToEntry } from '../lib/api';
-import { Icons, LayoutIcon } from './icons';
+import { useAppStore, LAYOUT_NAMES } from '../store';
+import { api, articleRowToEntry, isTauri } from '../lib/api';
+import { Icons } from './icons';
 import { ModalOverlay, FluxDropdown, SwitchInline, AiModeSelect } from './primitives';
 import { useFocusTrap } from './useFocusTrap';
+/* P2-13：LAYOUT_OPTIONS 单点在 settings/layoutOptions（与设置页共用一份） */
+import { LAYOUT_OPTIONS } from './settings/layoutOptions';
 import { LAYOUT_NO_AI } from './settings/shared';
 import { normalizeFeedAiMode } from '../types';
 import { categoryAiDefaults } from '../store/aiPolicy';
@@ -12,7 +14,7 @@ import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
 import { galleryMediaKey } from '../lib/galleryMedia';
 import { useImageResource } from './useImageResource';
-import { canProxyImages, needsImageProxy } from '../lib/imageProxy';
+import { needsImageProxy } from '../lib/imageProxy';
 import {
   addFeedShowsSyncSwitch,
   addFeedSyncHint,
@@ -29,11 +31,6 @@ const EMPTY_RESULTS: ArticleEntry[] = [];
 /* ============================================================
    全局搜索 / 灯箱 / 新建分类 / 添加订阅源 四个浮层
    ============================================================ */
-
-const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
-  const Icon = LayoutIcon[l];
-  return { value: l as string, label: LAYOUT_NAMES[l], icon: <Icon /> };
-});
 
 export function SearchModal() {
   const searchOpen = useAppStore((s) => s.searchOpen);
@@ -484,7 +481,7 @@ function GalleryPreviewImage({ src, pageUrl, index }: { src: string; pageUrl?: s
   const busy = useAppStore(s => s.libraryRestoreBusy);
   const { lease, snapshot, retry } = useImageResource(src, pageUrl, !busy, 0, String(generation));
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
-  const direct = !canProxyImages() || !needsImageProxy(src);
+  const direct = !isTauri() || !needsImageProxy(src);
   const resolved = snapshot.status === 'ready' ? snapshot.src : direct ? src : null;
   const failed = snapshot.status === 'failed';
   const loaded = resolved !== null && loadedSrc === resolved;

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
-import { api } from '../lib/api';
+import { api, isTauri } from '../lib/api';
 import { formatDuration } from '../lib/format';
 import { Icons } from './icons';
 import { CoverImage } from './CoverImage';
@@ -27,7 +27,7 @@ function persistPlayback(p: {
   url: string; title: string; show: string; cover: string; positionSec: number; durationSec: number;
 }) {
   // 只在 Tauri 环境落库（浏览器 mock 无 IPC）
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+  if (!isTauri()) return;
   void api.setSetting(PLAYBACK_KEY, JSON.stringify({
     url: p.url, title: p.title, show: p.show, cover: p.cover,
     positionSec: p.positionSec, durationSec: p.durationSec, updatedAt: Date.now(),
@@ -35,7 +35,7 @@ function persistPlayback(p: {
 }
 
 function clearPlayback() {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+  if (!isTauri()) return;
   void api.setSetting(PLAYBACK_KEY, '').catch(() => {});
 }
 
@@ -97,7 +97,7 @@ export function PlayerBar() {
   /* 换剧集时读续播记录：命中同 URL 且未播完 → 记录待 seek */
   useEffect(() => {
     if (!player.isActive || !player.audioUrl) return;
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    if (!isTauri()) return;
     let alive = true;
     lastSaveRef.current = -1;
     pendingResumeRef.current = null;

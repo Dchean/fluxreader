@@ -1,11 +1,11 @@
 import type { StateCreator } from 'zustand';
-import { api, extractError, extractErrorCode } from '../../lib/api';
+import { api, extractError, extractErrorCode, isTauri } from '../../lib/api';
 import {
   applyCategoryAiModePatch,
   applyFeedAiModePatch,
   reconcileCategories,
 } from '../internals';
-import { issueAiMultiWrite, issueAiWrite } from '../aiConfigWrites';
+import { issueAiMultiWrite, issueAiWrite, type AiWriteSpec } from '../aiConfigWrites';
 import { numericId } from '../selectors';
 import { normalizeFeedAiMode } from '../../types';
 import type { FeedAiMode, FeedItem } from '../../types';
@@ -38,6 +38,23 @@ export type FeedsSlice = Pick<
 /** OPT-011：AI 开关写入统一收口到 store/aiConfigWrites 的协议入口——
     四入口只负责「定位实体 + 判无变化 + 组装 apply/request」，待写意图/确认态/
     读取凭据、per-键 wire 队列与失败恢复都在协议一处实现（见其头注）。 */
+
+/* X-6：分类/订阅源 × 摘要/翻译四段写入口的同构外壳（定位实体 → 归一化判无
+   变化 → 组装协议写）收口为一个参数化小助手；六处差异字段（key/value/
+   confirmed/apply/request/label）由 write 构造，守卫短路次序与原四段一致，
+   行为等价。 */
+const issueAiToggle = (
+  cur: { summaryMode?: FeedAiMode; translateMode?: FeedAiMode } | undefined,
+  field: 'summaryMode' | 'translateMode',
+  val: FeedAiMode,
+  write: (confirmed: FeedAiMode) => AiWriteSpec<FeedAiMode>,
+): void => {
+  if (!cur) return;
+  const confirmed = normalizeFeedAiMode(cur[field]);
+  if (confirmed === val) return;
+  issueAiWrite(write(confirmed));
+};
+
 export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set, get) => ({
   /* ================= 订阅管理 ================= */
 
@@ -77,7 +94,9 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
 
   deleteCategory: (catId) => {
     if (get().dataMode === 'tauri') {
-      const id = Number(catId.replace('cat-', ''));
+      /* P2-17+N-12：内联剥 cat- 前缀统一走单点 numericId（本文件五处入参恒为
+         分类 id，feed- 前缀不可达；无数字段时同样归 NaN，兜底语义不变）。 */
+      const id = numericId(catId);
       /* fix-3（自检 P2-1）：删除当前正浏览的分类 → 范围/选中一并复位（与 mock
          分支同口径）。否则 entries 按已消失的 cat-N 过滤恒为空，时间流停在
          幽灵范围显示空白，须用户自行点别处才能恢复。 */
@@ -108,7 +127,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     }
     if (get().dataMode === 'tauri') {
       void api
-        .renameFolder(Number(catId.replace('cat-', '')), trimmed)
+        .renameFolder(numericId(catId), trimmed)
         .then(() => get().reloadFromBackend())
         .then(() => get().showToast(`分类已改名：${trimmed}`))
         .catch((e: unknown) => {
@@ -124,10 +143,10 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
   addFeed: (catId, url, title, layout, summaryMode, translateMode, syncToBackend = false) => {
     if (get().dataMode === 'tauri') {
       /* fix-1（自检 P1-1）：提不出数字 id（如全新安装 0 个分类时 AddFeedModal 传
-         空串，Number('') === 0）必须传 null——后端 add_feed 对 folder_id=None 有
-         「自动落到未分类（不存在则创建）」的兜底契约；传 0 会直接触发
-         feeds.folder_id 外键违约，首次使用添加订阅必然失败。 */
-      const parsed = Number(catId.replace('cat-', ''));
+         空串，numericId 解析不出数字段返回 NaN）必须传 null——后端 add_feed 对
+         folder_id=None 有「自动落到未分类（不存在则创建）」的兜底契约；传 0 会
+         直接触发 feeds.folder_id 外键违约，首次使用添加订阅必然失败。 */
+      const parsed = numericId(catId);
       const folderId = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
       const activityToken = get().beginSyncActivity('feed-add');
       /* OPT-011：AI 开关以三态 mode 为真值传给后端；旧 bool 参数传 null
@@ -298,7 +317,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       if (!cur) return;
       const curSummaryMode = normalizeFeedAiMode(cur.summaryMode);
       const curTranslateMode = normalizeFeedAiMode(cur.translateMode);
-      const targetFolderId = Number(next.catId.replace('cat-', ''));
+      const targetFolderId = numericId(next.catId);
       const args: Parameters<typeof api.updateFeed>[0] = { id: Number(feedId) };
       if (next.title.trim() && next.title.trim() !== cur.name) args.title = next.title.trim();
       if (binding && binding.cat.id !== next.catId) args.folderId = targetFolderId;
@@ -418,7 +437,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
   updateCatLayout: (catId, layout) => {
     set((s) => reconcileCategories(s, s.categories.map((c) => (c.id === catId ? { ...c, layout } : c))));
     void api
-      .updateFolderLayout(Number(catId.replace('cat-', '')), layout)
+      .updateFolderLayout(numericId(catId), layout)
       .catch(() => get().showToast('布局未能保存，重启后可能回退'));
   },
 
@@ -450,63 +469,67 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
        最新失败恢复最近一次可确认值；读取快照接受时保留未落定意图
        （《AI配置写入与快照对账》：读取凭据 / 意图 / 确认态分离）。 */
   toggleCatSummary: (catId, val) => {
-    const cat = get().categories.find((c) => c.id === catId);
-    if (!cat || normalizeFeedAiMode(cat.summaryMode) === val) return;
-    issueAiWrite({
-      key: `cat:${catId}:summary`,
-      value: val,
-      confirmed: normalizeFeedAiMode(cat.summaryMode),
-      apply: (v) => applyCategoryAiModePatch(catId, 'summaryMode', v),
-      request: () => api.setFolderAiModes(numericId(catId), val, undefined),
-      label: 'AI 摘要开关',
-    });
+    issueAiToggle(
+      get().categories.find((c) => c.id === catId),
+      'summaryMode',
+      val,
+      (confirmed) => ({
+        key: `cat:${catId}:summary`,
+        value: val,
+        confirmed,
+        apply: (v) => applyCategoryAiModePatch(catId, 'summaryMode', v),
+        request: () => api.setFolderAiModes(numericId(catId), val, undefined),
+        label: 'AI 摘要开关',
+      }),
+    );
   },
 
   toggleCatTranslate: (catId, val) => {
-    const cat = get().categories.find((c) => c.id === catId);
-    if (!cat || normalizeFeedAiMode(cat.translateMode) === val) return;
-    issueAiWrite({
-      key: `cat:${catId}:translate`,
-      value: val,
-      confirmed: normalizeFeedAiMode(cat.translateMode),
-      apply: (v) => applyCategoryAiModePatch(catId, 'translateMode', v),
-      request: () => api.setFolderAiModes(numericId(catId), undefined, val),
-      label: 'AI 翻译开关',
-    });
+    issueAiToggle(
+      get().categories.find((c) => c.id === catId),
+      'translateMode',
+      val,
+      (confirmed) => ({
+        key: `cat:${catId}:translate`,
+        value: val,
+        confirmed,
+        apply: (v) => applyCategoryAiModePatch(catId, 'translateMode', v),
+        request: () => api.setFolderAiModes(numericId(catId), undefined, val),
+        label: 'AI 翻译开关',
+      }),
+    );
   },
 
   toggleFeedSummary: (catId, feedId, mode) => {
-    const cur = get()
-      .categories.find((c) => c.id === catId)
-      ?.feeds.find((f) => f.id === feedId);
-    if (!cur) return;
-    const prevMode = normalizeFeedAiMode(cur.summaryMode);
-    if (prevMode === mode) return;
-    issueAiWrite({
-      key: `feed:${feedId}:summary`,
-      value: mode,
-      confirmed: prevMode,
-      apply: (v) => applyFeedAiModePatch(feedId, { summaryMode: v }),
-      request: () => api.setFeedAiModes(numericId(feedId), mode, undefined),
-      label: 'AI 摘要开关',
-    });
+    issueAiToggle(
+      get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId),
+      'summaryMode',
+      mode,
+      (confirmed) => ({
+        key: `feed:${feedId}:summary`,
+        value: mode,
+        confirmed,
+        apply: (v) => applyFeedAiModePatch(feedId, { summaryMode: v }),
+        request: () => api.setFeedAiModes(numericId(feedId), mode, undefined),
+        label: 'AI 摘要开关',
+      }),
+    );
   },
 
   toggleFeedTranslate: (catId, feedId, mode) => {
-    const cur = get()
-      .categories.find((c) => c.id === catId)
-      ?.feeds.find((f) => f.id === feedId);
-    if (!cur) return;
-    const prevMode = normalizeFeedAiMode(cur.translateMode);
-    if (prevMode === mode) return;
-    issueAiWrite({
-      key: `feed:${feedId}:translate`,
-      value: mode,
-      confirmed: prevMode,
-      apply: (v) => applyFeedAiModePatch(feedId, { translateMode: v }),
-      request: () => api.setFeedAiModes(numericId(feedId), undefined, mode),
-      label: 'AI 翻译开关',
-    });
+    issueAiToggle(
+      get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId),
+      'translateMode',
+      mode,
+      (confirmed) => ({
+        key: `feed:${feedId}:translate`,
+        value: mode,
+        confirmed,
+        apply: (v) => applyFeedAiModePatch(feedId, { translateMode: v }),
+        request: () => api.setFeedAiModes(numericId(feedId), undefined, mode),
+        label: 'AI 翻译开关',
+      }),
+    );
   },
 
   toggleFolderCollapse: (catId) => {
@@ -524,7 +547,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     /* 批量落库折叠状态：TASK-100 P3-4——此前逐分类发 N 次 IPC、失败逐个 toast
        （几十个分类一次点击几十次往返 + 连环弹窗）。改为并发聚合，失败合并成
        一条 toast（含失败个数）。 */
-    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    if (isTauri()) {
       const cats = get().categories;
       void Promise.allSettled(cats.map((c) => api.setFolderCollapsed(numericId(c.id), anyOpen))).then((settled) => {
         const failed = settled.filter((r) => r.status === 'rejected').length;

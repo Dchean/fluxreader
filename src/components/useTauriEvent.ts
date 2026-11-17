@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { isTauri } from '../lib/api';
 
 /**
  * Tauri 事件订阅 hook：组件生命周期内订阅一个事件，卸载时退订。
@@ -18,7 +19,7 @@ export function useTauriEvent<T>(event: string, handler: (payload: T) => void): 
   });
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    if (!isTauri()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void (async () => {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isTauri } from '../../lib/api';
 import { useAppStore } from '../../store';
 import { Switch, SettingCard } from '../primitives';
 
@@ -11,7 +12,7 @@ export function AutoStartSwitch() {
 
   /* 挂载时读注册表真值（可能与镜像不一致：用户在任务管理器里改过） */
   useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    if (!isTauri()) return;
     void import('@tauri-apps/plugin-autostart')
       .then(({ isEnabled }) => isEnabled())
       .then(setRegEnabled)

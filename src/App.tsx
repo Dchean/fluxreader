@@ -11,7 +11,7 @@ import { ContextMenuHost } from './components/ContextMenu';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useTauriEvent } from './components/useTauriEvent';
 import { ModalOverlay } from './components/primitives';
-import { extractError } from './lib/api';
+import { extractError, isTauri } from './lib/api';
 import { anyOverlayOpen, isInteractiveSpaceTarget, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
 import type { SyncQueueStats } from './lib/api';
@@ -117,7 +117,7 @@ export default function App() {
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {
     /* 设置恢复与来源/计数元数据并行；完整成员查询等待启动筛选接受，随后原子落地。 */    void useAppStore.getState().bootstrapFromBackend();
-    if ('__TAURI_INTERNALS__' in window) {
+    if (isTauri()) {
       void useAppStore.getState().refreshLocalSyncStatus().catch((error) => {
         useAppStore.getState().showToast(`WebDAV 状态读取失败：${extractError(error)}`);
       });
