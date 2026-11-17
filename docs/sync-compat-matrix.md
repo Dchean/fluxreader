@@ -55,6 +55,8 @@ GR/Fever 协议响应使用 16 MiB 流式读取硬界，含解压后的大小。
 
 GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 action token 返回后、POST 前再次复核，文章 edit-tag 还核对本次计划的来源凭据。Fever 保持逐 ID mark 和 50 ID 分块 ACK，51 条为 51 次 mark + 2 次读回；api_version<4 时每个收藏目标在 mark 前另有 1 次 with_ids 收藏态探测。断开后阻止新请求；已发写入或认证无法撤回。订阅 outbox 断开保留同账号意图，同身份重连可重绑代际后恢复；换身份按现有规则清账。
 
+429 与 Retry-After 退避由 `sync_http.rs` 的 `send()` 统一处理：按请求 origin（协议、主机与端口）在进程内记录冷却；429 或带 Retry-After 的 503 触发，Retry-After 接受整数秒或 RFC2822 日期（日期按当前时刻折算），缺失或非法取 60 秒，结果下限 1 秒；503 无 Retry-After 不建立冷却。冷却期内同 origin 的新请求不发送，直接返回 `rateLimited`；该拒绝不睡眠等待，也不丢弃已持久化的本地意图。冷却只延长不缩短，进程重启清空；仅 GR/Fever 走该入口，WebDAV 传输不经过它。
+
 ## 固定服务端差异
 
 - **Miniflux GR**：ot 为 `published_at > ot`，严格大于发布时间，不是状态修改时间；固定 [handler](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/googlereader/handler.go) 与 [query builder](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/storage/entry_query_builder.go) 支持此结论。未读/收藏完整集合回补绕开 ot，已读未收藏晚到旧文仍依赖 full；起点墙钟不能消除同秒或旧发布时间边界。
@@ -71,6 +73,7 @@ GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 
 | 维度 | 当前契约 |
 | --- | --- |
 | GR 认证 | 请求统一带 `Authorization: GoogleLogin auth=<auth>`；POST 用 action token 作为 T。Miniflux token 可等于 auth，FreshRSS 可为独立字符串；首写 OnceCell 缓存 |
+| GR ClientLogin | 响应先按 JSON 取 `Auth`（Miniflux 尊重 `output=json`）；JSON 解析失败或 `Auth` 为空时回退经典文本行 `Auth=`（FreshRSS 忽略 `output=json`）；文本 `Error=` 作为认证失败带出原因，两者皆无则明确报错 |
 | token 失败 | 仅 404 允许回退登录 auth；401/403/5xx/空体/网络错明确失败，不靠 URL 猜服务端 |
 | 分类读取 | category_name 单点识别 type folder 或缺 type 且 label 前缀 ID；label 优先，缺省取 `user/.../label/` 后缀，中文/斜杠保留；state tag 和 type tag 不成目录 |
 | 分类写入 | 裸目标名始终前置一次 `user/-/label/` 后用 form 编码，名字本身含前缀字面量不误判；移动需处理旧成员关系，不把追加 label 当移动 |
@@ -84,7 +87,7 @@ GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 
 
 WebDAV 与活动 RSS 账号互斥。本地源按创建归属/原本地历史进入同步，远端 RSS 镜像不进入其 journal；分类按创建 origin 及本地源成员闭包归属，remote_id 不作身份推断。普通设置、源/组布局及 AI 行为开关同步；凭据、AI 服务配置/产物不传。read/star 独立按操作创建时固定的 Lamport/actor/seq 合并，离线冲突不承诺真实点击或上传先后；重试不生成新操作。
 
-清单和状态/正文对象不可变，写后读取确认精确字节，不能当作全球 winner。接收缺块/错误不是空库，状态/正文分别重试；未读或收藏正文未补齐显示 pending。远端物理 DELETE 当前关闭：替换对象精确 ACK 和已知 actor 覆盖仍不能证明未知/离线读取者已无保护义务。未确认正文继续保留，不能以新设备缺正文作为允许回收的理由；远端空间治理仍待完成。
+清单和状态/正文对象不可变，写后读取确认精确字节，不能当作全球 winner。接收缺块/错误不是空库，状态/正文分别重试；未读或收藏正文未补齐显示 pending。远端物理 DELETE 当前关闭：替换对象精确 ACK 和已知 actor 覆盖仍不能证明未知/离线读取者已无保护义务。未确认正文继续保留，不能以新设备缺正文作为允许回收的理由；远端空间治理仍待完成。正文内容按 `BodyContent` 逐条校验：`html` 与 `text` 的字节数合计超过 `local_sync/model.rs` 的 `MAX_BODY_BYTES`（32 MiB）即拒绝，primary 与可选 rss 分别计；本地同步的写入与接收、便携导出/恢复共用该检查，超限以 `localSyncFormat` 报错，不做截断。该 32 MiB 与 GR/Fever 传输的 16 MiB 不是同一常量。
 
 候选正文目录分页、内容唯一分块，便携 v4 从同一内容身份导出流式包。新库恢复新 actor 和主键高水位，断开凭据与旧队列。详细协议职责、真实备选和存储边界见[资料库决定](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)，独立 WAL 连接的事务前提见[写预留决定](../.agents/notes/implemented/architecture/2026-11-09-多连接SQLite写预留与原子设置.md)。
 

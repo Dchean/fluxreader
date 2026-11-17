@@ -72,8 +72,6 @@
 
 | 文档 | 位置 | 差异 | 登记日期 | 下次触碰的模块 |
 | --- | --- | --- | --- | --- |
-| sync-compat-matrix.md | 鉴权表与纯本地 WebDAV 节 | 缺三项稳定事实：429/Retry-After 源级退避（sync_http.rs）、32 MiB 正文对象上限（model.rs）、GR ClientLogin 双格式 | 2026-11-15 | sync 协议或 local_sync 模块 |
-| performance.md | 封面补全节、查询预算第 1/3 条 | 回填机制写 COALESCE（实为守卫 UPDATE）；缺封面回填首轮 45s 等待与逻辑视图回落第五类（初始捕获期）；第 3 条 url_norm 部分索引声明随 P1-3 处理 | 2026-11-15 | P1-3/D2 落地的批次（S2c），或 S5 措辞收口 |
 | roadmap.md | 维护边界末句 | 「GC17」「旧 bool/dedup 清理」代号在受跟踪内容无出处（本句下已加临时指向） | 2026-11-15 | 维护边界改动或 tmp 清档任务 |
 
 ## 维护边界
