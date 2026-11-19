@@ -42,18 +42,18 @@
 | 命令层（`commands/sync.rs`、`commands/settings.rs` 全量） | 2026-11-19 | `30cfd65` | 静态审读（未跑 cargo） | 本页 2026-11-19「阶段B Rust 未覆盖域静态审计」行 |
 | `ingestion/staged.rs`（暂存正文与设置应用域，其余 `ingestion/` 见上一行） | 2026-11-19 | `30cfd65` | 静态审读（未跑 cargo） | 本页 2026-11-19「阶段B Rust 未覆盖域静态审计」行 |
 | 文档与注释一致性 | 2026-11-14 | `d4a460d` | 抽样（发现 20 条纠正） | 报告 §6 |
-| 文档 `architecture.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-architecture.md` |
-| 文档 `contracts.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交；补 5 行契约：远端物理删除关闭、32 MiB 正文上限、outbox、正文保留与释放、AI 排除面） |
-| 文档 `maintenance.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交） |
-| 文档 `development.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-dev-readme.md`（同篇另含根 `README.md`） |
-| 文档 `sync-compat-matrix.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次关键段见本页 2026-11-17「文档清账批」行 |
-| 文档 `performance.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次关键段见本页 2026-11-17「文档清账批」行 |
-| 文档 `backup.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-backup-release.md` |
-| 文档 `release.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-backup-release.md` |
-| 文档 `roadmap.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-roadmap.md` |
-| 文档 `audits.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交，本页同批） |
-| 文档 `README.md`（索引） | 2026-11-19 | `30cfd65` | 局部（本轮文档批核了路由、文档清单与「最近核对」口径；不是内容审计） | 2026-11-19 文档批同批改动（工作树未提交） |
-| 文档 `frontend.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批）/ 全量扫描（静态，台账） | 2026-11-19 文档批同批改动（工作树未提交）；`tmp/s0-2026-11-15/class-ledger.json`（2026-11-19 复扫）；本页 2026-11-19「阶段B 前端未覆盖域静态审计」行 |
+| 文档 `architecture.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次 `tmp/s0-2026-11-15/compare-architecture.md` |
+| 文档 `contracts.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`（补 5 行契约：远端物理删除关闭、32 MiB 正文上限、outbox、正文保留与释放、AI 排除面） |
+| 文档 `maintenance.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82` |
+| 文档 `development.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次 `tmp/s0-2026-11-15/compare-dev-readme.md`（同篇另含根 `README.md`） |
+| 文档 `sync-compat-matrix.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次关键段见本页 2026-11-17「文档清账批」行 |
+| 文档 `performance.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次关键段见本页 2026-11-17「文档清账批」行 |
+| 文档 `backup.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次 `tmp/s0-2026-11-15/compare-backup-release.md` |
+| 文档 `release.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次 `tmp/s0-2026-11-15/compare-backup-release.md` |
+| 文档 `roadmap.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`；前次 `tmp/s0-2026-11-15/compare-roadmap.md` |
+| 文档 `audits.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 提交 `44e2a82`（本页同批） |
+| 文档 `README.md`（索引） | 2026-11-19 | `30cfd65` | 局部（本轮文档批核了路由、文档清单与「最近核对」口径；不是内容审计） | 提交 `44e2a82` |
+| 文档 `frontend.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批）/ 全量扫描（静态，台账） | 提交 `44e2a82`；`tmp/s0-2026-11-15/class-ledger.json`（2026-11-19 复扫）；本页 2026-11-19「阶段B 前端未覆盖域静态审计」行 |
 | 仓库根 `README.md`（不在 `docs/`） | 2026-11-15 | `77c1964` | 逐篇 | `tmp/s0-2026-11-15/compare-dev-readme.md`（2026-11-19 文档批未复核，不随本轮升日期） |
 
-**结论**：不是"全覆盖"。2026-11-19 的两轮阶段B 静态审读只把 `db/outbox.rs`、`commands/sync.rs`、`commands/settings.rs`、`ingestion/staged.rs`、`db/body_retention.rs`、`db/url_norm.rs` 与前端 `PlayerBar`/`GalleryLayout`/`useProseImages`/`imageProxy` 补到「静态审读」深度（未跑 cargo 或测试），不构成逐行覆盖；文档维度经 2026-11-19 文档批逐篇核过 11 篇（contracts/maintenance/development/performance/sync-compat-matrix/backup/release/architecture/roadmap/audits/frontend），剩余 `docs/README.md` 索引自身仍是「未覆盖」，仓库根 `README.md` 停在 2026-11-15、未随本轮复核；该文档批是逐篇核对与局部更新，不是全量审计。排期与下一轮优先级属一次性材料，不入库；覆盖矩阵保留在本页。
+**结论**：不是"全覆盖"。2026-11-19 的两轮阶段B 静态审读只把 `db/outbox.rs`、`commands/sync.rs`、`commands/settings.rs`、`ingestion/staged.rs`、`db/body_retention.rs`、`db/url_norm.rs` 与前端 `PlayerBar`/`GalleryLayout`/`useProseImages`/`imageProxy` 补到「静态审读」深度（未跑 cargo 或测试），不构成逐行覆盖；文档维度经 2026-11-19 文档批逐篇核过 11 篇（contracts/maintenance/development/performance/sync-compat-matrix/backup/release/architecture/roadmap/audits/frontend）+ 索引自身的路由与日期口径，剩余仓库根 `README.md` 停在 2026-11-15、未随本轮复核；该文档批是逐篇核对与局部更新，不是全量审计。排期与下一轮优先级属一次性材料，不入库；覆盖矩阵保留在本页。
