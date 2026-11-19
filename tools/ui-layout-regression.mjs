@@ -183,10 +183,15 @@ async function freePort() {
   });
 }
 
-async function waitHttp(url, timeoutMs = 30000) {
+async function waitHttp(url, timeoutMs = 30000, abort = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
+  /* abort 返回 Error 时立即停止等待：调用方已判定不可能就绪（如 Vite 进程已退出），
+     不应把预算空跑满。 */
+  const aborted = () => (typeof abort === 'function' ? abort() : null);
   while (Date.now() < deadline) {
+    const abortError = aborted();
+    if (abortError) throw abortError;
     try {
       const response = await fetch(url);
       if (response.ok) return;
@@ -196,6 +201,8 @@ async function waitHttp(url, timeoutMs = 30000) {
     }
     await delay(100);
   }
+  const abortError = aborted();
+  if (abortError) throw abortError;
   throw new Error(`等待 ${url} 超时：${lastError?.message ?? 'unknown'}`);
 }
 
@@ -361,19 +368,175 @@ function findBrowser() {
   throw new Error('未找到 Edge/Chrome；可用 EDGE_PATH 或 CHROME_PATH 指定可执行文件');
 }
 
+/* 返回「是否真的杀了活着的进程」：已退出的子进程是 no-op。 */
 function terminateTree(child) {
-  if (!child || child.exitCode !== null || !child.pid) return;
+  if (!child || child.exitCode !== null || !child.pid) return false;
   if (process.platform === 'win32') {
     spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
   } else {
     child.kill('SIGTERM');
   }
+  return true;
+}
+
+const REPO_ROOT_RESOLVED = path.resolve(REPO_ROOT);
+
+/* Windows 路径比较：大小写不敏感，并尽量展开 junction/8.3 短名（realpath 失败就退回字面值）。 */
+function canonicalPath(value) {
+  const resolved = path.resolve(value);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function pathWithin(childValue, parentValue) {
+  const child = canonicalPath(childValue);
+  const parent = canonicalPath(parentValue);
+  const fold = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  if (fold(child) === fold(parent)) return true;
+  const prefix = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+  return fold(child).startsWith(fold(prefix));
+}
+
+/* os.tmpdir() 的取值顺序随平台不同：Windows 取 TEMP，其次 TMP（TMPDIR 不参与）；
+   其他平台按 TMPDIR > TMP > TEMP。文案必须如实说明实际来源，不能套用另一平台的顺序。 */
+const TEMP_VARIABLE_ORDER = process.platform === 'win32' ? ['TEMP', 'TMP'] : ['TMPDIR', 'TMP', 'TEMP'];
+
+function systemTempSource() {
+  for (const name of TEMP_VARIABLE_ORDER) {
+    if (process.env[name]) return { name, value: process.env[name] };
+  }
+  return { name: null, value: null };
+}
+
+function tempVariableHint() {
+  return process.platform === 'win32'
+    ? '本次解析按 Windows 规则取 TEMP（其次 TMP；TMPDIR 在 Windows 上不参与 os.tmpdir()）'
+    : '本次解析按 TMPDIR > TMP > TEMP 取值';
+}
+
+/* 浏览器 profile 必须落在仓库外：放在仓库内时 Vite watcher 会撞上 Edge 锁文件并 EBUSY 退出。
+   在清理证据之前判定：被拒绝的运行不该先删掉上一次的 metrics/截图；也不静默回退到别的目录
+   （归到别处会掩盖环境问题，让门禁在错误环境下"意外变绿"）。 */
+function assertSystemTempOutsideRepo() {
+  const resolvedTemp = path.resolve(os.tmpdir());
+  if (!pathWithin(resolvedTemp, REPO_ROOT_RESOLVED)) return resolvedTemp;
+  const canonicalTemp = canonicalPath(resolvedTemp);
+  const fold = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  // junction/短名场景下，用户看到的路径与实际落点不同，两个都写出来才好排查。
+  const canonicalNote = fold(canonicalTemp) === fold(resolvedTemp) ? '' : `，实际解析为 ${canonicalTemp}`;
+  const source = systemTempSource();
+  const origin = source.name
+    ? `${source.name}=${source.value}`
+    : `${TEMP_VARIABLE_ORDER.join('/')} 均未设置，取系统默认`;
+  throw new Error(
+    `TEMP/TMP 指向仓库内（${resolvedTemp}${canonicalNote}，来自 ${origin}）：Edge profile 会落进 Vite 的 watch 树并触发 EBUSY。`
+    + '请把 TEMP 与 TMP 都指向仓库外目录后重跑（例如 $env:TEMP = $env:TMP = "$env:LOCALAPPDATA\\Temp"）；'
+    + `${tempVariableHint()}。`,
+  );
+}
+
+const VITE_OUTPUT_TAIL_LINES = 40;
+/* 每次启动的 Vite 运行记录：退出码只能来自 exit 事件，不能靠 child.exitCode 推断。 */
+const VITE_RUNS = [];
+
+function tailLines(text, maxLines) {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+  while (lines.length > 0 && lines.at(-1).trim() === '') lines.pop();
+  return lines.slice(-maxLines).join('\n');
+}
+
+/* 解析 Vite CLI 入口：包 exports 未导出 bin 路径，不能直接 resolve('vite/bin/vite.js')，
+   改为读包清单的 bin 字段；只接受仓库内的安装，解析失败再回落固定路径。 */
+function resolveViteEntry() {
+  const repoRoot = path.resolve(REPO_ROOT);
+  const candidates = [];
+  try {
+    const manifestPath = fileURLToPath(import.meta.resolve('vite/package.json'));
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.vite;
+    if (bin) candidates.push(path.resolve(path.dirname(manifestPath), bin));
+  } catch { /* 依赖缺失或 exports 变化时走固定路径 */ }
+  candidates.push(path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js'));
+  const resolved = candidates.find((candidate) => {
+    const absolute = path.resolve(candidate);
+    return absolute.startsWith(`${repoRoot}${path.sep}`) && fs.existsSync(absolute);
+  });
+  if (!resolved) {
+    throw new Error(`缺少 Vite 入口：${candidates.join(' / ')}（依赖未安装，请先跑 npm ci）`);
+  }
+  return resolved;
+}
+
+/* 只有真的杀掉活着的进程才记 terminatedByRunner：已自行退出（或没起来）时 terminateTree 是 no-op，
+   不能把「自己崩了」记成「被 runner 终止」——两者在 metrics 里必须可区分。 */
+function terminateVite(viteRun) {
+  if (!viteRun) return false;
+  if (viteRun.run.exitedAt !== null || viteRun.run.spawnError) return false;
+  if (!terminateTree(viteRun.child)) return false;
+  viteRun.run.terminatedByRunner = true;
+  viteRun.run.killedAt = new Date().toISOString();
+  viteRun.run.killedAfterMs = Date.now() - viteRun.run.startedAtMs;
+  return true;
+}
+
+/* 等 exit 事件落定：Windows 上 taskkill 后进程已死、exit 通知可能晚到数秒。
+   等不到就如实保留 exited=null，不把「没等到」当成 0。 */
+async function waitViteExit(viteRun, maxMs = 10000) {
+  if (!viteRun) return;
+  const deadline = Date.now() + maxMs;
+  while (viteRun.run.exitedAt === null && !viteRun.run.spawnError && Date.now() < deadline) {
+    await Promise.race([viteRun.exited, delay(200)]);
+  }
+}
+
+function viteExitKind(run) {
+  if (!run) return null;
+  if (run.spawnError) return 'spawn-error';
+  if (run.exitedAt === null) return 'running';
+  return run.terminatedByRunner ? 'killed-by-runner' : 'exited-on-its-own';
+}
+function viteEvidence() {
+  const run = VITE_RUNS.at(-1) ?? null;
+  return {
+    exited: run?.exited ?? null,
+    exitSignal: run?.exitSignal ?? null,
+    exitedAt: run?.exitedAt ?? null,
+    exitedAfterMs: run?.exitedAfterMs ?? null,
+    running: run ? run.exitedAt === null : null,
+    // exitKind 是读法入口：killed-by-runner 的 exited 是 runner 自己 taskkill 的码，
+    // exited-on-its-own 才是进程自行退出；两者必须分开读。
+    exitKind: viteExitKind(run),
+    terminatedByRunner: run?.terminatedByRunner ?? false,
+    killedAt: run?.killedAt ?? null,
+    killedAfterMs: run?.killedAfterMs ?? null,
+    spawnError: run?.spawnError ?? null,
+    childError: run?.childError ?? null,
+    outputTail: run?.tail() ?? '',
+    output: run?.output() ?? '',
+    runs: VITE_RUNS.map((item) => ({
+      pid: item.pid,
+      port: item.port,
+      entry: item.entry,
+      startedAt: item.startedAt,
+      exited: item.exited,
+      exitSignal: item.exitSignal,
+      exitedAt: item.exitedAt,
+      exitedAfterMs: item.exitedAfterMs,
+      exitKind: viteExitKind(item),
+      terminatedByRunner: item.terminatedByRunner,
+      killedAfterMs: item.killedAfterMs,
+      spawnError: item.spawnError,
+      childError: item.childError,
+    })),
+  };
 }
 
 async function startVite() {
   const port = await freePort();
-  const viteEntry = path.join(REPO_ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
-  if (!fs.existsSync(viteEntry)) throw new Error(`缺少 Vite 入口：${viteEntry}`);
+  const viteEntry = resolveViteEntry();
   const child = spawn(process.execPath, [
     viteEntry,
     '--host', '127.0.0.1',
@@ -389,16 +552,107 @@ async function startVite() {
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk.toString(); });
   child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+  const run = {
+    entry: viteEntry,
+    port,
+    pid: child.pid ?? null,
+    startedAt: new Date().toISOString(),
+    startedAtMs: Date.now(),
+    exited: null,
+    exitSignal: null,
+    exitedAt: null,
+    exitedAfterMs: null,
+    terminatedByRunner: false,
+    killedAt: null,
+    killedAfterMs: null,
+    spawnError: null,
+    childError: null,
+    tail: () => tailLines(output, VITE_OUTPUT_TAIL_LINES),
+    output: () => output,
+  };
+  VITE_RUNS.push(run);
+  let resolveExit;
+  const exited = new Promise((resolve) => { resolveExit = resolve; });
+  child.once('exit', (code, signal) => {
+    if (run.exitedAt === null) {
+      run.exited = code ?? null;
+      run.exitSignal = signal ?? null;
+      run.exitedAt = new Date().toISOString();
+      run.exitedAfterMs = Date.now() - run.startedAtMs;
+    }
+    resolveExit(run);
+  });
+  /* spawn 失败（找不到/无权执行 node 等）只会发 error 且没有 pid；必须接住，
+     否则未捕获的 'error' 事件会掀翻整个进程，且启动等待会空跑满预算。
+     spawn 成功之后的 error（如 kill 失败）只单独记录，不短路：进程可能还活着，
+     teardown 仍必须 taskkill，也不能据此跳过 exit 等待。 */
+  child.once('error', (error) => {
+    const message = error?.message ?? String(error);
+    if (child.pid == null) {
+      run.spawnError = message;
+      resolveExit(run);
+      return;
+    }
+    run.childError = message;
+  });
+  /* 启动/等待期间进程一退出（或起不来）就停止轮询：不再空等满 STARTUP_TIMEOUT_MS，
+     错误里带退出码与输出尾部，EBUSY 之类原因可直接看到。 */
+  const abortOnExit = () => {
+    const tail = run.tail();
+    if (run.spawnError) {
+      return new StartupTimeoutError(
+        `Vite 子进程启动失败（${run.spawnError}）；Vite 输出末尾 ${VITE_OUTPUT_TAIL_LINES} 行：\n${tail}`,
+        {
+          phase: 'Vite 启动',
+          cause: new Error(run.spawnError),
+          spawnError: run.spawnError,
+          viteOutputTail: tail,
+        },
+      );
+    }
+    if (run.exitedAt === null) return null;
+    const reason = `Vite 进程在就绪前退出（exitCode=${run.exited}`
+      + `${run.exitSignal ? `，signal=${run.exitSignal}` : ''}，${run.exitedAfterMs}ms）`;
+    return new StartupTimeoutError(`${reason}；Vite 输出末尾 ${VITE_OUTPUT_TAIL_LINES} 行：\n${tail}`, {
+      phase: 'Vite 启动',
+      cause: new Error(reason),
+      exitCode: run.exited,
+      exitSignal: run.exitSignal,
+      exitedAt: run.exitedAt,
+      viteOutputTail: tail,
+    });
+  };
   try {
-    await waitHttp(`http://127.0.0.1:${port}/`, STARTUP_TIMEOUT_MS);
+    await waitHttp(`http://127.0.0.1:${port}/`, STARTUP_TIMEOUT_MS, abortOnExit);
   } catch (error) {
-    terminateTree(child);
-    throw new StartupTimeoutError(`${error.message}\nVite 输出：\n${output}`, {
+    // 这条 run 不会交给上层（此时 main 的 vite 仍是 null），所以必须就地收尾：
+    // 等满预算才放弃时进程可能还活着 → 杀掉并记 terminatedByRunner；再等 exit 事件落定，
+    // 否则 metrics 会把这条 run 记成 exitKind="running" / exited=null（复审次要 3）。
+    const abandonedRun = { child, run, exited };
+    terminateVite(abandonedRun);
+    await waitViteExit(abandonedRun);
+    // 早退分支已带退出码/错误与输出尾部，不再二次包装同一份日志。
+    if (error instanceof StartupTimeoutError) throw error;
+    const tail = run.tail();
+    const detail = run.spawnError ? `，spawnError=${run.spawnError}` : '';
+    throw new StartupTimeoutError(`${error.message}${detail}\nVite 输出末尾 ${VITE_OUTPUT_TAIL_LINES} 行：\n${tail}`, {
       phase: 'Vite 启动',
       cause: error,
+      exitCode: run.exited,
+      exitSignal: run.exitSignal,
+      exitedAt: run.exitedAt,
+      spawnError: run.spawnError,
+      viteOutputTail: tail,
     });
   }
-  return { child, port, url: `http://127.0.0.1:${port}/`, getOutput: () => output };
+  return {
+    child,
+    port,
+    url: `http://127.0.0.1:${port}/`,
+    run,
+    exited,
+    getOutput: () => output,
+  };
 }
 
 async function startBrowser(profileDir) {
@@ -3083,25 +3337,39 @@ async function runSocialCheck(cdp, evidence, viewportLabel, baseId, media) {
   }
 }
 
+function isOwnEvidenceFile(name) {
+  if (name === 'metrics.json' || name === 'viewport-trace.json' || name === 'viewport-trace-error.json') return true;
+  if (!name.endsWith('.png')) return false;
+  // 本 runner 的截图名一律以视口标签（1440x900-、1280x800-…）或 failure 结尾；其余 png 不认作自己的。
+  const stem = name.slice(0, -'.png'.length);
+  return /^\d+x\d+-/.test(stem) || stem === 'unknown-failure' || stem === 'failure';
+}
+
 async function main() {
+  /* 环境守卫在清理证据之前：被拒绝的运行不能先删掉上一次的 metrics/截图。 */
+  assertSystemTempOutsideRepo();
   await fsp.mkdir(EVIDENCE_DIR, { recursive: true });
-  for (const name of await fsp.readdir(EVIDENCE_DIR)) {
-    if (name === 'metrics.json' || name === 'viewport-trace.json'
-      || name === 'viewport-trace-error.json' || name === 'failure.png'
-      || name.endsWith('-failure.png')
-      || (name.endsWith('.png') && (name.includes('layout-') || name.includes('social-')))) {
-      await fsp.unlink(path.join(EVIDENCE_DIR, name));
+  const foreignResidue = [];
+  for (const entry of await fsp.readdir(EVIDENCE_DIR, { withFileTypes: true })) {
+    // 只清本 runner 自己的截图/日志；目录与不认识的文件（他人证据）一律不删，只在输出里点名。
+    if (entry.isFile() && isOwnEvidenceFile(entry.name)) {
+      await fsp.unlink(path.join(EVIDENCE_DIR, entry.name));
+      continue;
     }
+    foreignResidue.push(`${entry.name}${entry.isDirectory() ? '/' : ''}`);
+  }
+  if (foreignResidue.length > 0) {
+    console.log(`[ui-layout] 证据目录保留非本 runner 产物（未删除）：${foreignResidue.join(', ')}`);
   }
   /* 浏览器 profile 必须放在仓库外：Vite watcher 会跟随 tmp/ 下的锁文件并因
      Windows EBUSY 退出。证据截图/JSON 仍落仓库 tmp/ui-layout-evidence。 */
   const profileDirs = [];
   const makeProfileDir = async () => {
-    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'fluxreader-ui-layout-'));
-    const resolvedDir = path.resolve(dir);
-    const resolvedTemp = path.resolve(os.tmpdir());
-    if (!resolvedDir.startsWith(`${resolvedTemp}${path.sep}`)) {
-      throw new Error(`拒绝在系统临时目录外创建浏览器 profile：${resolvedDir}`);
+    // 重试路径也复查一次：环境在运行期间被改也不会把 profile 放进仓库。
+    const resolvedTemp = assertSystemTempOutsideRepo();
+    const dir = await fsp.mkdtemp(path.join(resolvedTemp, 'fluxreader-ui-layout-'));
+    if (!pathWithin(dir, resolvedTemp)) {
+      throw new Error(`拒绝在系统临时目录外创建浏览器 profile：${path.resolve(dir)}`);
     }
     profileDirs.push(dir);
     return dir;
@@ -3120,6 +3388,7 @@ async function main() {
     viewports: {},
     keyboardViewports: {},
     browser: null,
+    vite: null,
     consoleMessages: [],
     consoleErrors: [],
     networkFailures: [],
@@ -3144,6 +3413,7 @@ async function main() {
     }));
   };
   let activeViewportLabel = null;
+  let evidenceMetricsSaved = false;
 
   try {
     media = await startMediaServer();
@@ -3277,7 +3547,8 @@ async function main() {
           cdp = null;
           terminateTree(browser?.child);
           browser = null;
-          terminateTree(vite?.child);
+          terminateVite(vite);
+          await waitViteExit(vite);
           vite = null;
           evidence.consoleMessages.length = 0;
           evidence.consoleErrors.length = 0;
@@ -3321,6 +3592,7 @@ async function main() {
       assert.deepEqual(evidence.unexpectedNetworkFailures, [],
         `存在未归类的网络失败：${JSON.stringify(evidence.unexpectedNetworkFailures)}`);
       await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence);
+      evidenceMetricsSaved = true;
       console.log(JSON.stringify({
         ok: true,
         fault: {
@@ -3393,6 +3665,7 @@ async function main() {
     assert.deepEqual(evidence.consoleErrors, [], `浏览器 console.error：${JSON.stringify(evidence.consoleErrors)}`);
     assert.deepEqual(evidence.exceptions, [], `浏览器未捕获异常：${JSON.stringify(evidence.exceptions)}`);
     await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence);
+    evidenceMetricsSaved = true;
     console.log(JSON.stringify({
       ok: true,
       evidence: `${EVIDENCE_REL}/metrics.json`,
@@ -3445,7 +3718,7 @@ async function main() {
     evidence.mediaRequests = media?.requests ?? [];
     finalizeNetworkEvidence();
     evidence.failure = error?.stack ?? String(error);
-    evidence.vite = { exited: vite?.child.exitCode ?? null, output: vite?.getOutput?.() ?? '' };
+    evidence.vite = viteEvidence();
     try {
       if (cdp) {
         evidence.pageState = await evalValue(cdp, `(() => ({
@@ -3468,6 +3741,7 @@ async function main() {
       if (cdp) await screenshot(cdp, path.join(EVIDENCE_DIR, `${activeViewportLabel ?? 'unknown'}-failure.png`));
     } catch { /* 保留原始失败 */ }
     await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence);
+    evidenceMetricsSaved = true;
     throw error;
   } finally {
     if (TRACE_MODE === 'viewport' && cdp) {
@@ -3488,11 +3762,21 @@ async function main() {
     networkTracker?.close();
     cdp?.close();
     terminateTree(browser?.child);
-    terminateTree(vite?.child);
+    /* 只有真的杀掉活着的进程才记 terminatedByRunner：已自行退出的进程是 no-op，
+       不能把「自己崩了」记成「被 runner 终止」。 */
+    terminateVite(vite);
+    /* 等 exit 事件落定再写证据：Windows 上 taskkill 后进程已死、exit 通知可能晚到数秒；
+       等不到就如实保留 exited=null（exitKind=running），不把「没等到」当成 0。 */
+    await waitViteExit(vite);
     await media?.close?.();
     await delay(300);
     for (const dir of profileDirs) {
       await fsp.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+    if (evidenceMetricsSaved) {
+      evidence.vite = viteEvidence();
+      await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence)
+        .catch((error) => console.error('[ui-layout] 回写 Vite 退出码失败：', error?.message ?? String(error)));
     }
   }
 }
