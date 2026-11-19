@@ -68,18 +68,9 @@ Rust 侧命令在 `src-tauri/` 下执行，本地须运行 `cargo fmt --all -- -
 
 ## 项目文档
 
-完整索引与按任务查哪几篇的阅读路由见 [docs/README.md](docs/README.md)；本表只列入口。
+文档入口：[docs/README.md](docs/README.md)（索引与阅读路由；不要通读全部文档）。
 
-| 文档 | 内容 |
-| --- | --- |
-| [docs/README.md](docs/README.md) | 文档索引与阅读路由（先看这里，不要通读全部文档） |
-| [docs/maintenance.md](docs/maintenance.md) | 维护与文档纪律：证据标准、审计与证伪、清理批次、耦合判据、视觉回归分层 |
-| [docs/contracts.md](docs/contracts.md) | 契约单点表：每类事实的唯一出处、消费者与改动同步面 |
-| [docs/sync-compat-matrix.md](docs/sync-compat-matrix.md) | Google Reader / Fever 协议与 FreshRSS、Miniflux 的兼容矩阵，及冲突政策与已知实现差异 |
-| [docs/backup.md](docs/backup.md) | 便携备份与换机、WebDAV边界及本机数据库故障恢复 |
-| [docs/roadmap.md](docs/roadmap.md) | 当前缺口与已知限制 |
-| [docs/release.md](docs/release.md) | 发布序列、tag 附注结构与提交信息约定 |
-| [.agents/notes/](.agents/notes/) | 各项设计决定的记录：为什么这样做、当时放弃了哪些方案 |
+最常查的三处：[当前缺口与已知限制](docs/roadmap.md)、[契约单点](docs/contracts.md)、[维护与文档纪律](docs/maintenance.md)。
 
 ## License
 

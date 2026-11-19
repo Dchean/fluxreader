@@ -11,11 +11,11 @@
 3. 以 main tip 的 bump 提交创建 annotated tag：`git tag -a vX.Y.Z <bump提交> -F <附注文件>`，再推送 tag。
 4. Release 工作流先核对 tag、main 归属与版本文件，再调用该提交的完整 `ci.yml`。全部通过后才构建 Windows x64 安装包，上传草稿并验证内容，最后公开 Release。
 
-`ci.yml` 对 main/dev push、面向 main 的 PR 及 `workflow_call` 触发。`v*` tag 只触发 `release.yml`，由它调用同一提交的 `ci.yml`，因此 tag 不另起一套重复 CI，也不轮询历史成功记录。调用保留 frontend、Windows Edge 布局和 Windows Rust 三个 job 的全部门禁；任一失败或超时都阻止构建发布。发布前仍须满足 [AGENTS.md](../AGENTS.md) 的审计与验证要求；本文件不是执行发布的授权。
+`ci.yml` 对 main/dev push、面向 main 的 PR 及 `workflow_call` 触发。`v*` tag 只触发 `release.yml`，由它调用同一提交的 `ci.yml`（不另起重复 CI、不轮询历史成功记录），保留 frontend、Windows Edge 布局和 Windows Rust 三个 job 的全部门禁，任一失败或超时都阻止构建发布。发布前仍须满足 [AGENTS.md](../AGENTS.md) 的审计与验证要求；本文件不是执行发布的授权。
 
 发布只接受稳定 `vX.Y.Z` annotated tag，附注非空、直接指向本次 workflow SHA，且该提交可达于远端 main。tag 版本必须与 `package.json`、`package-lock.json` 的根与本包版本、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `Cargo.lock` 的 app 包版本一致。CI 与构建都检出固定 SHA；构建前和公开前复核 tag，防止等待期间 tag 被改指。流程仍要求创建 tag 时指向 main tip；可达性检查允许 main 后来前进时恢复尚未公开的草稿。
 
-tag 逐版推送并等本版完成后再推下一版。Release 使用全局并发组且不取消正在运行的发布，但 GitHub 默认只保留一个等待中的 run；它不是无限发布队列。
+tag 逐版推送，等本版完成后再推下一版；Release 用全局并发组且不取消运行中的发布，但 GitHub 默认只保留一个等待中的 run，不是无限发布队列。
 
 main bump 后 dev 版本短暂落后是分支内容一致约定的临时例外。下一次 dev 开发前将 main 合回 dev，使版本文件重新对齐。
 

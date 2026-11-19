@@ -64,7 +64,7 @@ GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 
 - **Fever 端点与短页**：Miniflux 常用 `{base}/fever/`；FreshRSS `/api/fever.php` 或 `/p/api/fever.php`，api_key 在 POST 表单而非 query。两者 max_id 页为 id DESC。FreshRSS 在 LIMIT 50 之后由 EntryBeforeDisplay 过滤，非空短页不等于结束。
 - **Fever 收藏版本差异**：固定 Miniflux 虽报告 api_version3，saved/unsaved 已是条件绝对赋值。历史 toggle 夹具是兼容反例，不能当所有 v3 事实；保守先探测仍有多设备并发窗口。
 - **订阅修改**：固定 Miniflux [Update Feed API](https://miniflux.app/docs/api.html#endpoint-update-feed) 与 [storage/feed.go](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/storage/feed.go) 允许同 ID 更改 feed_url，并按原 URL 精确去重；客户端不能用折叠 HTTP/HTTPS 的 URL 覆盖两个已知 ID。
-- **Bazqux 前瞻**：未接入。既有官方材料警告不要依赖 ot 主列举、推荐 xt 未读流；它保留退订源历史，未读集合中消失但 contents 仍可取的条目会击穿“未读差分 + 存在性”假设。接入前需定义退订行排除/清理域。
+- **Bazqux**：不支持；其他 RSS 服务与多账号不在范围，见 [roadmap](roadmap.md#accepted-tradeoffs)。
 
 固定 Fever 集合端点没有 continuation 或已验证的状态增量参数，当前只能整段重拉。GR long-poll/ContinueWhatNewStream、Fever last_id_on_sync、订阅清单 ETag/304 在历史核对中缺少可采纳的固定版本依据，未实现为通用优化。选择理由见[会话复用与有界并发](../.agents/notes/implemented/architecture/2026-11-01-同步会话复用与有界并发与聚焦同步.md)。
 
@@ -87,7 +87,7 @@ GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 
 
 WebDAV 与活动 RSS 账号互斥。本地源按创建归属/原本地历史进入同步，远端 RSS 镜像不进入其 journal；分类按创建 origin 及本地源成员闭包归属，remote_id 不作身份推断。普通设置、源/组布局及 AI 行为开关同步；凭据、AI 服务配置/产物不传。read/star 独立按操作创建时固定的 Lamport/actor/seq 合并，离线冲突不承诺真实点击或上传先后；重试不生成新操作。
 
-清单和状态/正文对象不可变，写后读取确认精确字节，不能当作全球 winner。接收缺块/错误不是空库，状态/正文分别重试；未读或收藏正文未补齐显示 pending。远端物理 DELETE 当前关闭：替换对象精确 ACK 和已知 actor 覆盖仍不能证明未知/离线读取者已无保护义务。未确认正文继续保留，不能以新设备缺正文作为允许回收的理由；远端空间治理仍待完成。正文内容按 `BodyContent` 逐条校验：`html` 与 `text` 的字节数合计超过 `local_sync/model.rs` 的 `MAX_BODY_BYTES`（32 MiB）即拒绝，primary 与可选 rss 分别计；本地同步的写入与接收、便携导出/恢复共用该检查，超限以 `localSyncFormat` 报错，不做截断。该 32 MiB 与 GR/Fever 传输的 16 MiB 不是同一常量。
+清单和状态/正文对象不可变，写后读取确认精确字节，不能当作全球 winner。接收缺块/错误不是空库，状态/正文分别重试；未读或收藏正文未补齐显示 pending。远端物理 DELETE 当前关闭（边界见 [roadmap](roadmap.md#sync-correctness)）：替换对象精确 ACK 和已知 actor 覆盖仍不能证明未知/离线读取者已无保护义务。未确认正文继续保留，不能以新设备缺正文作为允许回收的理由；远端空间治理仍待完成。正文对象超限以 `localSyncFormat` 拒绝、不做截断，大小上限见[契约单点](contracts.md)的「同步正文对象大小上限」；它与 GR/Fever 传输的 16 MiB 不是同一常量。
 
 候选正文目录分页、内容唯一分块，便携 v4 从同一内容身份导出流式包。新库恢复新 actor 和主键高水位，断开凭据与旧队列。详细协议职责、真实备选和存储边界见[资料库决定](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)，独立 WAL 连接的事务前提见[写预留决定](../.agents/notes/implemented/architecture/2026-11-09-多连接SQLite写预留与原子设置.md)。
 
@@ -95,28 +95,10 @@ WebDAV 与活动 RSS 账号互斥。本地源按创建归属/原本地历史进�
 
 ## 真实服务端的限定实测
 
-2026-11-07，客户端从 `dev@1bb698c` 加修复后的固定 `snapshot-cd` 重编，运行既有生产 live 测试，原测试未改。每套服务使用 2 源 120 篇合成文章，GR 3 项为认证/订阅、ID/正文、收藏写回恢复；Fever 4 项为认证/订阅、未读/收藏/条目、读藏写回恢复及空临时库的完整同步。完整同步实测为 Fever 引擎的 2 源 120 篇落库，不外推为已跑 GR 引擎完整同步。
+2026-11-07 用未改动的生产 live 测试（客户端基线 `dev@1bb698c` 加修复后的固定 `snapshot-cd`）在固定 Miniflux 2.3.5 与 FreshRSS 1.30.4 上各跑 2 源 120 篇合成文章：GR 3 项（认证/订阅、ID/正文、收藏写回恢复），Fever 4 项（认证/订阅、未读/收藏/条目、读藏写回恢复及空临时库的完整同步），逐项恰 1 passed 且 exit 0，完整未读/收藏 ID 集合前后相同。
 
-| 服务端与运行环境 | 实际输入地址 | 已通过覆盖 | 仍未通过或未覆盖 |
-| --- | --- | --- | --- |
-| Miniflux 2.3.5，固定 faecfa2，Go 1.26 构建、PostgreSQL 17.6 | 根地址 `http://127.0.0.1:1922` | GR 3 项、Fever 4 项，各项恰 1 passed 且 exit 0；完整未读/收藏 ID 集合前后相同 | 其他版本、部署反代、多设备并发与全部异常输入未逐一覆盖 |
-| FreshRSS 1.30.4，PHP 8.4.27 内置服务器 | GR `http://127.0.0.1:13555/api/greader.php`；Fever `http://127.0.0.1:13555/api/fever.php` | GR 3 项、Fever 4 项，各项恰 1 passed 且 exit 0；完整未读/收藏 ID 集合前后相同 | 本配置的根地址自动发现失败，显式路径通过不关闭该失败；其他 Web 服务器、反代和版本未逐一覆盖 |
-
-FreshRSS 首次输入根地址时，未知 `/accounts/ClientLogin` 被 PHP 内置服务器交给上级入口，302 后返回 200 HTML，客户端未得到认证体而失败；该次未改变服务端状态。明确 API 路径是现有产品支持的输入，没有修改客户端或测试来绕过断言。此结果限定当前服务器路由形态，不推导所有 FreshRSS 根地址都失败。
-
-上述为真实生产客户端的定向运行证据，未单独作独立审计，也不替代安装版/WebView2、真实用户库或最终集成门禁。
+完整同步实测只覆盖 Fever 引擎的 2 源 120 篇落库，不外推为 GR 引擎已跑完整同步。FreshRSS 在该配置下根地址自动发现失败、显式 `/api/greader.php` 通过，该失败不被显式路径的成功关闭，结论限定当前服务器路由形态。两套服务端均未覆盖其他版本、反代、多设备并发与全部异常输入；这是一次性定向运行证据，不替代安装版/WebView2、真实用户库与最终集成门禁；运行地址、构建版本与逐项输出未随库留存。
 
 ## 验证入口与边界
 
-| 检查对象 | 已有可执行覆盖 |
-| --- | --- |
-| 源生命周期/修订 | source_lifecycle_revision_e2e：在途退订与重订、GR 权威屏障、源复活/墓碑、首连和 OPML、远端正文修订及全文/AI/pending；GR/Fever 单元另覆盖权威集合和重建快照 |
-| 政策方向/字段版本 | conflict_policy 单元、pull_field_versions_e2e、dual_client_e2e、unread_diff_e2e；屏障覆盖请求后本地写、清队后旧快照、字段独立性 |
-| 集合完整/游标 | greader_compat_e2e、star_reconcile_truncation_e2e、pull_cursor_e2e、pull_window_e2e；缺字段/重复 continuation/短 contents/请求 ID 覆盖 |
-| Fever 历史与恢复 | fever_compat_e2e：125 条、非空短页、Unknown/Pending、200 页续取、i64::MAX、页写失败/重建 map 失败、流式收体与字符串 ID |
-| ACK 和本地意图 | sync_ack_verification_e2e、sync_gap_repro_e2e、expired recovery、sync-recovery 组件；未知不判删除、精确身份逐项结算、源内组部分 ACK 保护、过期重建与账号代次 |
-| 同步正确性 | sync_correctness_e2e；断开逐请求、无 URL、新条目缺归属、重认证保变化/故障、出队与时间持久化失败、远端 ID 优先及冲突保全 |
-| 鉴权/分类 | greader_compat_e2e 的两种严格认证形态、feed_edit 与 sync_gap 分类移动；普通 mock_greader 不验证真实认证 |
-| 真实部署 | greader_live_e2e、fever_live_e2e、fever_sync_live_e2e 的原 7 个 ignored 用例已在上表两套服务端逐项运行；仅覆盖约定合成账号/读写恢复范围，不由 CI 默认测试推定 |
-
-测试名是覆盖入口，不是当前全部通过的结论。精确提交的门禁状态与最近证伪结果由固定 CI 与 [roadmap](roadmap.md) 维护；未解决行为留在 roadmap，避免矩阵与每篇 Note 复制轮次进度。
+回归入口见 CI 的 rust job 与 `src-tauri/tests/*_e2e.rs`。测试名是覆盖入口，不是当前全部通过的结论；精确提交的门禁状态与最近证伪由固定 CI 与 [roadmap](roadmap.md) 维护，未解决行为留在 roadmap，避免矩阵复制轮次进度。真实服务端与容量用例是 `#[ignore]`，需按任务单独约定读写边界后运行，不由 CI 默认覆盖（约定见 [AGENTS.md](../AGENTS.md) 的门禁段）。

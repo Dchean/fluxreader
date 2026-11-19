@@ -23,17 +23,19 @@
 
 | 文档 | 内容 | 代码锚点 | 触发更新（改到就同批更） | 最近核对 |
 | --- | --- | --- | --- | --- |
-| [架构](architecture.md) | 模块与依赖方向、数据库归属、同步与本地同步边界、前端数据流、并发与写预留 | `lib.rs`、`commands/`、`db/`、`sync/`、`local_sync/`、`src/store/` | 模块边界、依赖方向、锁序或数据归属变化 | 2026-11-14（基线 d4a460d） |
-| [契约单点](contracts.md) | 每类事实的唯一出处、消费者、同步面与锁定方式 | 各行的"唯一出处"列 | 新增或搬迁契约、改变消费者或同步面 | 2026-11-14 |
-| [维护与文档纪律](maintenance.md) | 证据标准、审计与证伪、变更流程、冲突处置、写作纪律、门禁 | `tools/docs-check.mjs` | 流程或门禁变化 | 2026-11-14 |
-| [开发与门禁](development.md) | 本地环境、脚本与 CI job 对应、测试分层、证据纪律、常见故障 | `package.json`、`.github/workflows/ci.yml`、`tmp/rust-env/` | 脚本、CI、测试分层或环境变化 | 2026-11-14 |
-| [同步兼容矩阵](sync-compat-matrix.md) | GR/Fever/WebDAV 的能力差异、冲突政策、真实服务端证据与边界 | `conflict_policy.rs`、`greader.rs`、`fever.rs`、`sync/`、`local_sync/` | 协议实现、冲突政策或服务端证据变化 | 2026-11-07（真实服务端实测） |
-| [性能基线](performance.md) | 判定线、测量纪律、10k/50k 基线与查询/封面/画廊/图片代理预算 | `scheduler.rs`、`db/articles.rs`、`commands/settings.rs`、`src/lib/imageProxy.ts` | 预算、索引、容量口径或方法与基线变化 | 2026-11-13 |
-| [备份与恢复](backup.md) | 便携 v4、WebDAV 持续同步、本机故障快照与恢复边界 | `local_sync/backup.rs`、`db/backup.rs` | 备份格式、恢复语义或生命周期变化 | 未标 |
-| [发布流程](release.md) | 分支、CI、tag 附注与 Release 正文的关系 | `.github/workflows/release.yml`、`tools/release/` | 发布步骤、tag 或资产策略变化 | 未标 |
-| [当前缺口](roadmap.md) | 仍成立的开放缺口、接受的边界与未验收范围 | 各条目的主题篇 | 缺口关闭、新增或范围变化 | 2026-11-14 |
-| [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-14 |
-| [前端结构台账](frontend.md) | 组件清单、类名账目、令牌使用与动态拼接契约、控件层现状 | `src/components/`、`src/store/`、`src/styles/`、`src/lib/syncPill.ts` | 增删组件、类名体系或令牌变化 | 2026-11-15（基线 77c1964） |
+| [架构](architecture.md) | 模块与依赖方向、数据库归属、同步与本地同步边界、前端数据流、并发与写预留 | `lib.rs`、`commands/`、`db/`、`sync/`、`local_sync/`、`src/store/` | 模块边界、依赖方向、锁序或数据归属变化 | 2026-11-19（基线 30cfd65） |
+| [契约单点](contracts.md) | 每类事实的唯一出处、消费者、同步面与锁定方式 | 各行的"唯一出处"列 | 新增或搬迁契约、改变消费者或同步面 | 2026-11-19（基线 30cfd65） |
+| [维护与文档纪律](maintenance.md) | 证据标准、审计与证伪、变更流程、冲突处置、写作纪律、门禁 | `tools/docs-check.mjs` | 流程或门禁变化 | 2026-11-19（基线 30cfd65） |
+| [开发与门禁](development.md) | 本地环境、脚本与 CI job 对应、测试分层、证据纪律、常见故障 | `package.json`、`.github/workflows/ci.yml`、`tmp/rust-env/` | 脚本、CI、测试分层或环境变化 | 2026-11-19（基线 30cfd65） |
+| [同步兼容矩阵](sync-compat-matrix.md) | GR/Fever/WebDAV 的能力差异、冲突政策、真实服务端证据与边界 | `sync/conflict_policy.rs`、`greader.rs`、`fever.rs`、`sync/`、`local_sync/` | 协议实现、冲突政策或服务端证据变化 | 2026-11-19（基线 30cfd65；真实服务端实测 2026-11-07 见本篇） |
+| [性能基线](performance.md) | 判定线、测量纪律、10k/50k 基线与查询/封面/画廊/图片代理预算 | `scheduler.rs`、`db/articles.rs`、`commands/settings.rs`、`src/lib/imageProxy.ts` | 预算、索引、容量口径或方法与基线变化 | 2026-11-19（基线 30cfd65） |
+| [备份与恢复](backup.md) | 便携 v4、WebDAV 持续同步、本机故障快照与恢复边界 | `local_sync/backup.rs`、`db/backup.rs` | 备份格式、恢复语义或生命周期变化 | 2026-11-19（基线 30cfd65） |
+| [发布流程](release.md) | 分支、CI、tag 附注与 Release 正文的关系 | `.github/workflows/release.yml`、`tools/release/` | 发布步骤、tag 或资产策略变化 | 2026-11-19（基线 30cfd65） |
+| [当前缺口](roadmap.md) | 仍成立的开放缺口、接受的边界与未验收范围 | 各条目的主题篇 | 缺口关闭、新增或范围变化 | 2026-11-19（基线 30cfd65） |
+| [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-19（基线 30cfd65） |
+| [前端结构台账](frontend.md) | 组件清单、类名账目、令牌使用与动态拼接契约、控件层现状 | `src/components/`、`src/store/`、`src/styles/`、`src/lib/syncPill.ts` | 增删组件、类名体系或令牌变化 | 2026-11-19（基线 30cfd65；类计数口径见本篇） |
+
+本页（索引）最近核对：2026-11-19（本批）；各篇「最近核对」的填写口径见 [维护与文档纪律](maintenance.md) 第 7 节。
 
 ## 决定记录
 
@@ -44,6 +46,24 @@
 - [简化理由](../.agents/notes/implemented/simplification/)
 - [测试策略与证据边界](../.agents/notes/implemented/testing/)
 - [流程选择](../.agents/notes/implemented/process/)
+
+按主题查高频活跃篇（其余按上面的分类目录进）：
+
+| 主题 | 决定记录 |
+| --- | --- |
+| 同步冲突政策与写回状态 | [同步冲突政策单点](../.agents/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)、[同步写回与状态一致性](../.agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md) |
+| 同步队列生命周期与本地意图 | [同步队列生命周期与本地意图](../.agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md) |
+| 订阅写回 outbox 与能力矩阵 | [订阅写回 outbox 执行器](../.agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)、[订阅写回能力矩阵与持久回执](../.agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md) |
+| 查询与分页 | [查询与分页契约](../.agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md) |
+| 乐观写入 | [乐观写入的版本守卫](../.agents/notes/implemented/architecture/2026-10-05-乐观写入的版本守卫.md) |
+| 正文与 AI 产物缓存、验签 | [正文与 AI 产物的实体缓存](../.agents/notes/implemented/architecture/2026-10-06-正文与-AI-产物的实体缓存.md)、[AI 完成信号与缓存提交](../.agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md) |
+| 可渲染正文安全边界 | [可渲染正文安全边界](../.agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md) |
+| 凭据与账号边界 | [凭据失败关闭与受控更新检查](../.agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md)、[账号会话与配置应用边界](../.agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md) |
+| WebDAV 便携恢复与本地同步 | [纯本地资料库同步与便携恢复](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)、[本地同步与便携恢复界面边界](../.agents/notes/implemented/architecture/2026-11-09-本地同步与便携恢复界面边界.md) |
+| 数据库快照与恢复 | [数据库快照与恢复边界](../.agents/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md) |
+| 前端布局、焦点与交互契约 | [全布局键盘焦点与响应式阅读列](../.agents/notes/implemented/architecture/2026-11-04-全布局键盘焦点与响应式阅读列.md)、[前端交互契约](../.agents/notes/implemented/feature/2026-11-13-前端交互契约.md) |
+| 测试门禁与证据纪律 | [测试门禁与断言纪律](../.agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md)、[验证方法与复核纪律](../.agents/notes/implemented/testing/2026-09-22-验证方法与复核纪律.md)、[修复波次的分批、证伪审计与证据门槛](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md) |
+| 维护与文档纪律 | [维护与文档纪律](../.agents/notes/implemented/process/2026-11-14-维护与文档纪律.md) |
 
 ## 一次性材料
 

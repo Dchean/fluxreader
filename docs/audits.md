@@ -4,52 +4,56 @@
 
 | 日期 | 范围 | 基线 | 结论 | 条目与缺口 | 证据位置 | 处置状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2026-11-19 | S3b store/reader：N-15/N-16/N-17/X-21；1 实现者 + 全新只读独立审计 | `0d5a8a2`（审计对象与未验收恢复点内容一致） | 独立静态审计未发现代码问题；N-15 叶子只抽最旧淘汰循环并保留 internals 私有 LRUMap，N-17 请求级登记与字段级回滚保持三入口差异，N-16 `isTauri` 与原代理判据等价，X-21 三处 25 MiB 数值与错误边界保持；除 Edge headless 外，lint/build/test:frontend 1520/test:components 360+2/docs:check/cargo fmt/check/clippy/test 通过 | 新增 N-17 交错读藏回滚、N-16 浏览器回退与 X-21 25 MiB 边界回归；旧基线隔离 worktree 的 N-17 交错两条断言为红（106/108），证明防复发检查具判别力；`test:ui-layout` 两次启动（npm 与直接 Node）均在 Edge 首屏未创建 `.app-root`；根因未确认，该失败按重要项处理并阻塞阶段 | `tmp/s3b-store-2026-11-19/06-final/`、`07-ui-retry/`、`08-ui-diagnosis/`、`09-baseline-mutations.log`；命令、输入、结果与性质写入各日志 | 不通过：待独立复审并在最终源码上复跑 Edge headless 门禁后再收口 |
+| 2026-11-19 | S3b store/reader：N-15/N-16/N-17/X-21；1 实现者 + 全新只读独立审计 | `0d5a8a2`（审计对象与未验收恢复点内容一致）；红的实测在 `759b220` 树上；`30cfd65 = 0d5a8a2 + docs(audits)` | 独立静态审计未发现代码问题；N-15 叶子只抽最旧淘汰循环并保留 internals 私有 LRUMap，N-17 请求级登记与字段级回滚保持三入口差异，N-16 `isTauri` 与原代理判据等价，X-21 三处 25 MiB 数值与错误边界保持；除 Edge headless 外，lint/build/test:frontend 1520/test:components 360+2/docs:check/cargo fmt/check/clippy/test 通过 | 新增 N-17 交错读藏回滚、N-16 浏览器回退与 X-21 25 MiB 边界回归；旧基线隔离 worktree 的 N-17 交错两条断言为红（106/108），证明防复发检查具判别力；`test:ui-layout` 当时两次启动（npm 与直接 Node）均在 Edge 首屏未创建 `.app-root`——2026-11-19 阶段C 已证实为环境红（TEMP 指进仓库），非产品缺陷 | `tmp/s3b-store-2026-11-19/06-final/`、`07-ui-retry/`、`08-ui-diagnosis/`、`09-baseline-mutations.log`；命令、输入、结果与性质写入各日志 | 实现侧静态独审已过，不再把 Edge 门禁列为产品阻塞：该门禁在 `30cfd65` 运行验证通过（环境归因已证实，见本页 2026-11-19「阶段C」行）；待工具防假红修复 + CI 变体覆盖 + 收口复审，未收口 |
+| 2026-11-19 | 阶段C：Edge headless 门禁诊断 + 独立只读证伪（复核 S3b 的阻塞项）；1 诊断 + 1 证伪子代理 | `30cfd65` | 运行验证通过：`npm run test:ui-layout` exit 0 / `ok:true` / `attempt=1` / `retried=false`（288 s）；4 视口（2 尺寸 × 2 动效，含 5 布局、画廊两段、社交 hydrate）+ 6 键盘视口全跑，画廊/社交域断言与 `consoleErrors`/`exceptions`/`unexpectedNetworkFailures` 均空；`firstMount 48.8s/120s`（用掉 40.7% 预算）。产品代码在该门禁覆盖范围内未见缺陷：上一轮「红」已复现为环境红——TEMP/TMP 指进仓库 → Edge profile 落在 Vite watch 树内 → `Default\Network\Cookies(-journal)` 被锁 → FSWatcher `EBUSY` → Vite exit 1；同一 HEAD 仅改 TEMP 的对照复现同签名失败 | 重要更正：上一轮三次红（13:19/13:56/14:02）实测在 `759b220` 树上，不在审计对象 `0d5a8a2`；`30cfd65 = 0d5a8a2 + docs(audits)`，即该门禁红从未在审计对象源码上出现。独立性限制：绿跑由诊断子代理产出，独立只读证伪已逐链复核日志与断言域，但尚未做实现侧独立复审收口；工具防假红未修（`makeProfileDir` 的仓库内校验恒真、`startVite` 不监听子进程退出、`vite.config.ts` 未忽略 `tmp/`）；CI 变体（`UI_LAYOUT_TRACE=viewport`）与故障注入模式未在 `30cfd65` 复跑；一次绿跑不足以证明不 flaky；上一轮「直接 Node 重跑」无 TEMP/vite.output 直接证据，只能按同签名推断。`05-contrast-temp-inside-repo.log` 的 `os.tmpdir from child` 一行与同次运行 metrics 自相矛盾，属探针记录错误，不得引用为反证 | 证据：`tmp/ui-layout-2026-11-19b/`（`REPORT.md` 与 `01`–`06` 日志；`04-gate-pass-metrics-30cfd65.json` 为绿跑 metrics）；性质：本机运行验证 | 待工具加固后收口 |
+| 2026-11-19 | 阶段B Rust 未覆盖域静态审计：`db/outbox.rs`、`commands/sync.rs`、`commands/settings.rs`、`ingestion/staged.rs`、`db/body_retention.rs`、`db/url_norm.rs`；1 只读静态审计 | `30cfd65` | 无阻断/重要；次要 4（入队无事务、投影设置绕过校验、正文保留永久错误静默、`url_norm` 非 UTF-8 query 有损归一）+ 信息 3 | 契约漂移 5 处：写事务、设置值域、条目身份；基线 `30cfd65` 的 `docs/contracts.md` 另外缺 `outbox` 与 `body_retention` 两行（本批复核 HEAD 成立）；未修的次要与漂移登记在 [roadmap](roadmap.md#doc-todo) 文档待办 | 性质：静态审读，未跑 cargo；审计报告在子代理记录，本机 `tmp/` 无该轮证据目录 | 待处置：次要项与契约漂移均未修，未验收 |
+| 2026-11-19 | 阶段B 前端未覆盖域静态审计：`PlayerBar.tsx`、`GalleryLayout.ts`、`useProseImages.ts`、`src/lib/imageProxy.ts`（全量）；1 只读静态审计 | `30cfd65` | 无阻断/重要；次要 2（快进无上界、skip 按钮可访问名）+ 信息 4 | 契约与台账无漂移；`GalleryLayout.ts` 未入组件台账属纯函数口径边界（已在 [frontend](frontend.md) 写明） | 性质：静态审读，未跑前端测试；审计报告在子代理记录，本机 `tmp/` 无该轮证据目录 | 待处置：次要项未修，未验收 |
 | 2026-11-17 | S3b-ui 半批：N-16（components 域 isTauri）/X-6/P2-17+N-12/P2-13；1 实现者 + 独立审计 1 子代理 | `c1fbb32` | 通过：五项前端门禁审计复现全绿（lint/build/test:frontend 1516/test:components 358+2/test:ui-layout ok）；X-6 四段逐字段等价、P2-13 两份逐字同形、P2-17 五处可达输入行为一致；`canProxyImages` 与其 3 个未转换消费者留 S3b-store 半批 | 次要 3 条：App.tsx 旧式为裸 window 判断（新 isTauri 多 typeof 守卫，无可达行为差）、提交正文文件清单表述不全（非夹带）、P2-17 注释措辞对空串略宽（后续收紧） | 复跑：五门禁（原生 Node 24，串行） | 已审计通过 |
 | 2026-11-17 | 文档清账批：matrix 3 项事实 + performance 3 处 + roadmap 待办清账；1 实现者 + 独立审计 1 子代理 | `0a88963` | 通过：6 项验收全成立——429 退避（origin 键/秒数与 RFC2822/缺省 60/下限 1/仅 GR+Fever）、ClientLogin 双格式（JSON 优先，失败或空 Auth 回退文本）、32 MiB 正文对象（primary/rss 分别计）、封面守卫 UPDATE 与弃用原因、45s 首轮可终止、五类回落覆盖六条件；docs:check 12 篇 | 次要 1 条：scheduler.rs attempt_cover 注释仍有 NULLIF 旧措辞（后续触碰时改） | 复跑：docs:check（两次 exit 0） | 已审计通过 |
 | 2026-11-15 | 批 F-1（S3a）：P2-14/P2-16/P2-18/P3-15/X-5 死代码删除；1 实现者 + 独立审计 1 子代理 | `55e9e5c` | 通过：五门禁审计复现全绿；12 类删除经父/HEAD 类计数差恰 12 佐证、括号平衡校验；X-5 处置修正——useAutomaticAi.ts 的 AUTO_AI_DWELL_MS 实为文件内活跃消费（审计"零消费"表述与代码不符），总控裁决去 export 化，审计独立核验成立 | 次要：frontend.md 台账未随批更新（366→354）——已即时补同步（本登记提交）；"一批一个模块"经审计接受为前端清理整体批 | 复跑：五门禁（原生 Node 24） | 已审计通过 |
 | 2026-11-15 | 批 C（S2c）：P1-3（D2=A 删索引）/N-20/P2-4/N-7/X-9/P3-3/P3-18/P3-19 + P3-20 评估不动 + N-19 Note（总控派发遗漏，补账时一并）；2 实现者 + 独立审计 1 子代理（初判不通过：X-9 测试未入库、P3-20 未留档 → 补账提交 57129c5 + 本登记 → 局部复审） | `94afe80` + `57129c5` | 初审时 S2b（5b870cc）已通过；批 C 门禁复现全绿（cargo 三件套 + docs:check；探针与 schema 36+22 双向比对全量一致）；两个记录缺口修复中 | P3-20 评估留档：articles.rs 双分支 UPDATE 重复约 16 行 SET 阶梯，合一收益=消漂移风险、风险=CASE 守卫/参数重排易错；commands/folders.rs 全表回查为 add-feed 低频小 n，修复需动非本批文件——建议单列小步（只合一 SET 片段生成 + 相关 e2e），不与注释批混做。次要 2 条留后续：ingestion/mod.rs 毗邻注释残留、N-19 触发窗口未实测（Note 已定性） | 复跑：原生 rust-env cargo 三件套 + docs:check；X-9 测试 `bucket_index_survives_short_or_invalid_digest` 已入库（57129c5） | 已审计通过（局部复审闭合） |
-| 2026-11-15 | 批 B（S2a）：P2-5/P2-6/N-3/P3-1/P3-4/P3-5/P3-7/P3-8/P3-9/P3-10/X-14/B6；3 实现者 + 独立审计 1 子代理 | `c8d03f8` | 通过：四门禁复现绿（cargo 三件套 + docs:check；lib 676/62 目标）；P2-6 连带清理只写私有字段；P3-6 作废（§6-21）；遗留归口 1 条：greader::VerificationItems.complete 零读者 pub 只写字段（已补账 Note，归口批 G） | 证据：提交正文、tmp/test-temp 日志、审计复现命令随报告 | 已审计通过 |
-| 2026-11-15 | 批 A（S1）：P1-2/P2-1/N-5/P2-2 实现 + X-13 评估不引入白名单；3 实现者 + 独立审计 1 子代理（初判不通过：两个记录缺口 → 补账 → 局部复审闭合） | `1a6698d` + `bfa789b` | 最终通过：8 项门禁审计复现全绿（cargo 三件套 rust-env + 前端四门禁 + docs:check；fever_compat 57、lib 676、components 358+2）；缺口为文档级（私网边界未标注、X-13 理由未落档），bfa789b 补齐；次要 2 条留后续：v6 文档段 3fff::/20 口径、discover_favicon 死形参 | 证据：提交正文、favicon/roadmap diff、tmp/test-temp/audit-components-business.log；复跑命令见审计记录 | 已审计通过 |
+| 2026-11-15 | 批 B（S2a）：P2-5/P2-6/N-3/P3-1/P3-4/P3-5/P3-7/P3-8/P3-9/P3-10/X-14/B6；3 实现者 + 独立审计 1 子代理 | `c8d03f8` | 通过：四门禁复现绿（cargo 三件套 + docs:check；lib 676/62 目标） | P2-6 连带清理只写私有字段；P3-6 作废（§6-21）；遗留归口 1 条：greader::VerificationItems.complete 零读者 pub 只写字段（已补账 Note，归口批 G） | 证据：提交正文、tmp/test-temp 日志、审计复现命令随报告 | 已审计通过 |
+| 2026-11-15 | 批 A（S1）：P1-2/P2-1/N-5/P2-2 实现 + X-13 评估不引入白名单；3 实现者 + 独立审计 1 子代理（初判不通过：两个记录缺口 → 补账 → 局部复审闭合） | `1a6698d` + `bfa789b` | 最终通过：8 项门禁审计复现全绿（cargo 三件套 rust-env + 前端四门禁 + docs:check；fever_compat 57、lib 676、components 358+2）；缺口为文档级（私网边界未标注、X-13 理由未落档），bfa789b 补齐 | 次要 2 条留后续：v6 文档段 3fff::/20 口径、discover_favicon 死形参 | 证据：提交正文、favicon/roadmap diff、tmp/test-temp/audit-components-business.log；复跑命令见审计记录 | 已审计通过 |
 | 2026-11-15 | Node 基线 22→24 与探针 reporter 固定（N-8 提前完成，用户裁决与 N-8 冲突处以 N-8 为准）；独立审计 1 子代理 | `80783b6` | 审计通过：7 条验收全成立、N-8 三项逐字核对成立；A/B 实证证明 pin 必要且有效；断言零改动 | 限制 2 条：Node 22 腿本机无版本未实测（机制论证 + Node 22 官方 NODE_OPTIONS 清单佐证）；Note 曾有悬空称谓（本次顺手修正） | `tmp/rust-env/cargo-clippy-all-xwin-msvc.log`；审计报告全文在子代理记录；复跑：原生 Node 24 `npm run test:components`、`node --test tools/release/release.test.mjs` | 已审计通过 |
-| 2026-11-15 | 文档对照：8 篇既有文档逐篇 vs 代码 + 前端组件/类名台账；6 个调查子代理 + 3 个独立证伪子代理 | `77c1964`（对照）/ `c6a72b8`（台账入库） | 对照通过：8 篇均“保留+局部更新”；24 条声明 22 成立、2 部分成立（表述细节）、1 推翻（tone 实为五值，local 复用基类——已更正台账）；12 个零引用 CSS 类与已知 P2-14 口径互证 | 21 条新登记（9 失实 + 6 缺口 + 2 裁决 + 1 失效锚 + 1 更正）：S0.5 批落笔 19 条（architecture/development/README/backup/roadmap/ci.yml/AGENTS），performance.md 与 sync-compat-matrix.md 按写者顺序留 S2c/S5；两裁决已定（六套 mock 改不枚举表述；clippy 实跑通过补日志） | `tmp/s0-2026-11-15/`（对照底稿、falsify-*.md、class-ledger.json/md、scan 脚本） | S0 完成、S0.5 本批落笔 |
+| 2026-11-15 | 文档对照：8 篇既有文档逐篇 vs 代码 + 前端组件/类名台账；6 个调查子代理 + 3 个独立证伪子代理 | `77c1964`（对照）/ `c6a72b8`（台账入库） | 对照通过：8 篇均“保留+局部更新”；27 条声明 22 成立、4 部分成立（表述或出处细节）、1 推翻（tone 实为五值，local 复用基类——已更正台账；口径＝3 份 `falsify-*.md` 汇总的逐条合计，原记「24 条声明」与合计不符）；12 个零引用 CSS 类与已知 P2-14 口径互证 | 22 条登记 = 19 条新（9 失实 + 6 缺口 + 2 裁决 + 1 失效锚 + 1 台账更正）+ 3 条已知项（P1-2/P1-3/P2-25 随清单归口，不重复计新；原记「21 条」与分项合计不符）；除 performance.md 2 条与 sync-compat-matrix.md 1 条按写者顺序留 S2c/S5，其余随 S0.5 批落笔（architecture/development/README/backup/roadmap/ci.yml/AGENTS）；两裁决已定（六套 mock 改不枚举表述；clippy 实跑通过补日志） | `tmp/s0-2026-11-15/`（6 份 `compare-*.md` 对照底稿，覆盖 8 篇；3 份 `falsify-*.md`；class-ledger.json/md；scan 脚本；分项见 `S0-三份清单.md` 的清单二） | S0 完成、S0.5 本批落笔 |
 | 2026-11-14 | 全项目：同步协议、数据层、前端、测试工具链、WebDAV/local_sync、AI；7 轮、≥27 个子代理 | `d4a460d`（工作树干净） | **不通过**：9 条重要项待修 | 101 条（重要 9 / 次要 55 / 信息 37）+ 9 决策 + 6 已推迟 + 8 勿动 + 20 条前轮纠正；缺口：`db/outbox.rs`、`commands/sync.rs`、`commands/settings.rs` 未覆盖 | `tmp/audit-2026-11-14/最终审计报告.md`、`修复优化指导.md`、`tmp/audit-falsify-2026-11-14/`（工作底稿与证伪报告） | 待修复 |
-
-## 修复路线
-
-当前路线：`tmp/audit-route-2026-11-14/路线方案.md`（v2，工作文件，不入库）。约束性内容以 [维护与文档纪律](maintenance.md) §3/§9/§11 为准；路线只是排期，不替代规则。
 
 ## 复跑入口
 
-- 前端全量状态回归：`npm run test:frontend`（2026-11-14 本机 1516/1516 通过）。
+- 前端全量状态回归：`npm run test:frontend`（两次测量各自绑定基线，不作当前值推定：2026-11-14 基线 `d4a460d` 本机 1516/1516；2026-11-19 基线 `30cfd65` 本机 1520/1520）。
 - 组件回归：`npm run test:components`（2026-11-15 起探针 reporter 固定 tap，Node 24 原生通过；项目 Node 基线随 `.node-version` 升至 24）。
 - 审计条目复核方式：按报告 §1 的位置列 grep/read；静态结论的触发前提写在条目内。
 
 ## 覆盖矩阵（累计表；每轮只更新行，不整体替换）
 
-深度口径：**逐行** = 关键路径逐函数核对；**关键段** = 只核公开入口、错误路径与边界；**结构级** = 只核模块边界与调用关系。空着的格子写"未覆盖"，不留白。
+深度口径：**逐行** = 关键路径逐函数核对；**关键段** = 只核公开入口、错误路径与边界；**结构级** = 只核模块边界与调用关系；**静态审读** = 只读代码、不运行构建或测试，覆盖面按该轮条目声明。空着的格子写"未覆盖"，不留白。
 
 | 域 | 最后审计日期 | 基线 | 深度 | 证据/位置 |
 | --- | --- | --- | --- | --- |
 | 同步协议（`sync/`、`greader.rs`、`fever.rs`、`sync_http.rs`） | 2026-11-14 | `d4a460d` | 逐行 | 报告 §1.1/§1.2；四轮独立复核 |
 | 数据层（`db/` 的 articles/feeds/folders/sync_map/writer/contents/backup） | 2026-11-14 | `d4a460d` | 逐行（核心）/关键段（备份） | 报告 §1.1/§1.2 |
-| 数据层（`db/outbox.rs`、`db/body_retention.rs`、`db/url_norm.rs` 全量） | 2026-11-14 | `d4a460d` | 未覆盖 / 抽样 | 仅核过入口与注释 |
+| 数据层（`db/outbox.rs`、`db/body_retention.rs`、`db/url_norm.rs` 全量） | 2026-11-19 | `30cfd65` | 静态审读（未跑 cargo） | 本页 2026-11-19「阶段B Rust 未覆盖域静态审计」行 |
 | 前端 store 与关键组件（internals、slices、Timeline、Overlays、Reader、api） | 2026-11-14 | `d4a460d` | 逐行 | 报告 §1.2 前端条目 |
-| 前端（`PlayerBar`、`GalleryLayout`、`useProseImages`、`imageProxy` 全量） | 2026-11-14 | `d4a460d` | 结构级 | 未逐行 |
+| 前端（`PlayerBar.tsx`、`GalleryLayout.ts`、`useProseImages.ts`、`src/lib/imageProxy.ts` 全量） | 2026-11-19 | `30cfd65` | 静态审读（未跑测试） | 本页 2026-11-19「阶段B 前端未覆盖域静态审计」行 |
 | 测试工具链（`tools/` 的 runner、断言框架、夹具；`ui-layout` 中段） | 2026-11-14 | `d4a460d` | 逐行（框架）/结构级（`ui-layout` 中段） | 报告 §1.2/§1.3 |
 | WebDAV 与本地同步（`webdav_transport.rs`、`local_sync/`） | 2026-11-14 | `d4a460d` | 关键段（新增一轮） | 报告 §2 N-1；本轮才补 |
 | AI 全链路（`ai.rs`、`ai_segments.rs`、`commands/ai.rs`、AI store） | 2026-11-14 | `d4a460d` | 逐行（新增一轮） | 报告 §1.2 的 X 条目 |
 | 调度器与抓取（`scheduler.rs`、`ingestion/`） | 2026-11-14 | `d4a460d` | 结构级 | 只核了节奏与收体边界 |
-| 命令层（`commands/settings.rs`、`commands/sync.rs` 全量） | 2026-11-14 | `d4a460d` | 未覆盖 | 只核了被引用的函数 |
+| 命令层（`commands/sync.rs`、`commands/settings.rs` 全量） | 2026-11-19 | `30cfd65` | 静态审读（未跑 cargo） | 本页 2026-11-19「阶段B Rust 未覆盖域静态审计」行 |
+| `ingestion/staged.rs`（暂存正文与设置应用域，其余 `ingestion/` 见上一行） | 2026-11-19 | `30cfd65` | 静态审读（未跑 cargo） | 本页 2026-11-19「阶段B Rust 未覆盖域静态审计」行 |
 | 文档与注释一致性 | 2026-11-14 | `d4a460d` | 抽样（发现 20 条纠正） | 报告 §6 |
-| 文档逐篇对照（architecture/development/backup/release/根README/roadmap/sync-compat-matrix/performance） | 2026-11-15 | `77c1964` | 逐篇（每条可检验断言核对） | `tmp/s0-2026-11-15/`（8 份对照底稿 + 3 份证伪记录） |
-| 前端组件/类名/令牌台账（src/ 全量扫描 + 动态拼接排查 + 全仓死类复核） | 2026-11-15 | `77c1964` | 全量扫描（静态） | `tmp/s0-2026-11-15/class-ledger.json`、`docs/frontend.md` |
+| 文档 `architecture.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-architecture.md` |
+| 文档 `contracts.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交；补 5 行契约：远端物理删除关闭、32 MiB 正文上限、outbox、正文保留与释放、AI 排除面） |
+| 文档 `maintenance.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交） |
+| 文档 `development.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-dev-readme.md`（同篇另含根 `README.md`） |
+| 文档 `sync-compat-matrix.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次关键段见本页 2026-11-17「文档清账批」行 |
+| 文档 `performance.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次关键段见本页 2026-11-17「文档清账批」行 |
+| 文档 `backup.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-backup-release.md` |
+| 文档 `release.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-backup-release.md` |
+| 文档 `roadmap.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交）；前次 `tmp/s0-2026-11-15/compare-roadmap.md` |
+| 文档 `audits.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批） | 2026-11-19 文档批同批改动（工作树未提交，本页同批） |
+| 文档 `README.md`（索引） | 2026-11-19 | `30cfd65` | 局部（本轮文档批核了路由、文档清单与「最近核对」口径；不是内容审计） | 2026-11-19 文档批同批改动（工作树未提交） |
+| 文档 `frontend.md` | 2026-11-19 | `30cfd65` | 逐篇（本轮文档批）/ 全量扫描（静态，台账） | 2026-11-19 文档批同批改动（工作树未提交）；`tmp/s0-2026-11-15/class-ledger.json`（2026-11-19 复扫）；本页 2026-11-19「阶段B 前端未覆盖域静态审计」行 |
+| 仓库根 `README.md`（不在 `docs/`） | 2026-11-15 | `77c1964` | 逐篇 | `tmp/s0-2026-11-15/compare-dev-readme.md`（2026-11-19 文档批未复核，不随本轮升日期） |
 
-**结论**：不是"全覆盖"。下一轮应按"未覆盖 + 最久未碰"排序补齐，而不是重跑已逐行的域。
-
-### 下一轮覆盖优先级
-
-1. `db/outbox.rs`、`commands/sync.rs`、`commands/settings.rs`（未覆盖，且是订阅写回与设置写入的主干）。
-2. `ingestion/staged.rs`、`db/body_retention.rs`（正文保留与暂存，和 N-1/X-26 的对象生命周期相关）。
-3. 前端 `PlayerBar`、`GalleryLayout`、`imageProxy` 全量（只做过结构级）。
-4. 文档全量梳理（路线见 `tmp/audit-route-2026-11-14/`）。
+**结论**：不是"全覆盖"。2026-11-19 的两轮阶段B 静态审读只把 `db/outbox.rs`、`commands/sync.rs`、`commands/settings.rs`、`ingestion/staged.rs`、`db/body_retention.rs`、`db/url_norm.rs` 与前端 `PlayerBar`/`GalleryLayout`/`useProseImages`/`imageProxy` 补到「静态审读」深度（未跑 cargo 或测试），不构成逐行覆盖；文档维度经 2026-11-19 文档批逐篇核过 11 篇（contracts/maintenance/development/performance/sync-compat-matrix/backup/release/architecture/roadmap/audits/frontend），剩余 `docs/README.md` 索引自身仍是「未覆盖」，仓库根 `README.md` 停在 2026-11-15、未随本轮复核；该文档批是逐篇核对与局部更新，不是全量审计。排期与下一轮优先级属一次性材料，不入库；覆盖矩阵保留在本页。

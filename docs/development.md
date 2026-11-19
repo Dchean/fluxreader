@@ -5,8 +5,8 @@
 ## 本地环境
 
 - Windows x64；Node 版本由 `.node-version` 固定（当前 24），CI 用 `actions/setup-node@v4` 的 `node-version-file` 读取同一文件。不要用与 `.node-version` 不同的 Node 大版本直接判定门禁结果。
-- 安装依赖与脚本：`npm ci`（或 `npm install`）后使用 `package.json` 中的 `lint`、`build`、`test:frontend`、`test:components`、`test:ui-layout`。
-- Edge headless 由 `npm run test:ui-layout` 自动查找；本机路径通常是 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`。
+- 安装依赖与脚本：`npm ci`（或 `npm install`）后使用 `package.json` 中的 `lint`、`build`、`test:frontend`、`test:components`、`test:ui-layout`。`test:ui-layout` 需要已装好的依赖：`node_modules` 为空时报「缺少 Vite 入口」，先跑 `npm ci`。
+- Edge/Chrome headless 由 `npm run test:ui-layout` 自动查找（`tools/ui-layout-regression.mjs` 的 `findBrowser` 内置常见安装位置，可用 `EDGE_PATH` 或 `CHROME_PATH` 覆盖）；找不到时报「未找到 Edge/Chrome」。
 - Rust 使用工作区隔离环境 `tmp/rust-env/`（rustc/cargo `1.98.1` + clang-cl/lld-link），入口 `activate-rust-env.ps1`；它只服务当前工作区，不外推到其他机器。
 - 隔离环境里跑 Cargo 时通常前置 `C:\Users\<user>\.cargo\bin` 到 `PATH`，并设 `CARGO_NET_OFFLINE=true`；不要在没有授权时联网更新依赖。
 - 本机临时证据放忽略的 `tmp/`，内容随任务变化，**不在文档里枚举目录清单**（枚举会过期）；需要长期保留的结论摘要登记到 [审计记录](audits.md)。
@@ -19,6 +19,7 @@
 | 构建 | `npm run build`（tsc + vite） | 本地与 CI | Lint, build & frontend regressions |
 | 前端状态回归 | `npm run test:frontend` | 本地与 CI | Lint, build & frontend regressions |
 | 组件真实挂载回归 | `npm run test:components` | 本地与 CI | Lint, build & frontend regressions |
+| 发布脚本回归 | `node --test tools/release/release.test.mjs` | CI；本地在改 `tools/release/` 时按需跑 | Lint, build & frontend regressions |
 | 布局/交互真实浏览器 | `npm run test:ui-layout` | 本地与 CI（windows-latest） | UI layout & social hydration (Edge CDP) |
 | 文档结构（索引/链接/锚点/行号禁令） | `npm run docs:check` | 本地与 CI | Lint, build & frontend regressions |
 | Rust 格式 | `cargo fmt --all -- --check`（`src-tauri/`） | 本地与 CI | Check & test Rust (src-tauri) |
@@ -53,8 +54,9 @@
 
 ## 常见故障
 
-- **git/npm 代理不可达**：本机可能设置 `HTTP_PROXY=http://127.0.0.1:7897`，代理程序未运行时所有 HTTPS 失败。确认直连可用后，用单次 `git -c http.proxy= -c https.proxy= ...` 或清空当前进程的代理变量；不要擅自改全局 git 配置。
+- **代理软件改写本地回环**：`HTTP_PROXY`/`HTTPS_PROXY` 指向本机代理时，代理程序未运行会让所有 HTTPS 失败；把 localhost/127.0.0.1 也劫持到代理则让 Vite 与 Edge 连不上。确认直连可用后，用单次 `git -c http.proxy= -c https.proxy= ...` 或清空当前进程的代理变量；本地开发时关闭该代理，或把本地回环排除在代理之外。不要擅自改全局 git 配置。
 - **文件符号链接权限**：非提权 Windows 会话中，Rust 构建的子进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314）。备份保留测试可用目录 junction 做等价 reparse-point 夹具；真实 symlink 路径的唯一测试 `writer_windows_symlink_alias_resolves_actual_file_identity` 带 `#[ignore]`，CI 也不运行 ignored 用例——本地与 CI 都未覆盖，只在具体任务约定后运行。
 - **node:test reporter 与 TAP 契约**：runner 自检探针断言 `# pass/# fail` 汇总行，探针子进程已在 `runner-selfcheck.test.mjs` 的 `runProbe` 中用 `NODE_OPTIONS=--test-reporter=tap` 固定输出格式，不随 Node 默认 reporter 变化漂移（历史背景：Node 24 起默认输出 `ℹ` 形式的 spec 报告）。新增探针沿用手写 spawn 的同一 env，不要依赖默认 reporter。
 - **cargo 不在 PATH**：隔离环境激活后仍可能需要把 `C:\Users\<user>\.cargo\bin` 前置；命令报 `cargo not found` 时先查 PATH，不要重装工具链。
 - **测试临时目录**：容量/Rust 测试需要可清理的 `TEMP` 与测试根；隔离环境构建产物统一进 `tmp/rust-env/target-xwin-msvc/`，不要把构建产物提交。
+- **TEMP/TMP 指向仓库内 → 布局门禁假红**：`npm run test:ui-layout` 用系统临时目录放 Edge profile；`TEMP`/`TMP` 指到仓库内时 profile 落在仓库里，Vite 的 FSWatcher 撞上 Edge 持有的 `Default\Network\Cookies(-journal)` 报 `EBUSY` 并退出，页面取不到入口模块，首屏没有 `.app-root`，最终以超时失败（不是产品红）。把 `TEMP`/`TMP` 指回仓库外再跑。性质：本机运行验证（基线 30cfd65，原始日志按证据纪律留 `tmp/`，不入库）。

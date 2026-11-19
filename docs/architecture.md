@@ -42,7 +42,7 @@ RSS 服务同步（`sync/`）与纯本地 WebDAV 同步（`local_sync/`）互斥
 - 账号代际（generation）固定在整轮起点；每个真实 HTTP 前与 ACK 落库前复核。断开或换号后迟到结果不能写回新账号。
 - 本地读藏写入在事务内递增字段版本并登记本地意图；远端落地只接受字段版本未变、无 pending、来源生命周期仍有效的值。冲突方向由 `sync/conflict_policy.rs` 单点定义。
 - 可推送身份要求精确 `remote_id` + 真实 Content 响应的 `remote_origin_feed_id` + 当前有效来源；缺证明的项留在 `bindable_retry`，不伪装成网络失败。
-- 队列状态（`local_only`、`bindable_retry`、`bound_pending`、`retry_wait`、`failed`、`expired_unconfirmed`）是同一生命周期；老化只转为过期，不删队项或本地读藏。
+- 队列状态集合见 `db/sync_queue.rs` 的 `STATUS_*`；它们是同一生命周期，老化只转为过期，不删队项或本地读藏。
 
 ### 纯本地 WebDAV 同步
 
@@ -56,10 +56,10 @@ RSS 服务同步（`sync/`）与纯本地 WebDAV 同步（`local_sync/`）互斥
 
 ## 前端结构与数据流
 
-- `src/store.ts` 组装 Zustand store；`src/store/slices/` 按领域拆分（bootstrap、feeds、nav、reader、player、settings、sync、ui、localLibrary、ai）。
+- `src/store.ts` 用 Zustand 的 `create` 组装 store，只做组合；按领域的 slice 在 `src/store/slices/`，每个 slice 是 `StateCreator<AppState, [], [], XxxSlice>` 且键集两两不相交。
 - `ReadingSession`（`src/store/readingSession.ts`）拥有一次查询的完整有序 ID、已加载进度与定位输入；成员查询由后端一次捕获，属性按 ID 回读，后台同步不插入新成员或重排当前会话。
-- 查询与分页契约集中在 `.agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md`；返回位置锚、像素偏移与 LRU 在 `src/lib/readingPosition.ts`，不复制第二份。
-- 公用最旧条目淘汰循环位于 `src/lib/lru.ts`；正文缓存与返回锚各自保留容量、命中刷新和状态语义，视图条目缓存的私有 `LRUMap` 仍归 `src/store/internals.ts`。
+- 查询与分页契约集中在 `.agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md`；返回位置锚与像素偏移在 `src/lib/readingPosition.ts`，该存档自持容量与命中语义（`RETURN_ANCHOR_ARCHIVE_MAX`）。
+- 全仓通用淘汰循环是 `src/lib/lru.ts` 的 `evictOldestEntries`；正文缓存与返回锚各自保留容量、命中刷新和状态语义，视图条目缓存的 `LRUMap` 仍在 `src/store/internals.ts`（`viewEntriesCache`）。
 - 乐观读藏在 `src/store/internals.ts` 按条目×字段维护版本、写前沿与失败投影；真实回执、读取序号与计数快照收敛，详见“乐观写入”Note。
 - 布局（文章/社交/画廊/播客/通知）共享同一时间流虚拟化；键盘焦点、模态焦点陷阱、返回位置和社交折叠各有单点实现。
 - 图片经后端代理与前端预算层（`image_requests`/`useImageResource`）取用；ready/active 字节预算与 lease 是资源规格，不是原生内存硬界。

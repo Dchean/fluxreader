@@ -29,8 +29,8 @@
 <a id="import-and-backup"></a>
 ## WebDAV、换机与新数据基线
 
-- **规模验证标准为 10k distinct 4KiB 全流程**（4KiB 正文、全部相位、全部断言、2 秒门槛不变、仍 ignored）；**50k distinct-body 为本版开放边界，未验证**，历史证据 `r9-i1-50k-03/04` 保留。50k state-only 主测通过，但整库 apply 的 retention 排水在 60 分钟硬上限内未完成。
-- **已知规模瓶颈**：整库 state 应用到新库会为每条被应用的 read/star 字段生成 `retention/` 工作键；10k 约 20,001 个，debug 构建实测排空 306,998 ms；50k 约 100,002 个未完成。只影响一次性整库应用，不影响导出、前台延迟或正确性。修复需 schema 索引/迁移与旧库兼容验证，本轮不做。
+- **规模验证标准为 10k distinct 4KiB 全流程**（4KiB 正文、全部相位、全部断言、2 秒门槛不变、仍 ignored）；**50k distinct-body 为本版开放边界，未验证**，历史证据 `r9-i1-50k-03/04` 保留。50k state-only 主测通过，但整库 apply 的 retention 排水在 60 分钟硬上限内未完成。规模基线与实测见 [性能基线](performance.md) 的当前本地同步基线段。
+- **已知规模瓶颈**：整库 state 应用到新库会为每条被应用的 read/star 字段生成 `retention/` 工作键，只影响一次性整库应用，不影响导出、前台延迟或正确性。修复需 schema 索引/迁移与旧库兼容验证，本轮不做；工作键规模与排空耗时见 [性能基线](performance.md) 的当前本地同步基线段。
 - **换机恢复的原生链**：便携 v4 预览/确认/事务恢复有实现与专项证据；真实原生文件选择器、跨机器、断电恢复与安装版 WebView2 未验，不能由应用内测试推定。
 - **新库/新格式**：独立 `fluxreader-v2.db` 空间保留旧库、误放旧格式只读拒绝、旧云快照失败不当空库；真实宿主提示与新设备恢复仍待验。
 
@@ -41,12 +41,13 @@
 - **图片代理**：代理/队列/lease/字节预算与失败占位有受控 IPC 证据；真实 Tauri raw/fallback、生产 CSP、解码释放、可见锚与预算压力未验，不能把普通 HTTP 图片布局外推为 native 性能或 OOM 结论。
 - **motion**：reduced-motion 的 transition 0s 修复与两种媒体偏好门禁已落地；历史 159px/295px 漂移与 CI 失败保留，不改写为“从未发生”。
 - **设置浮层快捷键让路**：Ctrl+S/Alt+J 穿透修复有独审证据；真实宿主控件消费顺序仍需持续回归。
+- **Edge headless 门禁与 TEMP**：`npm run test:ui-layout` 在 `%TEMP%`/`%TMP%` 指向仓库外的环境、基线 `30cfd65` 上运行验证通过（exit 0、`ok:true`、`attempt=1`、`retried=false`；4 视口 2 尺寸 × 2 动效 + 6 键盘视口全跑，画廊/社交域断言与 `consoleErrors`/`exceptions`/`unexpectedNetworkFailures` 均空；`firstMount` 48.8 s / 120 s 预算）。上一轮的「红」已由独立只读证伪逐链复核为环境红：`%TEMP%` 指进仓库时 Edge profile 落在 Vite watch 树内，FSWatcher 撞到被锁的 `Default\Network\Cookies(-journal)` 触发 `EBUSY`，Vite exit 1；同一 HEAD 仅改 TEMP 的对照复现同签名。残余风险：工具防假红未修（`makeProfileDir` 的仓库内校验恒真、`startVite` 不监听子进程退出、`vite.config.ts` 未忽略 `tmp/`）、CI 变体（`UI_LAYOUT_TRACE=viewport`）与故障注入未在 `30cfd65` 复跑、一次绿跑不足以证明不 flaky（首挂载已用掉 40.7% 预算）。性质：本机运行验证；实现侧独立复审收口仍未做。证据 `tmp/ui-layout-2026-11-19b/`。
 
 <a id="verification-boundaries"></a>
 ## 未完成验证与条件风险
 
 - **原生 Windows**：历史隔离实机 17 项中 15 通过、1 部分（通知横幅/点击）、1 未执行（物理拔插/真实注销登录自启）。MSI/NSIS 安装器、动态 DPI/物理拔屏、用户冷启跳位仍未完成；SMTC AUMID 当时为未打包 `app.exe`，不等于安装版结果。
-- **本地门禁环境**：非提权会话里由 Rust 构建的进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314），retention 测试用目录 junction 作等价 reparse-point 夹具；真实 symlink 路径由 CI windows-latest 覆盖，本地不冒充已覆盖。
+- **本地门禁环境**：非提权会话里由 Rust 构建的进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314），retention 测试用目录 junction 作等价 reparse-point 夹具；真实 symlink 路径的唯一测试 `writer_windows_symlink_alias_resolves_actual_file_identity` 带 `#[ignore]`，CI 的 `cargo test --no-fail-fast` 不运行 ignored 用例——本地与 CI 均未覆盖，只在具体任务约定读写边界后单独执行。
 - **性能与资源**：10k 容量与 50k 状态 exact 自然 exit 0；50k distinct-body 未验证。长会话、真实规模滚动 p95、图片 native 预算与完整前台 SLO 未验收；真实持久存储 I/O 损坏/WAL 故障注入仍无安全手段。
 - **待观察崩溃**：旧浏览器 NotifCard 曾见 React #185，后续反例阴性；ErrorBoundary 已捕获 `error + componentStack`，复发时保留现场与复现输入，不按旧观察声称当前必崩。
 - **审计与发布**：本版已发布不等于所有主题均通过独立审计；各篇 Note 的验证时点与上限仍以原文为准。
@@ -65,7 +66,7 @@
 - favicon 探测只打 http/https 公网目标：私网/保留段（含 loopback）在守卫处拒绝，自托管于 localhost/内网的源因此不显示图标，失败并入 `FAVICON_TRIED` 负缓存静默（`ingestion/favicon.rs` 的 `discover_favicon`/`target_allowed`/`ip_disallowed`）。解析判定与建连是两次独立解析，理论上可被 DNS 重绑穿透——完整封堵需按 IP 连接并处理 Host/SNI，对 favicon 探测不成比例，接受该残余。
 - 跨源 favicon 由 WebView 直连渲染（探活 http(s)/2xx/非 HTML、no-referrer），不引入域名白名单：渲染引用外部资源与用户浏览器同级且已有探活门；白名单会静默吞掉合法 CDN 跨源图标、改变既有预期；无清单可维护，负向代价大于残余收益。若引入属产品决策，落点在 WebView 探活门并需用户例外途径。
 
-<a id="maintenance"></a>
+<a id="doc-todo"></a>
 ## 文档待办
 
 已知的文档缺口（缺失、失实、过期），或已发现但本轮不更新的差异。**下次触碰对应模块时必须处理**，没有过期作废。
@@ -73,7 +74,14 @@
 | 文档 | 位置 | 差异 | 登记日期 | 下次触碰的模块 |
 | --- | --- | --- | --- | --- |
 | roadmap.md | 维护边界末句 | 「GC17」「旧 bool/dedup 清理」代号在受跟踪内容无出处（本句下已加临时指向） | 2026-11-15 | 维护边界改动或 tmp 清档任务 |
+| `docs/audits.md` | 覆盖矩阵 | 2026-11-19 文档批已把 docs 11 篇补到「逐篇（本轮文档批）」；剩余真实缺口：仓库根 `README.md` 停在 2026-11-15（其产品面向内容本轮只改为链接入口，未逐条复核） | 2026-11-19 | 下一轮审计登记时 |
+| `docs/contracts.md` | 契约单点表的三处事实 | 阶段B 静态审计记与实际行为有出入：写事务与锁序行（`commands/sync.rs` 的 `sync_local_feeds` 入队三语句各自提交，与 outbox 模块头「同一事务落库」不符，裁决见本表 outbox 行）、设置名与值域行（`p/*` 投影值绕过 `validate_app_setting`）、条目身份与去重键行（`db/url_norm.rs` 的 query 对非 UTF-8 百分号字节有损）。**待用户裁决**：补文档声明现状，还是修代码（缺 `outbox`/`body_retention` 两行已由 2026-11-19 文档批补齐，此项已关闭） | 2026-11-19 | 裁决后或触碰契约表时 |
+| `docs/contracts.md` | 订阅写回队列（outbox）行 | 未写事务边界：`db/outbox.rs` 的 `enqueue_subscribe` 自带 SELECT/DELETE/INSERT 但不含事务，依赖调用方。**待用户裁决**：补文档，还是把入队收进调用方事务 | 2026-11-19 | 待用户裁决后 |
+| `docs/contracts.md` | 正文保留与释放（本机）行 | 未写失败语义：阶段B 静态审计记「永久保留模式下错误被静默」，本批未复核。**待用户裁决**：补文档声明失败语义，还是修代码 | 2026-11-19 | 待用户裁决后 |
+| `src-tauri/src/db/backup.rs` | `automatic_backup_retention_preserves_symlinks` 的文档注释 | 注释称 CI（windows-latest）仍覆盖真实文件 symlink 路径；该测试带 `#[ignore]`，CI 只跑 `cargo test --no-fail-fast`，不运行 ignored 用例 | 2026-11-19 | 备份保留测试或该注释被触碰时 |
+| `docs/sync-compat-matrix.md` 与 `docs/roadmap.md` | matrix「真实服务端的限定实测」段 vs 本页「当前组合的真实协议部署」条目 | 真实部署基线标识不一致：matrix 记客户端基线 `dev@1bb698c`，本页记「只对应 5dc3 基线」；需统一标识或各自注明指代（哪个是实测产物、哪个是范围声明） | 2026-11-19 | 下次触碰真实部署证据或这两篇时 |
 
+<a id="maintenance"></a>
 ## 维护边界
 
 依赖升级不因清提示而顺带进行：Windows 目标 Cargo 依赖仍有少量 unmaintained 提示，当次未匹配适用非信息类漏洞告警；这些是当时证据，不是当前无漏洞保证。GC17、远端 body DELETE 与旧 bool/dedup 清理不在本版候选（“GC17” 等代号仅在本机审计材料 `tmp/refactor-2026-11-09/` 有出处，未随库留存；下次触碰维护边界时先固化含义再清理该目录）；需要时按新任务与独立验证重新授权。
