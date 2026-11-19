@@ -1,5 +1,5 @@
 // Note: 图片编码bytes预算与使用中URL租约 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
-import { api, extractErrorCode } from './api';
+import { api, extractErrorCode, isTauri } from './api';
 
 const PROXY_HOSTS = new Set(['cdnfile.sspai.com', 'rssfile.sspai.com']);
 const PROXY_HOST_SUFFIXES = ['.doubanio.com'];
@@ -7,9 +7,8 @@ export function needsImageProxy(src: string): boolean {
   try { const host = new URL(src).hostname.toLowerCase(); return PROXY_HOSTS.has(host) || PROXY_HOST_SUFFIXES.some(s => host === s.slice(1) || host.endsWith(s)); }
   catch { return false; }
 }
-export function canProxyImages(): boolean { return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window; }
 const MiB = 1024 * 1024;
-export const IMAGE_LIMITS = Object.freeze({ active: 4, pending: 32, payload: 128 * MiB, image: 25 * MiB,
+export const IMAGE_LIMITS = Object.freeze({ active: 4, pending: 32, payload: 128 * MiB, reservationBytes: 25 * MiB,
   idleBytes: 64 * MiB, idleEntries: 256, leases: 256, failures: 1024, transientTtl: 30_000, permanentTtl: 600_000 });
 export type ImageFailure = 'network' | 'permanent' | 'not-image' | 'empty' | 'decode' | 'too-large' | 'unavailable';
 export type ImageSnapshot =
@@ -63,7 +62,7 @@ export function imagePageReferer(url: string, pageUrl?: string): string | undefi
   catch { return undefined; }
 }
 export function imageResourceKey(url: string, pageUrl?: string): string {
-  return JSON.stringify([epoch, url, needsImageProxy(url) && canProxyImages() ? imagePageReferer(url, pageUrl) ?? null : null]);
+  return JSON.stringify([epoch, url, needsImageProxy(url) && isTauri() ? imagePageReferer(url, pageUrl) ?? null : null]);
 }
 function publish(entry: Entry, value: ImageSnapshot): void {
   entry.value = value;
@@ -92,12 +91,12 @@ function trim(): void {
     }
   }
 }
-function usedBytes(): number { let n = 0; for (const e of owned) n += e.bytes + (e.reserved ? IMAGE_LIMITS.image : 0); return n; }
+function usedBytes(): number { let n = 0; for (const e of owned) n += e.bytes + (e.reserved ? IMAGE_LIMITS.reservationBytes : 0); return n; }
 function reserve(): boolean {
-  if (usedBytes() + IMAGE_LIMITS.image <= IMAGE_LIMITS.payload) return true;
+  if (usedBytes() + IMAGE_LIMITS.reservationBytes <= IMAGE_LIMITS.payload) return true;
   for (const entry of [...owned].filter(e => e.refs === 0 && !e.reserved && e.blob).sort((a, b) => a.touched - b.touched)) {
     forget(entry);
-    if (usedBytes() + IMAGE_LIMITS.image <= IMAGE_LIMITS.payload) return true;
+    if (usedBytes() + IMAGE_LIMITS.reservationBytes <= IMAGE_LIMITS.payload) return true;
   }
   return false;
 }
@@ -180,7 +179,7 @@ export function acquireImage(url: string, pageUrl?: string, priority = 1): Image
   });
   if (suspended) return declined();
   // Direct images own only local consumer state: no shared entry, quota or failure cache.
-  if (!canProxyImages() || !needsImageProxy(url) || !/^https?:\/\//.test(url)) {
+  if (!isTauri() || !needsImageProxy(url) || !/^https?:\/\//.test(url)) {
     const directEpoch = epoch;
     let value: ImageSnapshot = { status: 'ready', src: url, direct: true };
     let released = false;

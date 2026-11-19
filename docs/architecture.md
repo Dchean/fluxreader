@@ -59,6 +59,7 @@ RSS 服务同步（`sync/`）与纯本地 WebDAV 同步（`local_sync/`）互斥
 - `src/store.ts` 组装 Zustand store；`src/store/slices/` 按领域拆分（bootstrap、feeds、nav、reader、player、settings、sync、ui、localLibrary、ai）。
 - `ReadingSession`（`src/store/readingSession.ts`）拥有一次查询的完整有序 ID、已加载进度与定位输入；成员查询由后端一次捕获，属性按 ID 回读，后台同步不插入新成员或重排当前会话。
 - 查询与分页契约集中在 `.agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md`；返回位置锚、像素偏移与 LRU 在 `src/lib/readingPosition.ts`，不复制第二份。
+- 公用最旧条目淘汰循环位于 `src/lib/lru.ts`；正文缓存与返回锚各自保留容量、命中刷新和状态语义，视图条目缓存的私有 `LRUMap` 仍归 `src/store/internals.ts`。
 - 乐观读藏在 `src/store/internals.ts` 按条目×字段维护版本、写前沿与失败投影；真实回执、读取序号与计数快照收敛，详见“乐观写入”Note。
 - 布局（文章/社交/画廊/播客/通知）共享同一时间流虚拟化；键盘焦点、模态焦点陷阱、返回位置和社交折叠各有单点实现。
 - 图片经后端代理与前端预算层（`image_requests`/`useImageResource`）取用；ready/active 字节预算与 lease 是资源规格，不是原生内存硬界。

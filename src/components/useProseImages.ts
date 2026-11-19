@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useAppStore } from '../store';
-import { acquireImage, canProxyImages, needsImageProxy, retryImage, type ImageLease } from '../lib/imageProxy';
+import { isTauri } from '../lib/api';
+import { acquireImage, needsImageProxy, retryImage, type ImageLease } from '../lib/imageProxy';
 
 interface Source { url: string; pageUrl?: string }
 const originals = new WeakMap<HTMLImageElement, Source>();
@@ -13,7 +14,7 @@ export function originalProseImage(node: HTMLImageElement): Source | null {
 }
 interface Prepared { __html: string; sources: { index: number; url: string }[] }
 function prepare(html: string): Prepared {
-  if (!canProxyImages() || typeof document === 'undefined' || !html.toLowerCase().includes('<img')) return { __html: html, sources: [] };
+  if (!isTauri() || typeof document === 'undefined' || !html.toLowerCase().includes('<img')) return { __html: html, sources: [] };
   // Template contents are inert; preparation itself must not start remote image/media loads.
   const template = document.createElement('template');
   template.innerHTML = html;

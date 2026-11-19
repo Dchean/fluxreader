@@ -90,6 +90,8 @@
    ============================================================ */
 
 /** 正文/AI 记录状态（判别态；语义表见模块头注） */
+import { evictOldestEntries } from '../lib/lru';
+
 export type BodyState = 'loading' | 'ready' | 'cleared' | 'missing' | 'failed';
 
 /** 全文操作属于已水合实体，既不替代正文状态，也不随 Reader 切篇迁移。 */
@@ -201,8 +203,7 @@ function reconcileFulltextTickets(previous: BodyEntry | undefined, next: BodyEnt
 /** 正文缓存条数上限（LRU）。取值依据见模块头注「内存预算」。 */
 export const BODY_CACHE_MAX = 2000;
 
-/** 极简 LRU：Map 迭代序 = 插入序，命中即摘除重插，超限删最旧。
-    与 internals 的 LRUMap 同形——此处私有副本，避免 bodyCache ↔ internals 互引。 */
+/** 正文缓存自行刷新新鲜度与核对全文票据，按插入顺序淘汰最旧条目。 */
 class BodyLru extends Map<string, BodyEntry> {
   private readonly max: number;
 
@@ -224,11 +225,7 @@ class BodyLru extends Map<string, BodyEntry> {
     value = reconcileFulltextTickets(super.get(key), value);
     super.delete(key);
     super.set(key, value);
-    while (super.size > this.max) {
-      const oldest = super.keys().next().value;
-      if (oldest === undefined) break;
-      super.delete(oldest);
-    }
+    evictOldestEntries(this, this.max);
     return this;
   }
 }

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Icons } from './icons';
 import { useAppStore } from '../store';
+import { isTauri } from '../lib/api';
 import { reportCoverFailure } from '../lib/coverImage';
-import { canProxyImages, needsImageProxy } from '../lib/imageProxy';
+import { needsImageProxy } from '../lib/imageProxy';
 import { useImageResource } from './useImageResource';
 
 export interface CoverImageProps {
@@ -45,7 +46,7 @@ export function CoverImage({ src, articleId, pageUrl, className, alt, loading, f
     return () => { current = false; };
   }, [lease, snapshot, src, articleId, generation]);
   if (!src?.trim()) return <>{empty}</>;
-  const proxy = canProxyImages() && needsImageProxy(src);
+  const proxy = isTauri() && needsImageProxy(src);
   const ready = snapshot.status === 'ready' ? snapshot : !proxy && !lease ? { src, direct: true } : null;
   if (ready && !busy && (enabled || visible)) return <img ref={el => { node.current = el; }} src={ready.src} className={className} alt={alt} loading={loading}
     referrerPolicy={ready.direct ? 'no-referrer' : undefined} data-cover-route={ready.direct ? 'direct' : 'proxy'}

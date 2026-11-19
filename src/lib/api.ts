@@ -40,20 +40,21 @@ export function extractErrorCode(e: unknown): string | null {
   return null;
 }
 
+const MAX_IMAGE_IPC_BYTES = 25 * 1024 * 1024;
+
 /** Validate the actual IPC representation before allocating the Blob backing buffer. */
 export function imageBytes(value: unknown): Uint8Array<ArrayBuffer> {
-  const limit = 25 * 1024 * 1024;
   const invalid = () => new Error('Invalid image IPC byte response');
   if (value instanceof ArrayBuffer) {
-    if (value.byteLength > limit) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
+    if (value.byteLength > MAX_IMAGE_IPC_BYTES) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
     return new Uint8Array(value);
   }
   if (value instanceof Uint8Array) {
-    if (value.byteLength > limit) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
+    if (value.byteLength > MAX_IMAGE_IPC_BYTES) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
     return new Uint8Array(value);
   }
   if (!Array.isArray(value)) throw invalid();
-  if (value.length > limit) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
+  if (value.length > MAX_IMAGE_IPC_BYTES) throw { code: 'responseTooLarge', message: '图片超过大小限制' };
   for (const byte of value) if (!Number.isInteger(byte) || byte < 0 || byte > 255) throw invalid();
   return new Uint8Array(value);
 }

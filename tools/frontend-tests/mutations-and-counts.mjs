@@ -234,8 +234,14 @@ export async function run(ctx) {
   store.setState({ openedReadIds: { '999': true } });
   S.feedCountsImpl = countsFromRows;
   S.invokeCalls.length = 0;
+  const { currentFlagWriteSettleSerial, entryInFlightFieldKeys, localFlagWritesPending, optimisticEntryFlagToggle } = await import('../../dist-test/store/internals.js');
+  const beforeBulkSettlement = currentFlagWriteSettleSerial();
   store.getState().markEntriesReadBulk(['101', '102', '103']);
+  checkNew('(N-17) 驻留批量只登记一个在途请求，两条未读各保护自己的读字段',
+    localFlagWritesPending() === 1 && [...(entryInFlightFieldKeys() ?? [])].sort().join(',') === '101|isRead,103|isRead');
   await nTick(0);
+  checkNew('(N-17) 驻留批量只结算一次，两个字段均释放',
+    currentFlagWriteSettleSerial() === beforeBulkSettlement + 1 && localFlagWritesPending() === 0 && entryInFlightFieldKeys() === null);
   /* AUDIT P3[F4]（TASK-084）：契约由「每个未读项一次 set_read」改为「整批一次
      set_read_bulk」。原断言（逐条 set_read）编码的是修前的行为，本卡按审计要求
      消除逐条 IPC，故此处**有意改写**并保留其原有意图（已读项不得重复写库）：
@@ -647,6 +653,36 @@ export async function run(ctx) {
     store.getState().entries.find((e) => e.id === '101')?.isRead === p2bBefore
     && store.getState().feedCounts.get('10')?.unread === 3
     && store.getState().toasts.some((t) => t.text.startsWith('标读保存失败：')));
+
+  await entityFixture();
+  const { api } = await import('../../dist-test/lib/api.js');
+  const beforeSingleSettlement = currentFlagWriteSettleSerial();
+  const invokeBeforeReadProbe = globalThis.__INVOKE__;
+  let rejectRead;
+  const restoreReadInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => cmd === 'set_read'
+    ? new Promise((_resolve, reject) => { rejectRead = reject; }) : invokeBeforeReadProbe(cmd, args));
+  try {
+    store.getState().toggleEntryFlag('101', 'isRead');
+    await ctx.waitUntil(() => rejectRead !== undefined, '卡片读请求已发起');
+    optimisticEntryFlagToggle('101', 'isStarred', (next) => api.setStarred(101, next),
+      (message) => `测试收藏回调：${message}`, () => { throw new Error('注入成功回调异常'); });
+    await ctx.waitUntil(() => store.getState().toasts.some((toast) => toast.text === '测试收藏回调：注入成功回调异常'));
+    checkNew('(N-17) 收藏已提交后回调抛错，只结算本笔一次，读请求仍保持保护',
+      currentFlagWriteSettleSerial() === beforeSingleSettlement + 1 && localFlagWritesPending() === 1
+      && [...(entryInFlightFieldKeys() ?? [])].join(',') === '101|isRead');
+    rejectRead(new Error('注入单篇标读失败'));
+    await ctx.waitUntil(() => store.getState().toasts.some((toast) => toast.text === '标读保存失败：注入单篇标读失败'));
+    const entry = store.getState().entries.find((row) => row.id === '101');
+    const backend = S.backendRows.find((row) => row.id === 101);
+    checkNew('(N-17) 同一篇读失败而藏成功，只回滚读字段与未读数，两次请求均释放',
+      entry?.isRead === false && entry.isStarred && backend?.is_read === false && backend.is_starred
+      && store.getState().feedCounts.get('10')?.unread === 3
+      && localFlagWritesPending() === 0 && entryInFlightFieldKeys() === null
+      && currentFlagWriteSettleSerial() === beforeSingleSettlement + 2);
+  } finally {
+    rejectRead?.(new Error('测试清理'));
+    restoreReadInvoke();
+  }
 
   /* (p2c) CF-03：搜索/命令面板锚定打开（anchorToArticle）的标读失败同样可见 */
   await entityFixture();

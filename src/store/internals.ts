@@ -1196,6 +1196,52 @@ export function trackEntryFlagWrite(
   };
 }
 
+/** 一次请求占一个计数前沿。属性快照仍分别保护每个在途行的对应字段。 */
+function beginFlagWriteFlight(ids: readonly string[], field: EntryRollbackClaim['field']) {
+  beginLocalFlagWrite();
+  for (const id of ids) beginEntryFieldWrite(id, field);
+  const releaseFields = () => {
+    for (const id of ids) endEntryFieldWrite(id, field);
+  };
+  return (settlements: readonly ReturnType<typeof trackEntryFlagWrite>[], confirmCaptured?: () => void) => {
+    const serial = currentLocalFlagWriteSerial();
+    let finished = false;
+    return {
+      serial,
+      finish(failed: boolean) {
+        if (finished) return { takenOver: false };
+        finished = true;
+        // 已投影入口按原顺序先释放，再执行可能触发对账的回滚。
+        if (!confirmCaptured) {
+          endLocalFlagWrite();
+          releaseFields();
+        }
+        try {
+          let takenOver = false;
+          for (const settle of settlements) {
+            if (settle(failed).takenOver) takenOver = true;
+          }
+          if (!failed) confirmCaptured?.();
+          return { takenOver };
+        } finally {
+          // 完整成员在确认或回滚期间继续持有所有字段和计数前沿。
+          if (confirmCaptured) {
+            releaseFields();
+            endLocalFlagWrite();
+          }
+        }
+      },
+    };
+  };
+}
+
+/** 驻留行已完成乐观翻转后登记。 */
+export function beginProjectedFlagWrite(ids: readonly string[], field: EntryRollbackClaim['field'], prev: boolean) {
+  const settlements = ids.map((id) => trackEntryFlagWrite({ id, field, prev, version: getEntryVersion(id, field) }, !prev));
+  const bindSettlement = beginFlagWriteFlight(ids, field);
+  return bindSettlement(settlements);
+}
+
 /** 捕获成员全读：已驻留和未驻留同一字段声明/前沿，只有已知行参与乐观计数。
  * 未驻留基线由后续真实属性补足；失败先撤销未知值，不造一份假文章。
  * 每个成员都登记，即使已读也代表用户本次意图，较晚unread会有更高版本。 */
@@ -1206,28 +1252,16 @@ export function beginCapturedReadWrite(memberIds: readonly string[]) {
   for (const row of s.entries) known.set(row.id, row);
   const ids = [...new Set(memberIds)];
   const previous = new Map(ids.map((id) => [id, known.get(id)?.isRead ?? entryFieldValues.get(entryVersionKey(id, 'isRead'))?.value]));
-  beginLocalFlagWrite();
-  for (const id of ids) beginEntryFieldWrite(id, 'isRead');
+  const bindSettlement = beginFlagWriteFlight(ids, 'isRead');
   projectEntryFlags(ids.map((id) => ({ id, field: 'isRead', value: true })), { recordIntent: true });
   const claims = ids.map((id): EntryRollbackClaim => ({ id, field: 'isRead', prev: previous.get(id), version: getEntryVersion(id, 'isRead') }));
   const settlements = claims.map((claim) => {
     const row = known.get(claim.id);
     return trackEntryFlagWrite(claim, true, row ? { feedId: row.feedId, value: true } : null);
   });
-  const serial = currentLocalFlagWriteSerial();
-  let finished = false;
-  return {
-    serial,
-    finish: (failed: boolean) => {
-      if (finished) return { takenOver: false };
-      finished = true;
-      const outcomes = settlements.map((settle) => settle(failed));
-      if (!failed) projectEntryFlags(claims.map((claim) => ({ id: claim.id, field: 'isRead', value: true, version: claim.version })), { countChanges: false });
-      for (const id of ids) endEntryFieldWrite(id, 'isRead');
-      endLocalFlagWrite();
-      return { takenOver: outcomes.some((outcome) => outcome.takenOver) };
-    },
-  };
+  return bindSettlement(settlements, () => {
+    projectEntryFlags(claims.map((claim) => ({ id: claim.id, field: 'isRead', value: true, version: claim.version })), { countChanges: false });
+  });
 }
 
 export function optimisticEntryFlagToggle(
@@ -1243,29 +1277,18 @@ export function optimisticEntryFlagToggle(
   const prev = entry[field];
   const optimistic = !prev;
   flipEntryFlag(id, field);
-  /* TASK-118：乐观翻转（flipEntryFlag 已 bump 对应字段）后快照该字段版本，
-     失败交给统一回滚助手——跨字段写入（如收藏）不再使本字段的回滚失效。 */
-  const settle = trackEntryFlagWrite({ id, field, prev, version: getEntryVersion(id, field) }, optimistic);
-  /* R2/N2：在途意图计数（起于乐观写入、止于请求落定）——期间任何计数快照都
-     不得落地覆盖这个未提交意图；结束点用 endLocalFlagWrite 精确配对。 */
-  beginLocalFlagWrite();
-  beginEntryFieldWrite(id, field); // R4：articles 快照的在途写保护（与 endLocalFlagWrite 成对）
-  const flagSerialAtRequest = currentLocalFlagWriteSerial();
+  const intent = beginProjectedFlagWrite([id], field, prev);
   void request(optimistic).then((receipt) => {
-    endLocalFlagWrite();
-    endEntryFieldWrite(id, field);
-    settle(false);
+    intent.finish(false);
     /* R2/N1：读闭包可能一并标读同 URL 未读副本——回执行让受影响条目/计数
        本地收敛（本次被点行已乐观翻转，跳过其重复扣减）。 */
     if (field === 'isRead' && optimistic) {
-      applyReadReceipt(asReadReceipts(receipt), new Set([id]), flagSerialAtRequest);
+      applyReadReceipt(asReadReceipts(receipt), new Set([id]), intent.serial);
     }
     onSuccess?.(optimistic);
     scheduleCountsReconcile();
   }).catch((e: unknown) => {
-    endLocalFlagWrite();
-    endEntryFieldWrite(id, field);
-    const outcome = settle(true);
+    const outcome = intent.finish(true);
     /* R2：回滚被接管跳过时计数不可线性复原——权威修复（快照在途计数可能被本次
        未提交意图挡下，关闭 dedup 时此前无人收敛）。 */
     scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);

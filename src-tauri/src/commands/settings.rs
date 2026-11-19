@@ -561,8 +561,8 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
 const IMAGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
-/// 图片字节上限（防恶意/误配 URL 撑爆内存）。
-const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+/// 图片抓取的响应体字节上限。
+const MAX_IMAGE_FETCH_BYTES: usize = 25 * 1024 * 1024;
 
 /// Referer 候选链：防盗链双向——黑名单式（sinaimg.cn 拒外来 Referer、只认裸请求）
 /// 与白名单式（少数派 cdnfile.sspai.com 拒裸请求、要求 sspai.com Referer）无法用
@@ -648,7 +648,8 @@ async fn fetch_image_inner(
                     // 全文提取同口径）；前端对 fetchImage 失败统一 catch 降级
                     // （可重试占位）；预算、取消与网络失败不能清持久封面。
                     // Note: 图片代理旁路闭合 — 见 .agents/notes/implemented/architecture/2026-11-13-正文封面与媒体预算.md
-                    let bytes = crate::ingestion::read_body_capped(resp, MAX_IMAGE_BYTES).await?;
+                    let bytes =
+                        crate::ingestion::read_body_capped(resp, MAX_IMAGE_FETCH_BYTES).await?;
                     return Ok(bytes);
                 }
             },
@@ -662,7 +663,7 @@ async fn fetch_image_inner(
 }
 #[cfg(test)]
 mod image_proxy_tests {
-    use super::{fetch_image_inner, referer_candidates, MAX_IMAGE_BYTES};
+    use super::{fetch_image_inner, referer_candidates, MAX_IMAGE_FETCH_BYTES};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -809,7 +810,7 @@ mod image_proxy_tests {
     }
 
     /// 计划超量字节数（25 MiB 界 + 64 块余量）：mock 与测试断言共用的同一值。
-    const OVERSHOOT_PLANNED_BYTES: usize = MAX_IMAGE_BYTES + 64 * 1024 * 64;
+    const OVERSHOOT_PLANNED_BYTES: usize = MAX_IMAGE_FETCH_BYTES + 64 * 1024 * 64;
 
     /// 图片代理旁路闭合（2026-11-02）：无 CL 超量流必须由 read_body_capped 的
     /// 累计分支在 25 MiB 处中止（responseTooLarge），且连接被客户端中止——

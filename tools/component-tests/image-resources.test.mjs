@@ -57,6 +57,45 @@ componentTest('图片资源：raw/fallback字节验证，同URL不同Referer与�
     assert.equal(invokeCount('report_broken_cover'),0);
   } finally {a.release();b.release();twin.release();}
 });
+componentTest('图片 IPC：恰好 25 MiB 可接收，三种回包超过一字节保留原错误', async () => {
+  setup();
+  const limit = 25 * 1024 * 1024;
+  assert.equal(imageBytes(new ArrayBuffer(limit)).byteLength, limit);
+  const oversized = new ArrayBuffer(limit + 1);
+  const fallback = [];
+  fallback[limit] = 0; // 单个远索引模拟超长回包，不分配 25 Mi 个数组元素。
+  for (const value of [oversized, new Uint8Array(oversized), fallback]) {
+    assert.throws(() => imageBytes(value), { code: 'responseTooLarge', message: '图片超过大小限制' });
+  }
+});
+componentTest('浏览器无 Tauri 标记时，代理域封面、画廊和正文均走原 URL', async () => {
+  setup();
+  const url = image('browser');
+  const marker = Object.getOwnPropertyDescriptor(dom.window, '__TAURI_INTERNALS__');
+  delete dom.window.__TAURI_INTERNALS__;
+  try {
+    const lease = acquire(url, page);
+    assert.deepEqual(lease.snapshot(), { status: 'ready', src: url, direct: true });
+    assert.equal(media.imageResourceKey(url, page), media.imageResourceKey(url));
+    const { Timeline } = await import('../../src/components/Timeline.tsx');
+    const { ReaderProse } = await import('../../src/components/ReaderProse.tsx');
+    const html = `<img src="${url}">`;
+    seedFromRows([mkRow({ id: 9802, feed_id: 12, url: page, image_url: url, gallery_first_image_url: url, image_count: 1 })], { layout: 'image', dataMode: 'mock' });
+    const { container } = await mount(createElement('div', null,
+      createElement(CoverImage, { src: url, pageUrl: page, className: 'browser-cover', alt: '封面' }),
+      createElement(Timeline),
+      createElement(ReaderProse, { renderHtml: html, sourceText: html, imagePageUrl: page, style: {} }),
+    ));
+    await flush(2);
+    assert.equal(container.querySelector('img.browser-cover[data-cover-route="direct"]')?.getAttribute('src'), url);
+    assert.equal(container.querySelector('.gallery-card img')?.getAttribute('src'), url);
+    assert.equal(container.querySelector('.article-prose img')?.getAttribute('src'), url);
+    assert.equal(invokeCount('fetch_image'), 0);
+    assert.equal(media.imageResourceStats().leases, 0);
+  } finally {
+    if (marker) Object.defineProperty(dom.window, '__TAURI_INTERNALS__', marker);
+  }
+});
 componentTest('图片资源：登记前释放、共享消费者和旧cancel不取消新请求', async()=>{
   setup(); const pending=slowBackend({lateRegistration:true});
   const a=acquire(image('cancel'),page); const b=acquire(image('cancel'),page);

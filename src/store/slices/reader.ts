@@ -3,8 +3,7 @@ import { api, articleRowToEntry, extractError } from '../../lib/api';
 import { isHttpUrl } from '../../lib/external';
 import { applyBodyRow, applyExtractedFulltext, beginFulltextReadback, beginFulltextRequest, dropBodyEntry, finishFulltextReadback, finishFulltextRequest, getBodyEntry, isFulltextTargetCurrent, markBodyFailed, markBodyLoading, markBodyMissing, reconcileFulltextTargetRow } from '../bodyCache';
 import type { FulltextRequest, FulltextTarget } from '../bodyCache';
-import type { EntryRollbackClaim } from '../internals';
-import { appStore, applyReadReceipt, asReadReceipts, beginEntryFieldWrite, beginLocalFlagWrite, currentLocalFlagWriteSerial, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, scheduleCountsReconcile, syncCurrentViewCache, trackEntryFlagWrite } from '../internals';
+import { appStore, applyReadReceipt, asReadReceipts, beginProjectedFlagWrite, markEntriesRead, optimisticEntryFlagToggle, scheduleCountsReconcile, syncCurrentViewCache } from '../internals';
 import type { AppState } from '../types';
 
 /** 阅读器 slice：选中文章、正文水合（懒加载 + 批量合批）与卡片就地标读/收藏。
@@ -327,24 +326,17 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          边界裁定：失败时文章刚被选中阅读——只回滚读态与计数，不清
          activeArticleId / openedReadIds（用户还在读；「打开过」的保留标记
          使卡片在未读筛选下原地变灰而非消失）。 */
-      markEntriesRead(new Set([id]));
-      const claim: EntryRollbackClaim = { id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') };
-      const settle = trackEntryFlagWrite(claim, true);
-      beginLocalFlagWrite();
-      beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
-      const flagSerialAtRequest = currentLocalFlagWriteSerial();
+      const marked = new Set([id]);
+      markEntriesRead(marked);
+      const intent = beginProjectedFlagWrite([id], 'isRead', false);
       void api.setRead(Number(id), true).then((receipt) => {
-        endLocalFlagWrite();
-        endEntryFieldWrite(id, 'isRead');
-        settle(false);
+        intent.finish(false);
         /* OPT-008B R2/N1：读闭包可能一并标读同 URL 未读副本——回执驱动条目/
            计数本地收敛（被点行已乐观翻转，跳过重复扣减）。 */
-        applyReadReceipt(asReadReceipts(receipt), new Set([id]), flagSerialAtRequest);
+        applyReadReceipt(asReadReceipts(receipt), marked, intent.serial);
         scheduleCountsReconcile();
       }).catch((e) => {
-        endLocalFlagWrite();
-        endEntryFieldWrite(id, 'isRead');
-        const outcome = settle(true);
+        const outcome = intent.finish(true);
         /* R2：回滚被接管跳过（如快照替换）时乐观计数不可线性复原——强制一次
            权威对账（不受 dedup 门控），失败保守留待下次 reload 自愈。 */
         scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
@@ -685,23 +677,14 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          同一份实现：按版本守卫恢复被翻转行、逐 feed 回补 unread（Math.max(0,)），
          不再只提示不回滚。openedReadIds 不回撤：「打开过」的原地变灰保留语义
          不随落库失败撤销（与打开即标读回滚的边界裁定同口径）。 */
-      const claims: EntryRollbackClaim[] = unread.map((id) => ({ id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') }));
-      const settlements = claims.map((claim) => trackEntryFlagWrite(claim, true));
-      beginLocalFlagWrite();
-      for (const id of unread) beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
-      const flagSerialAtRequest = currentLocalFlagWriteSerial();
-      const listed = new Set(unread);
+      const intent = beginProjectedFlagWrite(unread, 'isRead', false);
       void api.setReadBulk(unread.map((id) => Number(id)), true).then((receipt) => {
-        endLocalFlagWrite();
-        for (const id of unread) endEntryFieldWrite(id, 'isRead');
-        for (const settle of settlements) settle(false);
+        intent.finish(false);
         /* OPT-008B R2/N1：整批回执（含闭包副本）驱动条目/计数本地收敛。 */
-        applyReadReceipt(asReadReceipts(receipt), listed, flagSerialAtRequest);
+        applyReadReceipt(asReadReceipts(receipt), marked, intent.serial);
         scheduleCountsReconcile();
       }).catch(() => {
-        endLocalFlagWrite();
-        for (const id of unread) endEntryFieldWrite(id, 'isRead');
-        const takenOver = settlements.map((settle) => settle(true)).some((outcome) => outcome.takenOver);
+        const { takenOver } = intent.finish(true);
         /* R2：同单条路径——存在被接管跳过的声明时强制权威对账。 */
         scheduleCountsReconcile(takenOver ? { force: true } : undefined);
         get().showToast('批量标读失败');

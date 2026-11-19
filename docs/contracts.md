@@ -14,7 +14,7 @@
 | 渲染安全边界 | `src-tauri/src/sanitize.rs`（写入口）+ `db/articles.rs` 的读边界 `sanitize_renderable_fields` | 阅读器、AI 译文落库、HTML 回包 | [架构](architecture.md) 的安全边界 | sanitize 单测 + 正文渲染断言 |
 | 条目身份与去重键 | `db/identity.rs`、`db/url_norm.rs`、`db/articles.rs` 的 `SAME_RSS_GROUP` | 列表/搜索/读闭包/计数/同步匹配 | [同步兼容矩阵](sync-compat-matrix.md) 的身份表 | `dedup_tests`、`url_norm` 单测、查询计划回归 |
 | 正文与 AI 产物身份 | `db/contents.rs` + `ai.rs` 的签名推导 | AI 缓存命中/验签、正文失效 | 前端 `ai-cache-signature` 域、落库前提校验 | `commands/ai.rs` 单测 + 前端签名域断言 |
-| 图片/媒体预算 | `commands/settings.rs` 的 `MAX_IMAGE_BYTES` + `src/lib/imageProxy.ts` 的 `IMAGE_LIMITS` | 图片代理、封面、画廊 | [性能基线](performance.md) 的预算段 | 前端 image-resources 域 + 后端代理测试 |
+| 图片/媒体预算 | 服务抓取上限在 `commands/settings.rs` 的 `MAX_IMAGE_FETCH_BYTES`，IPC 响应校验在 `src/lib/api.ts` 的 `MAX_IMAGE_IPC_BYTES`，在途预留和资源预算在 `src/lib/imageProxy.ts` 的 `IMAGE_LIMITS`（每请求预留 `reservationBytes`） | 图片代理、封面、画廊 | [性能基线](performance.md) 的预算段 | 前端 image-resources 回归 + 后端代理测试 |
 | 本地同步协议与对象布局 | `local_sync/*.rs` + `webdav_transport.rs` | 本地库同步、便携导出 | [备份与恢复](backup.md)、[同步兼容矩阵](sync-compat-matrix.md) 的 WebDAV 段 | `local_sync_e2e`、`segment2`、`database_tests` |
 | 便携备份格式 | `local_sync/backup.rs` | 导出/预览/恢复、跨设备 | [备份与恢复](backup.md) | 便携 v4 专项 e2e |
 | 门禁命令 ↔ CI job | `package.json` scripts + `.github/workflows/ci.yml` | 本地与 CI、发布流程 | [开发与门禁](development.md) 的对应表（每项必须有承担者） | `docs:check` 不覆盖此表，靠评审 |

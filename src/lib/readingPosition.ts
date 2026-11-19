@@ -123,6 +123,8 @@
    readerFocusReturnIndex（回归网直接断言）。
    ============================================================ */
 
+import { evictOldestEntries } from './lru';
+
 /** 顶条锚：可见首条目 id + 记录时的筛选上下文签名 + 记录时刻。
     TASK-123：offsetPx = 卡片内像素偏移（scrollTop − 顶条卡片虚拟起点），
     恢复时 scrollToIndex(align:'start') 后补加，精确还原视口（含长卡片
@@ -222,11 +224,7 @@ export function clearLibraryReadingPositions(): void {
 function archiveSet(key: string, value: TopAnchor): void {
   returnAnchorArchive.delete(key);
   returnAnchorArchive.set(key, value);
-  while (returnAnchorArchive.size > RETURN_ANCHOR_ARCHIVE_MAX) {
-    const oldest = returnAnchorArchive.keys().next().value;
-    if (oldest === undefined) break;
-    returnAnchorArchive.delete(oldest);
-  }
+  evictOldestEntries(returnAnchorArchive, RETURN_ANCHOR_ARCHIVE_MAX);
 }
 
 /** 离开上下文时存档活锚（filterKey 变化的 layout effect 调用，紧随其后清活锚）。

@@ -20,10 +20,11 @@ import {
   resolveFeedLayout,
 } from '../store';
 import { Icons } from './icons';
+import { isTauri } from '../lib/api';
 import { formatRelativeTime, formatDuration } from '../lib/format';
 import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
 import { useImageResource } from './useImageResource';
-import { canProxyImages, needsImageProxy } from '../lib/imageProxy';
+import { needsImageProxy } from '../lib/imageProxy';
 import { galleryMediaKey } from '../lib/galleryMedia';
 import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
@@ -1588,7 +1589,7 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
   const busy = useAppStore(s => s.libraryRestoreBusy);
   const generation = useAppStore(s => s.libraryGeneration);
   const { lease, snapshot, retry } = useImageResource(item.imageUrl, item.url, !busy, 1, `${generation}:${mediaKey}`);
-  const direct = !item.imageUrl || !canProxyImages() || !needsImageProxy(item.imageUrl);
+  const direct = !item.imageUrl || !isTauri() || !needsImageProxy(item.imageUrl);
   const imgSrc = snapshot.status === 'ready' ? snapshot.src : direct ? item.imageUrl : null;
   const imgFailed = snapshot.status === 'failed';
   const openImage = (target: HTMLElement) => {
