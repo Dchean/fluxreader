@@ -244,7 +244,8 @@ pub fn set_folder_collapsed(conn: &Connection, id: i64, collapsed: bool) -> AppR
     Ok(())
 }
 
-/// 分类 AI 默认的整对写入（旧 full 语义，配置导入/旧 caller 使用）。
+/// 分类 AI 默认的整对写入（旧 full 语义）：唯一消费者是零前端调用的命令
+/// [`crate::commands::set_folder_ai_flags`] 与单测；配置导入已删，无生产前端路径。
 pub fn set_folder_ai_flags(
     conn: &Connection,
     id: i64,

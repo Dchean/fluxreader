@@ -868,7 +868,7 @@ async fn run_background_sync(
             let mut report = crate::sync::SyncReport::default();
             // A-P2-2：outbox 有 pending 时先执行订阅写回。执行器自带 PUSH_LOCK 串行化
             // 与账号 key/代际屏障（见 push_subscription_outbox）；构建失败的落账由
-            // try_push 内的 record_outbox_session_block 承担（A-P2-6）。排在 light/
+            // try_push 内的 record_outbox_session_block 承担（A-P2-6）。排在 states/
             // discovery 之前：先收敛本地意图，再做拉取对账（与 feeds_phase 的 push →
             // pull 次序一致）。
             // Note: 订阅 outbox 接入后台自动调度 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
@@ -898,7 +898,7 @@ async fn run_background_sync(
                     （entries_data_changed：新插入 / 正文·绑定真实改变 / 读藏值实际改变，
                     每个成功变更点即时合并）或 merged_states（本消费路径上为 states 阶段
                     对账值条件写命中行——真实变化；订阅阶段的无条件绑定计数不在
-                    sync_light 路径上，见 mod.rs 注释）或订阅层增删（pulled_feeds /
+                    states lane（sync_states_now）路径上，见 mod.rs 注释）或订阅层增删（pulled_feeds /
                     removed_feeds）。pulled_entries 是「处理过/已接受」计数（守卫通过但
                     值未变也计数），不冒充变化。空变化（只有推送确认/错误）不发，避免
                     无谓 reload 抖动。payload 保持既有字段（new_articles 固定 0 为保留
@@ -942,11 +942,11 @@ fn backend_sync_due(now: i64, interval_min: i64, last_sync: i64) -> bool {
 }
 
 /* ============================================================
-W3-3：窗口聚焦触发的 light 同步（60s 节流；周期判据零改动，按配置间隔判定）
+W3-3：窗口聚焦触发的同步（60s 节流；周期判据零改动，按配置间隔判定）
 ============================================================ */
 
 /// 聚焦触发的最小间隔（秒）：距上次触发不足 60s 直接跳过。
-/// 依据：回窗口即看到服务端新状态（同步即得性）与代价（每次 light 全链
+/// 依据：回窗口即看到服务端新状态（同步即得性）与代价（每次聚焦同步两条 lane
 /// 的往返）的折中——连续 alt-tab 不重复发起；60s 与调度 TICK 同量级，
 /// 不引入新节拍。聚焦只约束自身触发，不影响 refresh/同步调度循环的节奏。
 const FOCUS_SYNC_THROTTLE_SECS: i64 = 60;
@@ -961,9 +961,9 @@ fn focus_sync_due(now: i64, last_trigger: i64) -> bool {
 }
 
 /// 窗口获得焦点（Focused(true)）时的同步入口（lib.rs on_window_event 调用）。
-/// 认领节流窗口后异步执行：前置判定（autoSync 开启 + 有可用凭据，与
-/// auto_sync_backend 同源）→ outbox pending 写回（有 pending 才发请求）→
-/// sync_light 全链。节流窗口按「焦点事件」计：认领后即使前置判定不通过
+/// 认领节流窗口后异步执行（与后台自动同步同源的前置判定：autoSync 开启 + 有可用
+/// 凭据）→ 两条 lane 并发：states lane 的 sync_states_now + 内容/订阅 lane 的
+/// outbox 写回与 states_phase/发现。节流窗口按「焦点事件」计：认领后即使前置判定不通过
 /// 也不回滚（换取无竞察的单一触发，代价只是启用 autoSync 后首窗最多顺延 60s）。
 pub fn on_window_focused(app: AppHandle) {
     use std::sync::atomic::Ordering;
@@ -984,7 +984,8 @@ pub fn on_window_focused(app: AppHandle) {
 }
 
 /// 聚焦同步执行体：与 auto_sync_backend 的 normal_due 分支同链
-/// （outbox pending 检查 → 订阅写回 → sync_light → 数据变化事件），
+/// （outbox pending 检查 → 两条 lane 并发：states lane 的 sync_states_now +
+/// 内容/订阅 lane 的订阅写回 → states_phase/发现 → 数据变化事件），
 /// 但不做周期/发现节流判定——聚焦只受自身 60s 节流约束。周期同步的到期
 /// 判定（按配置间隔）、发现节流与调度循环节奏零改动。
 async fn focus_triggered_sync(app: &AppHandle) {

@@ -27,7 +27,7 @@ const NUMERIC_RANGES: Record<string, readonly [number, number]> = {
   fontSize: [13, 24],          // ReadingTab: min 13 / max 24
   lineHeight: [130, 240],      // ReadingTab: min 130 / max 240
   maxWidth: [560, 1100],       // ReadingTab: min 560 / max 1100
-  listWidth: [280, 560],       // App.tsx 拖拽夹取范围
+  listWidth: [280, 560],       // App.tsx 拖拽夹取与 base.css clamp 实际为 280–420；此上限更宽，差异未合并（行为项）
 };
 
 const isBool = (v: unknown): boolean => typeof v === 'boolean';

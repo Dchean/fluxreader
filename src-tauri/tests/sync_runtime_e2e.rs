@@ -1,3 +1,7 @@
+//! 测试对象：`sync::runtime` 的 lane 语义（三条 lane 可重叠、同 lane 串行、stop 取消、
+//! 事件序列）。运行前提：tokio 多线程运行时；不触网，需要 HTTP 的用例走本机回环
+//! `MockGReader`。
+
 mod common;
 mod mock_greader;
 

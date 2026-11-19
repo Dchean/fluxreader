@@ -450,8 +450,9 @@ pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCo
 
 /// OPT-008B 第一阶段：全部 / 每分类 / 每源的**显示集合**精确计数
 /// （与 list_articles / search / markAll 同一 smartDedup 谓词族）。
-/// 前端聚合数字（侧边栏「全部/分类」）消费本命令，保证
-/// 「数字 == 点进去看到的列表条数」；源内数字仍可用 `feed_counts`。
+/// P2-8 更正：前端聚合数字现在由 `counts_snapshot` 一条 IPC 承担（见
+/// `src/lib/api.ts` 的 countsSnapshot），本命令**零前端调用**，保留纯为 IPC 签名
+/// 契约（见 Note 2026-11-13-零消费清理）；源内数字仍可用 `feed_counts`。
 /// `layout` = 当前内容布局（与列表查询同口径；省略 = 不过滤）。
 #[tauri::command]
 pub async fn scope_counts(

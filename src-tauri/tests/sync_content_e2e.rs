@@ -3,7 +3,8 @@
 //!    源，服务端源既不直连抓取、又从不补内容 → 文章数永久少于服务端）。
 //! ② upsert_miniflux_entry 的状态覆盖必须尊重本地待推变更（防乒乓）。
 //! ③ article_id_by_url 用规范化 URL 匹配，同文不同饰不重复入库。
-//! 运行：cargo test --test sync_content_e2e -- --include-ignored --nocapture
+//! 运行：cargo test --test sync_content_e2e -- --nocapture（无 `#[ignore]` 用例，
+//! 原 `--include-ignored` 无实际作用，已按实际删除）
 
 mod common;
 mod mock_greader;

@@ -3,7 +3,8 @@
 //!    origin='local' 直连订阅保留，绑定/副本记账归零
 //! ② 缓存清理：scope=articles 删指定天数前的非收藏文章（收藏保留）；
 //!    scope=ai 只清 AI 摘要/翻译缓存
-//! 运行：cargo test --test account_lifecycle_e2e -- --include-ignored --nocapture
+//! 运行：cargo test --test account_lifecycle_e2e -- --nocapture（无 `#[ignore]`
+//! 用例，原 `--include-ignored` 无实际作用，已按实际删除）
 
 mod common;
 mod mock_greader;

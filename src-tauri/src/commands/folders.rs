@@ -190,8 +190,9 @@ pub async fn set_folder_collapsed(
 }
 
 /// 分类 AI 默认开关写入。OPT-011：参数改为可选（单字段 patch）——新 caller 只传
-/// 被切换的字段（summary 或 translate），两字段独立落库，乱序到达不互相覆盖；
-/// 旧 full caller 继续传两个 bool，语义不变（整对写）。
+/// 被切换的字段（summary 或 translate），两字段独立落库，乱序到达不互相覆盖。
+/// P2-8 更正：前端已改调 `set_folder_ai_modes`（三态），本命令**零前端调用**；
+/// 旧 full 双 bool 形态保留为 IPC 签名契约（见 Note 2026-11-13-零消费清理）。
 #[tauri::command]
 pub async fn set_folder_ai_flags(
     state: State<'_, AppState>,

@@ -1,3 +1,7 @@
+//! 测试对象：生产 `navigation` 插件的 `on_navigation` 判定（应用自身 origin 放行、
+//! dev URL 与 https scheme 分支、外部目标拒绝）。运行前提：tauri `test` 特性下的
+//! mock app/window（不需要真实 webview 与网络）；https origin 断言仅在 Windows 生效。
+
 use app_lib::navigation;
 use tauri::plugin::Plugin;
 use url::Url;

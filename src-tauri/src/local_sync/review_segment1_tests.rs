@@ -134,24 +134,24 @@ fn review_segment1_multientent_second_alias_tie_converges() {
     };
     batch.validate().unwrap();
     let ingest = logical::ingest_batch(&c, 0, &batch);
-    println!("PROBE multi_ingest_ok={}", ingest.is_ok());
     if ingest.is_ok() {
         assert_eq!(
             database::checkpoint(&c).unwrap(),
             before,
             "receive must not trial-write the logical state"
         );
-        let first = logical::apply_ready_intent(&c);
-        let second = logical::apply_ready_intent(&c);
-        let third = logical::apply_ready_intent(&c);
-        let pending: i64 = c
+        // P3-2：探测输出已删；三个调用保留（落库副作用仍是本用例的一部分），
+        // 返回值原本只喂 println、不参与断言，故显式丢弃。
+        let _ = logical::apply_ready_intent(&c);
+        let _ = logical::apply_ready_intent(&c);
+        let _ = logical::apply_ready_intent(&c);
+        let _ = c
             .query_row(
                 "SELECT COUNT(*) FROM local_sync_intents WHERE actor=?1",
                 ["d".repeat(32)],
-                |r| r.get(0),
+                |r| r.get::<_, i64>(0),
             )
             .unwrap();
-        println!("PROBE first={first:?} second={second:?} third={third:?} pending={pending} frontier={:?}",logical::frontier(&c).unwrap());
     }
     assert!(
         ingest.is_ok(),
@@ -199,16 +199,11 @@ fn review_segment1_legacy_sql_url_selects_source_tie_with_candidate() {
     let revision = logical::preflight(&c, &job).unwrap();
     assert!(logical::accept(&c, 0, &job, revision).unwrap());
     assert!(!c.query_row("SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url='https://example.test/logical-target')",[],|r|r.get::<_,bool>(0)).unwrap());
-    let before = database::checkpoint(&c).unwrap();
     let update = c.execute(
         "UPDATE feeds SET feed_url='https://example.test/logical-target' WHERE sync_id=?1",
         [RIGHT],
     );
     let projection = logical::projected(&c, &format!("s/{RIGHT}"));
-    println!(
-        "PROBE legacy_update={update:?} projection={projection:?} logical_changed={}",
-        database::checkpoint(&c).unwrap() != before
-    );
     assert!(
         update.is_ok(),
         "different source keys can have equal stamps and select a deterministic display value"

@@ -41,6 +41,7 @@
 - **图片代理**：代理/队列/lease/字节预算与失败占位有受控 IPC 证据；真实 Tauri raw/fallback、生产 CSP、解码释放、可见锚与预算压力未验，不能把普通 HTTP 图片布局外推为 native 性能或 OOM 结论。
 - **motion**：reduced-motion 的 transition 0s 修复与两种媒体偏好门禁已落地；历史 159px/295px 漂移与 CI 失败保留，不改写为“从未发生”。
 - **设置浮层快捷键让路**：Ctrl+S/Alt+J 穿透修复有独审证据；真实宿主控件消费顺序仍需持续回归。
+- **列表宽度上限不一致**：`src/store/settingsValidation.ts` 的 `NUMERIC_RANGES.listWidth` 接受 280–560，而 `App.tsx` 的拖拽夹取与 `base.css` 的 clamp 是 280–420。越界值能通过校验，但被 UI 夹到 420（同步或便携带入的值与本地界面表现不一致）。属行为项，未修；修前须定「放宽 UI 到 560 还是收紧校验到 420」。
 - **Edge headless 门禁与 TEMP**：`npm run test:ui-layout` 在 `%TEMP%`/`%TMP%` 指向仓库外的环境、基线 `30cfd65` 上运行验证通过（exit 0、`ok:true`、`attempt=1`、`retried=false`；4 视口 2 尺寸 × 2 动效 + 6 键盘视口全跑，画廊/社交域断言与 `consoleErrors`/`exceptions`/`unexpectedNetworkFailures` 均空；`firstMount` 48.8 s / 120 s 预算）。上一轮的「红」已由独立只读证伪逐链复核为环境红：`%TEMP%` 指进仓库时 Edge profile 落在 Vite watch 树内，FSWatcher 撞到被锁的 `Default\Network\Cookies(-journal)` 触发 `EBUSY`，Vite exit 1；同一 HEAD 仅改 TEMP 的对照复现同签名。残余风险：工具防假红未修（`makeProfileDir` 的仓库内校验恒真、`startVite` 不监听子进程退出、`vite.config.ts` 未忽略 `tmp/`）、CI 变体（`UI_LAYOUT_TRACE=viewport`）与故障注入未在 `30cfd65` 复跑、一次绿跑不足以证明不 flaky（首挂载已用掉 40.7% 预算）。性质：本机运行验证；实现侧独立复审收口仍未做。证据 `tmp/ui-layout-2026-11-19b/`。
 
 <a id="verification-boundaries"></a>

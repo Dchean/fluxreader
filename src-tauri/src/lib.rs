@@ -273,9 +273,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // W3-3：窗口获得焦点 → 触发一次 light 同步（60s 节流；autoSync 开启
-            // 且有凭据时执行，走 outbox 写回 + sync_light 全链——与后台自动同步
-            // 同一执行体，不影响 30 分钟周期的既有节奏）。
+            // W3-3：窗口获得焦点 → 触发一次聚焦同步（60s 节流；autoSync 开启
+            // 且有凭据时执行）：states lane 走 sync_states_now，内容/订阅 lane 走
+            // outbox 写回 + states_phase/发现——两条 lane 并发（不是一条串联链），
+            // 与后台自动同步同源，不改按配置间隔的既有周期节奏。
             if let tauri::WindowEvent::Focused(true) = event {
                 if window.label() == "main" {
                     scheduler::on_window_focused(window.app_handle().clone());

@@ -640,8 +640,12 @@ mod tests {
     /// privilege and is still reported as a reparse point by
     /// `FileType::is_symlink`, so it exercises the same "non-regular entry is
     /// not a snapshot candidate" branch. Production code and the test's
-    /// assertions are unchanged; CI (windows-latest) still covers the real file
-    /// symlink path, this local gate does not claim to.
+    /// assertions are unchanged. Correction (2026-11-19): this test does run in
+    /// CI (windows-latest, `cargo test --no-fail-fast`) — it has no `#[ignore]`
+    /// — but CI creates the same junction fixture, so **no environment here
+    /// creates a real file symlink**. Covering that shape needs a context where
+    /// symlink creation is privileged or developer mode is on, and must be
+    /// agreed per task (read/write boundary) before it is run.
     #[cfg(windows)]
     fn create_fixture_reparse_point(target: &std::path::Path, link: &std::path::Path) {
         let status = std::process::Command::new("cmd")

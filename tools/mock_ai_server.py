@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """本地 mock OpenAI 兼容服务：用于无真实 Key 时端到端验证 AI 摘要/翻译链路。
+手工入口，不属 npm 门禁（package.json 无对应 script）：无 watchdog/终检，需手动起停；
+仅用于无 Key 时的人工端到端验证。
 
 端点：
   GET  /v1/models           → 模型列表（设置页「测试连通性」/模型下拉用）

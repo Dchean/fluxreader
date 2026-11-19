@@ -95,8 +95,8 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
     return () => clearTimeout(t);
   }, [q, debounced]);
 
-  /* 文章搜索：后端 FTS5（debounced 落定即发，延迟已由上方单段防抖承担）；
-     浏览器环境回退内存匹配 */
+  /* 文章搜索：后端 LIKE 是主判据（trigram 候选只收缩扫描面，索引缺失/报错时回落
+     LIKE-only）；debounced 落定即发，延迟已由上方单段防抖承担。浏览器环境回退内存匹配 */
   useEffect(() => {
     const query = debounced;
     if (!query) return;

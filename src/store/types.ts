@@ -106,7 +106,7 @@ export interface SettingsState {
   fontSize: number;
   lineHeight: number;
   maxWidth: number;
-  /** 文章列表列宽（px，可拖动调整，280–560，默认 380） */
+  /** 文章列表列宽（px，可拖动调整 280–420；store 默认 320，base.css 回退 380） */
   listWidth: number;
   showReadTime: boolean;
   defaultOpenMode: 'rss' | 'fulltext';

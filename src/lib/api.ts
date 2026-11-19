@@ -616,8 +616,11 @@ export const api = {
     return inv ? (await inv('article_index', { args, articleId }) as number | null) : null;
   },
   /** 文章搜索：LIKE 子串匹配（标题/正文/摘要/AI 摘要/翻译，词间 AND）。
-   *  TASK-100 D29 更正注释：实际入口从来是 LIKE 子串（src-tauri db/articles.rs
-   *  search_articles），FTS5 只是历史遗留的提法，后端并无 FTS5 表。浏览器环境返回 null。 */
+   *  LIKE 是主判据（src-tauri db/articles.rs 的 `search_articles`）；`db/schema.sql` 的
+   *  `articles_trigram_idx`（fts5 + `tokenize='trigram'`）只是候选面，仅收缩扫描行数，
+   *  结果集仍逐行由 LIKE 判定；候选面缺失或 MATCH 报错时回落 LIKE-only。
+   *  （曾称「后端并无 FTS5 表」，与 schema 不符，2026-11-19 按代码更正。）
+   *  浏览器环境返回 null。 */
   async searchArticles(query: string, limit?: number): Promise<ArticleListItemRow[] | null> {
     const inv = await getInvoke();
     return inv ? (await inv('search_articles', { query, limit }) as ArticleListItemRow[]) : null;

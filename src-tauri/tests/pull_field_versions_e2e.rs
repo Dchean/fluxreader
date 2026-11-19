@@ -853,7 +853,7 @@ async fn nonzero_version_untouched_this_round_still_accepts_remote() {
 R3（主控 2026-10-10 二轮 P2：F11 实际变化标记，见文件头 ⑧⑨⑩⑪）
 ============================================================ */
 
-/// ⑧ 主控二轮反例并入（真实 sync_light + mock 屏障）：reading-list 在途期间
+/// ⑧ 主控二轮反例并入（真实 states_phase(false) + mock 屏障）：reading-list 在途期间
 /// 直连插入同 feed 同 URL 行并标读/收藏、推送确认清队；放行后正文合并 upsert
 /// 命中既有行——R2 已锁状态/版本保持 (1,1,1,1)，但**标题被真实改写、remote_id
 /// 完成绑定**。修前：pulled_entries/merged_states 全 0 → has_data_change=false

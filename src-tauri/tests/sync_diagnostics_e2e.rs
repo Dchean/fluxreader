@@ -1,3 +1,7 @@
+//! 测试对象：诊断日志与手动同步的错误分类（401 登录拒绝 → auth 诊断 + `RuntimeResult`
+//! 的 IPC 错误形状）。运行前提：本机回环上的 `MockGReader`（无外网），日志写
+//! `std::env::temp_dir()` 下的独立目录并在用例内清理。
+
 mod common;
 mod mock_greader;
 
