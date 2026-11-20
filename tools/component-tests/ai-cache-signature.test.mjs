@@ -431,3 +431,211 @@ componentTest('OPT-013 B3：社交卡片入口区分「已过期」并提供真�
     resetPlan();
   }
 });
+
+componentTest('S3d B1 notification：演示条目打开预置译文不提示 AI 服务不可用', { timeout: 30000 }, async () => {
+  installBackend();
+  const { createInitialCategories, createInitialEntries } = await import('../../dist-test/mockData.js');
+  const { buildFeedIndex, buildSourceIndex } = await import('../../dist-test/store/internals.js');
+  const categories = createInitialCategories();
+  const preset = createInitialEntries().find(({ id }) => id === 'not-1');
+  assert.ok(preset?.translatedContent, '生产演示夹具必须带预置译文');
+  resetStore({
+    categories,
+    entries: [preset],
+    feedIndex: buildFeedIndex(categories),
+    sourceIndex: buildSourceIndex(categories),
+    activeContentLayout: 'notification',
+    dataMode: 'mock',
+  });
+  const { createElement, act } = await import('react');
+  const { Timeline } = await import('../../src/components/Timeline.tsx');
+  const entry = await mount(createElement(Timeline));
+  const card = entry.container.querySelector('.notif-card[data-id="not-1"]');
+  assert.ok(card, '演示布局中挂载真实通知卡');
+  const toggle = [...card.querySelectorAll('.notif-top-actions button')].find((button) => button.textContent === '翻译');
+  const block = card.querySelector('.notif-translated-block');
+  assert.ok(toggle && block && !block.classList.contains('show'));
+  const toastsBefore = useAppStore.getState().toasts.map(({ text }) => text);
+  clearInvokeCalls();
+  await act(async () => { toggle.click(); });
+  assert.ok(block.classList.contains('show') && block.textContent.includes(preset.translatedContent));
+  assert.equal(invokeCount('ai_cache_check'), 0);
+  assert.equal(invokeCount('ai_translate'), 0);
+  assert.deepEqual(useAppStore.getState().toasts.map(({ text }) => text), toastsBefore, '演示预置译文点开只切显示，不新增提示');
+});
+
+componentTest('S3d 保真 notification：验签在途关开复用，验签失败保留旧译文', { timeout: 30000 }, async () => {
+  installBackend();
+  resetStore();
+  const id = 786;
+  const oldTranslation = '验签失败时保留的旧译文';
+  seedFromRows([mkRow({ id, feed_id: 14, content_html: '<p>正文</p>', translated_content: `<p>${oldTranslation}</p>`, translated_sig: 'old-signature' })], { layout: 'notification' });
+  const verified = { summaryVerified: false, translationVerified: true, translationSegments: { total: 1, completed: 0, discarded: 0 } };
+  const pending = deferred();
+  setPlan({ ai_cache_check: () => Promise.resolve(verified) });
+  try {
+    const { createElement, act } = await import('react');
+    const { Timeline } = await import('../../src/components/Timeline.tsx');
+    const entry = await mount(createElement(Timeline));
+    await waitFor(() => getBodyEntry(String(id))?.state === 'ready' && useAppStore.getState().aiStatusById[id] !== undefined,
+      { label: '通知卡水合与显示用验签已完成' });
+    await flush(2);
+    const card = entry.container.querySelector(`.notif-card[data-id="${id}"]`);
+    assert.ok(card);
+    const toggle = [...card.querySelectorAll('.notif-top-actions button')].find((button) => button.textContent === '翻译');
+    const block = card.querySelector('.notif-translated-block');
+    assert.ok(toggle && block && !block.classList.contains('show'));
+    clearInvokeCalls();
+    setPlan({ ai_cache_check: () => pending.promise });
+    await act(async () => { toggle.click(); });
+    await waitFor(() => invokeCount('ai_cache_check') === 1, { label: '打开旧译文发起一次待决验签' });
+    assert.ok(block.classList.contains('show'));
+    assert.equal(block.querySelector('p')?.textContent, oldTranslation);
+    await act(async () => { toggle.click(); });
+    assert.ok(!block.classList.contains('show'));
+    await act(async () => { toggle.click(); });
+    assert.ok(block.classList.contains('show'));
+    assert.equal(invokeCount('ai_cache_check'), 1, '验签尚未返回，重新打开不产生第二笔验签');
+    await act(async () => { pending.reject(new Error('验签 IPC 失败')); });
+    await flush(3);
+    assert.equal(invokeCount('ai_cache_check'), 1);
+    assert.equal(invokeCount('ai_translate'), 0, '验签不可用时不重新生成');
+    assert.ok(block.classList.contains('show'));
+    assert.equal(block.querySelector('p')?.textContent, oldTranslation);
+    assert.equal(getBodyEntry(String(id))?.translatedContent, `<p>${oldTranslation}</p>`);
+  } finally {
+    pending.resolve(verified);
+    resetPlan();
+  }
+});
+
+for (const [layout, feedId, cardSelector, blockSelector] of [
+  ['social', 11, '.social-card', '.social-translated-block'],
+  ['notification', 14, '.notif-card', '.notif-translated-block'],
+]) {
+  componentTest(`S3d B1 ${layout}：已有译文点开仍验签，miss 生成、hit 复用、关闭与在途重开不重复生成`, { timeout: 30000 }, async () => {
+    installBackend();
+    resetStore();
+    const row = mkRow({ id: 784, feed_id: feedId, content_html: '<p>正文</p>', translated_content: '<p>已有译文</p>', translated_sig: 'old-signature' });
+    seedFromRows([row], { layout });
+    let committed = row;
+    let verified = true;
+    const held = [];
+    setPlan({
+      get_article: () => Promise.resolve(committed),
+      ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: verified, translationSegments: { total: 1, completed: 0, discarded: 0 } }),
+      ai_translate: (args) => new Promise((resolve) => { held.push({ args, resolve }); }),
+    });
+    try {
+      const { createElement, act } = await import('react');
+      const { Timeline } = await import('../../src/components/Timeline.tsx');
+      const entry = await mount(createElement(Timeline));
+      await waitFor(() => getBodyEntry('784')?.state === 'ready' && useAppStore.getState().aiStatusById['784'] !== undefined,
+        { label: `${layout} 既有译文水合与初始校验结束` });
+      await flush(2);
+      const card = entry.container.querySelector(`${cardSelector}[data-id="784"]`);
+      const toggle = [...card.querySelectorAll('button')].find((button) => button.textContent === '翻译');
+      const block = card.querySelector(blockSelector);
+      assert.ok(toggle && !block.classList.contains('show'), '手动翻译源的既有译文初始收起');
+      verified = false;
+      clearInvokeCalls();
+      await act(async () => { toggle.click(); });
+      await flush(4);
+      // 旧 NotifCard 在「非空译文且无错误」时不调用 translateEntry，直接漏掉本次验签。
+      assert.ok(invokeCount('ai_cache_check') > 0, '已有译文点开必须重新调用 ai_cache_check，不能只切显示');
+      assert.equal(held.length, 1, '后端 miss 必须发起一次真实 ai_translate');
+      assert.equal(held[0].args.articleId, 784, '生成目标保持当前卡片 ID');
+      assert.ok(block.classList.contains('show') && block.textContent.includes('翻译中…'));
+      assert.equal(block.querySelector('.ai-error-row'), null, '生成中不显示失败行');
+      await act(async () => { toggle.click(); });
+      await flush(2);
+      assert.ok(!block.classList.contains('show'), '关闭只切显隐');
+      await act(async () => { toggle.click(); });
+      await flush(2);
+      assert.equal(held.length, 1, '同一请求在途重开不重复生成');
+
+      verified = true;
+      committed = { ...row, translated_content: '<p>新译文</p>', translated_sig: 'new-signature' };
+      await act(async () => {
+        held[0].args.onChannel.onmessage({ type: 'delta', data: '<p>新译文</p>' });
+        held[0].args.onChannel.onmessage({ type: 'done' });
+        held[0].resolve('');
+      });
+      await waitFor(() => block.querySelector('p')?.textContent === '新译文' && !useAppStore.getState().translatingIds['784'],
+        { label: `${layout} 完成后回读净化译文` });
+      await flush(3);
+      assert.equal(block.querySelector('.ai-unverified-tag'), null, '验签命中的新产物不显示过期');
+      clearInvokeCalls();
+      await act(async () => { toggle.click(); });
+      await flush(2);
+      assert.equal(invokeCount('ai_cache_check'), 0, '关闭不发起验签');
+      await act(async () => { toggle.click(); });
+      await flush(4);
+      assert.ok(invokeCount('ai_cache_check') > 0, '再次打开仍询问后端缓存权威');
+      assert.equal(invokeCount('ai_translate'), 0, '命中只展示、不重复生成');
+      assert.ok(block.classList.contains('show'));
+    } finally {
+      for (const request of held) request.resolve('');
+      resetPlan();
+    }
+  });
+
+  componentTest(`S3d 保真 ${layout}：partial 进度、继续、错误详情、重试与清除沿真实状态更新`, { timeout: 30000 }, async () => {
+    installBackend();
+    resetStore();
+    seedFromRows([mkRow({ id: 785, feed_id: feedId, content_html: '<p>正文</p>' })], { layout });
+    const held = [];
+    setPlan({
+      ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } }),
+      ai_translate: (args) => new Promise((resolve) => { held.push({ args, resolve }); }),
+    });
+    try {
+      const { createElement, act } = await import('react');
+      const { Timeline } = await import('../../src/components/Timeline.tsx');
+      const entry = await mount(createElement(Timeline));
+      await waitFor(() => entry.container.querySelector(`${blockSelector}.show .ai-partial-hint`) !== null,
+        { label: `${layout} 后端片段进度展开译文块` });
+      const card = entry.container.querySelector(`${cardSelector}[data-id="785"]`);
+      const block = card.querySelector(blockSelector);
+      const button = (text) => [...block.querySelectorAll('button')].find((node) => node.textContent === text);
+      assert.ok(block.querySelector('.ai-partial-hint').textContent.includes('1/3'));
+      assert.equal(card.getAttribute('role'), 'article');
+      assert.equal(card.getAttribute('tabindex'), '0');
+      assert.equal(block.querySelector('.ai-unverified-tag'), null, 'partial 不误标 stale');
+      await act(async () => { button('继续').click(); });
+      await waitFor(() => held.length === 1, { label: `${layout} 继续发起翻译` });
+      assert.ok(block.textContent.includes('翻译中…'));
+      assert.equal(block.querySelector('.ai-partial-hint'), null, 'generating 按原状态优先级隐藏 partial');
+      const fail = async (request) => {
+        await act(async () => {
+          request.args.onChannel.onmessage({ type: 'delta', data: '<b>半截' });
+          request.args.onChannel.onmessage({ type: 'error', data: '分段限流详情' });
+          request.resolve('');
+        });
+        await waitFor(() => block.querySelector('.ai-error-text') !== null && block.querySelector('.ai-partial-hint') !== null,
+          { label: `${layout} 失败详情和可续片段并存` });
+        await flush(2);
+      };
+      await fail(held[0]);
+      assert.equal(block.querySelector('.ai-error-text').textContent, '翻译失败：分段限流详情');
+      assert.equal(block.querySelector('.ai-error-text').getAttribute('title'), '分段限流详情');
+      assert.equal(block.querySelector('b'), null, '失败残留的未净化流保持纯文本');
+      assert.ok(block.textContent.includes('<b>半截'));
+      assert.deepEqual([...block.querySelectorAll('button')].map((node) => node.textContent), ['重试', '继续', '清除']);
+      await act(async () => { button('重试').click(); });
+      await waitFor(() => held.length === 2, { label: `${layout} 内联重试真实发起翻译` });
+      await fail(held[1]);
+      clearInvokeCalls();
+      await act(async () => { button('清除').click(); });
+      await waitFor(() => block.querySelector('.ai-partial-hint') === null, { label: `${layout} 清除进度落地` });
+      assert.equal(invokeCount('ai_clear_cache'), 1, '清除调用后端一次');
+      assert.equal(block.querySelector('.ai-error-row'), null, '清除移除错误行');
+      assert.equal(getBodyEntry('785').translatedContent, '', '清除产物，不影响正文');
+      assert.equal(getBodyEntry('785').content, '<p>正文</p>');
+      assert.ok(card === entry.container.querySelector(`${cardSelector}[data-id="785"]`), '状态变化保持卡片节点');
+    } finally {
+      for (const request of held) request.resolve('');
+      resetPlan();
+    }
+  });
+}

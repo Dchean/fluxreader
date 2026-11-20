@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { componentTest, mount, flush, waitFor, resetStore, getBodyEntry, useAppStore } from './harness.mjs';
-import { installBackend, seedFromRows, mkRow, setPlan, deferred, invokeCalls, clearInvokeCalls } from './fixtures.mjs';
+import { installBackend, seedFromRows, mkRow, setPlan, resetPlan, deferred, invokeCalls, clearInvokeCalls } from './fixtures.mjs';
 
 const ROWS = [
   mkRow({ id: 201, feed_id: 11, title: '社交 201', snippet: 's201' }),
@@ -137,4 +137,68 @@ componentTest('OPT-016B 正文水合：跨延迟/失败/缺行的真实 effect �
      组件 DOM 与记录逐一对上；202 的卡片节点自始至终未被替换。未预期
      console/jsdom/React 错误由 componentTest 统一账本终检判红（R1）。 */
   assert.equal(entry.container.querySelector('.social-card[data-id="202"]'), card202Before, '整轮水合后 202 卡片仍为同一节点');
+});
+
+componentTest('S3d 通知卡水合保真：加载保留 snippet、失败独立重试、全文可展开、缺行与空正文各归终态', { timeout: 30000 }, async () => {
+  installBackend();
+  resetStore();
+  const rows = [
+    mkRow({ id: 781, feed_id: 14, snippet: '通知摘要'.repeat(35) }),
+    mkRow({ id: 782, feed_id: 14, snippet: '' }),
+    mkRow({ id: 783, feed_id: 14, snippet: '' }),
+  ];
+  seedFromRows(rows, { layout: 'notification' });
+  const batches = [];
+  setPlan({ get_articles: (args) => {
+    const d = deferred();
+    batches.push({ ids: args.ids.map(String), d });
+    return d.promise;
+  } });
+  try {
+    const { createElement, act } = await import('react');
+    const { Timeline } = await import('../../src/components/Timeline.tsx');
+    const entry = await mount(createElement(Timeline));
+    await waitFor(() => batches.length === 1, { label: '通知卡批量水合已发起' });
+    const card = (id) => entry.container.querySelector(`.notif-card[data-id="${id}"]`);
+    const first = card(781);
+    assert.equal(first.querySelector('.notif-body-text').textContent, rows[0].snippet, '加载窗口不丢已有 snippet');
+    assert.ok(card(782).querySelector('.notif-body-text .hydrate-placeholder').textContent.includes('加载正文…'));
+    await act(async () => { batches[0].d.reject(new Error('通知水合失败详情')); });
+    await waitFor(() => first.querySelector('.hydrate-retry') !== null, { label: '通知卡失败行出现' });
+    assert.equal(first.querySelector('.notif-body-text'), null, '失败不静默回退 snippet');
+    assert.equal(first.querySelector('.notif-expand-btn'), null, '纯失败无可展开正文');
+    assert.equal(first.querySelector('.hydrate-failure').getAttribute('role'), 'group');
+    assert.equal(first.querySelector('.hydrate-failure').getAttribute('aria-label'), '正文加载失败');
+    assert.equal(first.querySelector('.hydrate-failure-text').getAttribute('title'), getBodyEntry('781').message);
+    assert.equal(first.querySelector('.hydrate-retry').getAttribute('aria-label'), '重试加载正文');
+    await act(async () => { first.querySelector('.hydrate-retry').click(); });
+    await waitFor(() => batches.length === 2, { label: '通知重试重新发起批量水合' });
+    assert.deepEqual(batches[1].ids, ['781']);
+    const fullText = '通知水合全文'.repeat(45);
+    await act(async () => { batches[1].d.resolve([{ ...rows[0], content_html: `<p>${fullText}</p>` }]); });
+    await waitFor(() => getBodyEntry('781')?.state === 'ready', { label: '通知全文水合完成' });
+    assert.ok(first === card(781), '同一次挂载跨失败与恢复保持卡片节点');
+    assert.equal(first.querySelector('.notif-body-text').textContent, rows[0].snippet, '全文到达后收起态仍显示 snippet');
+    assert.ok(first.querySelector('.notif-body-text').classList.contains('collapsed'));
+    await act(async () => { first.querySelector('.notif-expand-btn').click(); });
+    assert.equal(first.querySelector('.notif-body-text').textContent, fullText, '展开使用水合全文并剥去 HTML');
+    assert.equal(first.querySelector('.notif-body-text p'), null);
+
+    await act(async () => { card(782).querySelector('.hydrate-retry').click(); });
+    await waitFor(() => batches.length === 3, { label: '缺行场景重试已发起' });
+    await act(async () => { batches[2].d.resolve([]); });
+    await waitFor(() => getBodyEntry('782')?.state === 'missing', { label: '通知缺行归终态' });
+    assert.ok(card(782).querySelector('.notif-body-text .hydrate-placeholder').textContent.includes('文章不存在'));
+    assert.equal(card(782).querySelector('.hydrate-retry'), null);
+
+    await act(async () => { card(783).querySelector('.hydrate-retry').click(); });
+    await waitFor(() => batches.length === 4, { label: '空正文场景重试已发起' });
+    await act(async () => { batches[3].d.resolve([{ ...rows[2], content_html: '' }]); });
+    await waitFor(() => getBodyEntry('783')?.state === 'ready', { label: '通知空正文归 ready' });
+    assert.equal(card(783).querySelector('.notif-body-text .hydrate-placeholder').textContent, '暂无正文');
+    assert.equal(card(783).querySelector('.hydrate-retry'), null);
+  } finally {
+    for (const batch of batches) batch.d.resolve([]);
+    resetPlan();
+  }
 });

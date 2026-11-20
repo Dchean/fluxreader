@@ -7,7 +7,7 @@
 - 源码：`src/` 下 81 个 `.ts/.tsx`。样式只有三处：`src/styles/base.css`（主样式）、`src/styles/tokens.css`（令牌）、`src/index.css`（入口）。无 CSS Modules，类名为全局命名。
 - 令牌层：35 个 `--token` 全部有 `var()` 消费，无闲置令牌；令牌只定义在 `tokens.css` 与 `base.css`。
 - 控件层：雏形在 `src/components/primitives.tsx`：`Switch`、`SwitchInline`、`SwitchTrack`、`FluxDropdown`、`AiModeSelect`、`SettingCard`、`ConfirmDialog`、`ModalOverlay`。控件层非统一实现，改动时按模块处理。
-- 复合块：无统一层。复合结构分散在页面组件内：`Timeline` 的五种卡片（`ArticleCard`、`SocialCard`、`GalleryCard`、`PodcastCard`、`NotifCard`）与独立行项 `TimelineRowItem`、`Overlays` 的七个弹窗（`SearchModal`、`Lightbox`、`NewCategoryModal`、`AddFeedModal`、`EditFeedModal`、`RenameCategoryModal`、`CloseAskDialog`），其中 Add/Edit Feed 的摘要与翻译模式字段复用局部无状态呈现块、各自表单持有状态与提交；`SyncTab` 的分区、`PlayerBar` 的全屏覆盖层。
+- 复合块：无统一层。复合结构分散在页面组件内：`Timeline` 的五种卡片（`ArticleCard`、`SocialCard`、`GalleryCard`、`PodcastCard`、`NotifCard`）与独立行项 `TimelineRowItem`，其中社交/通知卡复用局部译文状态行 `CardTranslationStatus`，各自持有显隐状态、正文/译文渲染和事件；`Overlays` 的七个弹窗（`SearchModal`、`Lightbox`、`NewCategoryModal`、`AddFeedModal`、`EditFeedModal`、`RenameCategoryModal`、`CloseAskDialog`），其中 Add/Edit Feed 的摘要与翻译模式字段复用局部无状态呈现块、各自表单持有状态与提交；`SyncTab` 的分区、`PlayerBar` 的全屏覆盖层。
 - 阅读操作：`src/store/selectors.ts` 的 `selectReaderFulltextAction` 是 Reader 工具栏和文章右键菜单共享的全文入口判据；入口资格、恢复/提取忙态与展示标签由该 selector 统一计算。
 
 ## 类名账目
@@ -20,7 +20,7 @@
 ## 组件清单
 
 - `src/App.tsx`：`App`、`ToastPill`
-- `src/components/Timeline.tsx`：`Timeline`；卡片 `ArticleCard`、`SocialCard`、`GalleryCard`、`PodcastCard`、`NotifCard`；行项 `TimelineRowItem`
+- `src/components/Timeline.tsx`：`Timeline`；卡片 `ArticleCard`、`SocialCard`、`GalleryCard`、`PodcastCard`、`NotifCard`；局部共享译文状态行 `CardTranslationStatus`；行项 `TimelineRowItem`
 - `src/components/Overlays.tsx`：`SearchModal`、`Lightbox`、`NewCategoryModal`、`AddFeedModal`、`EditFeedModal`、`RenameCategoryModal`、`CloseAskDialog` 及各 `*ModalBody`
 - `src/components/PlayerBar.tsx`：`PlayerBar`、`PlayerFullOverlay`
 - `src/components/primitives.tsx`：见"控件层"

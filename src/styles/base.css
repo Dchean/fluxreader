@@ -3784,59 +3784,16 @@ body.has-player-expanded .toast-layer {
   opacity: 0.45;
 }
 
-.social-text .hydrate-placeholder {
-  display: block;
-  min-height: 60px;
-  line-height: 1.55;
-}
-
-/* 社交卡正文水合失败的内联重试按钮：继承占位样式，弱化为文本链接观感 */
-.social-text .hydrate-retry {
-  display: block;
-  min-height: 60px;
-  line-height: 1.55;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  opacity: 0.6;
-  cursor: pointer;
-  text-align: left;
-  text-decoration: underline;
-}
-
-/* TASK-114 X1：NotifCard 水合三态同形接入（占位/重试与社交卡同一套 JSX 形态），
-   样式镜像上两条 .social-text 规则；新增独立规则而非扩选器，保持既有选择器
-   字节不动（t100-c26 锁定 .hydrate-placeholder {） */
-.notif-card .hydrate-placeholder {
-  display: block;
-  min-height: 60px;
-  line-height: 1.55;
-}
-
-.notif-card .hydrate-retry {
-  display: block;
-  min-height: 60px;
-  line-height: 1.55;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  opacity: 0.6;
-  cursor: pointer;
-  text-align: left;
-  text-decoration: underline;
-}
-
-/* Reader 实例的水合同形接入：与 .social-text / .notif-card 同一观感，
-   否则退回 UA 默认按钮且不继承用户字体设置 */
+.social-text .hydrate-placeholder,
+.notif-card .hydrate-placeholder,
 .reader-active-view .hydrate-placeholder {
   display: block;
   line-height: 1.55;
 }
 
+/* 三处正文水合重试共用文本链接观感，失败行的按钮覆盖仍在后面。 */
+.social-text .hydrate-retry,
+.notif-card .hydrate-retry,
 .reader-active-view .hydrate-retry {
   display: block;
   line-height: 1.55;
@@ -3849,6 +3806,14 @@ body.has-player-expanded .toast-layer {
   cursor: pointer;
   text-align: left;
   text-decoration: underline;
+}
+
+/* 卡片保留水合占位高度；Reader 按正文流自然布局，不继承此高度。 */
+.social-text .hydrate-placeholder,
+.notif-card .hydrate-placeholder,
+.social-text .hydrate-retry,
+.notif-card .hydrate-retry {
+  min-height: 60px;
 }
 
 .hydrate-failure {
