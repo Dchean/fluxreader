@@ -17,6 +17,7 @@
 | 查已知缺口或什么没验证 | [当前缺口](roadmap.md) | 对应主题篇的"验证边界" |
 | 改前端组件、类名或令牌 | [前端结构台账](frontend.md) | [架构](architecture.md) 的前端结构与数据流、[契约单点](contracts.md) |
 | 查历史决定为什么这么做 | [.agents/notes/](../.agents/notes/) | 该 Note 的 Alternatives 与 Consequences |
+| 启用三层编排或交接总控 | [三层编排](../AGENTS.md#三层编排) | [审计与证伪](maintenance.md#2-审计与证伪) 的登记分工 |
 | 接手审计或修复基线 | [审计记录](audits.md) | 该轮的审计报告与证据位置 |
 
 ## 文档清单
@@ -25,17 +26,17 @@
 | --- | --- | --- | --- | --- |
 | [架构](architecture.md) | 模块与依赖方向、数据库归属、同步与本地同步边界、前端数据流、并发与写预留 | `lib.rs`、`commands/`、`db/`、`sync/`、`local_sync/`、`src/store/` | 模块边界、依赖方向、锁序或数据归属变化 | 2026-11-19（基线 30cfd65） |
 | [契约单点](contracts.md) | 每类事实的唯一出处、消费者、同步面与锁定方式 | 各行的"唯一出处"列 | 新增或搬迁契约、改变消费者或同步面 | 2026-11-19（基线 30cfd65） |
-| [维护与文档纪律](maintenance.md) | 证据标准、审计与证伪、变更流程、冲突处置、写作纪律、门禁 | `tools/docs-check.mjs` | 流程或门禁变化 | 2026-11-19（基线 30cfd65） |
+| [维护与文档纪律](maintenance.md) | 证据标准、审计与证伪、变更流程、冲突处置、写作纪律、门禁 | `tools/docs-check.mjs` | 流程或门禁变化 | 2026-11-20（基线 8fe8a5e；审计登记分工） |
 | [开发与门禁](development.md) | 本地环境、脚本与 CI job 对应、测试分层、证据纪律、常见故障 | `package.json`、`.github/workflows/ci.yml`、`tmp/rust-env/` | 脚本、CI、测试分层或环境变化 | 2026-11-19（基线 30cfd65） |
 | [同步兼容矩阵](sync-compat-matrix.md) | GR/Fever/WebDAV 的能力差异、冲突政策、真实服务端证据与边界 | `sync/conflict_policy.rs`、`greader.rs`、`fever.rs`、`sync/`、`local_sync/` | 协议实现、冲突政策或服务端证据变化 | 2026-11-19（基线 30cfd65；真实服务端实测 2026-11-07 见本篇） |
 | [性能基线](performance.md) | 判定线、测量纪律、10k/50k 基线与查询/封面/画廊/图片代理预算 | `scheduler.rs`、`db/articles.rs`、`commands/settings.rs`、`src/lib/imageProxy.ts` | 预算、索引、容量口径或方法与基线变化 | 2026-11-19（基线 30cfd65） |
 | [备份与恢复](backup.md) | 便携 v4、WebDAV 持续同步、本机故障快照与恢复边界 | `local_sync/backup.rs`、`db/backup.rs` | 备份格式、恢复语义或生命周期变化 | 2026-11-19（基线 30cfd65） |
 | [发布流程](release.md) | 分支、CI、tag 附注与 Release 正文的关系 | `.github/workflows/release.yml`、`tools/release/` | 发布步骤、tag 或资产策略变化 | 2026-11-19（基线 30cfd65） |
 | [当前缺口](roadmap.md) | 仍成立的开放缺口、接受的边界与未验收范围 | 各条目的主题篇 | 缺口关闭、新增或范围变化 | 2026-11-19（基线 30cfd65） |
-| [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-19（基线 30cfd65） |
+| [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-20（基线 8fe8a5e；纯规则登记） |
 | [前端结构台账](frontend.md) | 组件清单、类名账目、令牌使用与动态拼接契约、控件层现状 | `src/components/`、`src/store/`、`src/styles/`、`src/lib/syncPill.ts` | 增删组件、类名体系或令牌变化 | 2026-11-19（基线 30cfd65；类计数口径见本篇） |
 
-本页（索引）最近核对：2026-11-19（本批）；各篇「最近核对」的填写口径见 [维护与文档纪律](maintenance.md) 第 7 节。
+本页（索引）最近核对：2026-11-20（基线 8fe8a5e；三层编排路由与审计登记）；各篇「最近核对」的填写口径见 [维护与文档纪律](maintenance.md) 第 7 节。
 
 ## 决定记录
 
