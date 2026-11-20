@@ -3,7 +3,7 @@ import { resetCoverReports } from '../../lib/coverImage';
 // Note: 会话成员固定、属性按 ID 回读 — 见 docs/architecture.md
 import type { StateCreator } from 'zustand';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
-import type { ArticleListArgs } from '../../lib/api';
+import type { ArticleMemberQueryArgs } from '../../lib/api';
 import { clearLibraryReadingPositions, peekReturnAnchor } from '../../lib/readingPosition';
 import { clearLibraryBodyCache } from '../bodyCache';
 import { invalidateAiRequestsForLibraryRestore } from './ai';
@@ -48,7 +48,7 @@ function navigationOf(s: AppState): ReadingNavigation {
 }
 
 /** 日期只在会话建立时捕获。只传毫秒边界，不让服务器在续页时重算“今天”。 */
-function memberArgs(query: ReadingQuery): ArticleListArgs {
+function memberArgs(query: ReadingQuery): ArticleMemberQueryArgs {
   return {
     ...QueryScope.args(query.scope, query.sort, query.layout),
     ...QueryScope.viewFilter(query.view),

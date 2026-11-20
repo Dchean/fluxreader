@@ -200,17 +200,9 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
           label: a.title,
           hint: (sourceIndex.get(a.feedId) ?? feedIndex.get(a.feedId))?.feed.name ?? '',
           run: () => {
-            /* 文章：锚定打开——计算该文章在当前筛选下的绝对位置，从目标页
-               加载列表（而非从头拉 500 篇），正确定位到很老的文章。
-
-               【TASK-052 行为变化】顺序是「先导航、后锚定」。此前是先 anchorToArticle
-               再前置导航；改造前分页/锚定的查询都不带订阅范围，两者结果相同，故顺序
-               无关痛痒。per-scope 游标落地后 anchorToArticle 改为按**调用时**的
-               activeFeedFilter / activeViewFilter / timelineFilter 构造查询（与
-               loadMoreArticles 同一口径 scopeQueryArgs），于是旧顺序会让锚定按**旧
-               范围**取位置——位置与该位置的列表不在同一筛选口径下，锚定结果错位。
-               现改为按**新范围**取位置，与列表口径一致。
-               归一动作由 anchorScopeNav 给出（纯函数，回归网直接断言顺序）。 */
+            /* 搜索结果可在当前范围/视图之外。先归一导航，再建立目标范围的
+               ReadingSession；会话外的文章由 Reader 注入显示，不进入列表成员或进度。
+               步骤顺序由 anchorScopeNav 给出（纯函数，回归网直接断言）。 */
             const st = useAppStore.getState();
             for (const step of anchorScopeNav(st)) {
               if (step.action === 'selectFeed') st.selectFeed(step.arg ?? 'all');

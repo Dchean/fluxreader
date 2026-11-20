@@ -38,7 +38,7 @@ export function selectArticleSource(s: Pick<AppState, 'feedIndex' | 'sourceIndex
     : s.sourceIndex.get(feedId);
 }
 
-/** 视图筛选语义：与列表/树角标共用同一判定，保证数字与内容一致 */
+/** 视图筛选的本地文章属性判定。 */
 export function matchesViewFilter(entry: ArticleEntry, view: ViewFilterType, now: number): boolean {
   switch (view) {
     case 'today': return isSameLocalDay(entry.publishedAt, now);
@@ -286,9 +286,8 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
   }
 
   /* 时间流排序：真实客户端按时间戳降序/升序，不依赖数据插入顺序。
-     TASK-117：并列 publishedAt 由 id 决胜——与后端 ORDER BY a.published_at, a.id
-     同向同口径（keyset 续拉锚依赖**全序**：同秒文章的服务器顺序由 id 定，
-     本地排序若不补同一决胜，续拉追加会与已加载窗口交错乱序）。
+     并列 publishedAt 由 id 决胜，与后端 ORDER BY a.published_at, a.id
+     同向同口径；本地排序补足同一决胜，保持同秒文章的稳定全序。
      id 是后端行 id 的十进制字符串，数值比较与 SQLite 的 id 序一致；
      mock 的非数字 id 落回 0（保持既有相对顺序，不受影响）。 */
   const dir = s.timelineSort === 'newest' ? -1 : 1;

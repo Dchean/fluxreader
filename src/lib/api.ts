@@ -438,7 +438,8 @@ export interface UpdateCheckResult {
   url: string;
 }
 
-export interface ArticleListArgs {
+/** 捕获阅读会话的成员条件；字段名与 IPC args 对象一致。 */
+export interface ArticleMemberQueryArgs {
   feed_id?: number | null;
   folder_id?: number | null;
   only_unread?: boolean;
@@ -448,20 +449,8 @@ export interface ArticleListArgs {
   since_ms?: number;
   until_ms?: number;
   newest_first?: boolean;
-  limit?: number;
-  offset?: number;
-  /** 附带正文 HTML（社交/通知布局直接渲染，免逐篇水合） */
-  with_content?: boolean;
-  /** 布局过滤（TASK-094 / REQ-107，可选）：后端按 feed 级覆盖 → 分类兜底过滤，
-      列表分页因此带布局维度。省略 = 不过滤。 */
+  /** 布局过滤：后端按订阅源覆盖 → 分类兜底，省略则不按布局过滤。 */
   layout?: string;
-  /** TASK-117：keyset 续拉游标锚——上一页最后一行的 (published_at 原文, id)。
-      两者成对给出才生效（后端缺一回落 OFFSET 既有语义）；last_published 必须
-      原样透传后端返回的 published_at 字符串（RFC3339），不得本地重格式化——
-      后端谓词与排序共用同一字符串比较口径，重格式化会让游标错位。
-      省略 = 走既有 OFFSET 语义（首屏/锚定路径不带本键）。 */
-  last_published?: string | null;
-  last_id?: number | null;
 }
 
 /** OPT-008B R2（N1）：读写入回执行——读闭包真实翻转的条目（含同 URL 副本）。 */
@@ -525,7 +514,7 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('list_article_sources') as FeedRow[]) : null;
   },
-  async listArticleMemberIds(args: ArticleListArgs): Promise<number[] | null> {
+  async listArticleMemberIds(args: ArticleMemberQueryArgs): Promise<number[] | null> {
     const inv = await getInvoke();
     return inv ? (await inv('list_article_member_ids', { args }) as number[]) : null;
   },
@@ -605,15 +594,6 @@ export const api = {
   async updateFeedLayout(id: number, layout: string): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('update_feed_layout', { id, layout }) as null) : null;
-  },
-  async listArticles(args: ArticleListArgs): Promise<ArticleListItemRow[] | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('list_articles', { args }) as ArticleListItemRow[]) : null;
-  },
-  /** 计算某篇文章在当前筛选排序下的绝对位置（0 起）——搜索/深层打开文章的双向分页锚定 */
-  async articleIndex(args: ArticleListArgs, articleId: number): Promise<number | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('article_index', { args, articleId }) as number | null) : null;
   },
   /** 文章搜索：LIKE 子串匹配（标题/正文/摘要/AI 摘要/翻译，词间 AND）。
    *  LIKE 是主判据（src-tauri db/articles.rs 的 `search_articles`）；`db/schema.sql` 的

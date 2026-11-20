@@ -157,17 +157,8 @@ export interface AppErrorEntry {
   at: number;
 }
 
-/** TASK-117：per-scope keyset 分页游标（articlesCursor 的值类型）。
- *  - lastPublished：已加载窗口最后一行的 published_at **原文**（RFC3339 字符串，
- *    后端返回什么就存什么——后端谓词与排序共用同一字符串比较口径，任何本地
- *    重格式化都会让游标错位）；空窗口为 null（无锚，续拉回落首页语义）。
- *  - lastId：最后一行的后端行 id（INTEGER PRIMARY KEY），并列 published_at 的
- *    决胜键；空窗口为 null。
- *  - loaded：已加载总行数。不再承担分页语义（OFFSET 已废除），仅供 exhausted
- *    镜像（articlesLimit）与视图缓存元数据（ViewEntriesSnapshot）使用。 */
+/** 视图缓存的成员加载进度；当前会话的续页进度归 ReadingSession。 */
 export interface ArticlesCursorState {
-  lastPublished: string | null;
-  lastId: number | null;
   loaded: number;
 }
 
@@ -398,10 +389,7 @@ export interface AppState {
       内容刷新路径（feeds-updated / 手动同步 / 单源刷新）传入，落地时发出保位
       信号；导航路径（selectFeed/selectView/selectLayout 等）不传，不触发回位。 */
   reloadFromBackend: (opts?: { keepReadingPosition?: boolean }) => Promise<void>;
-  /** 当前视图的分页游标镜像（= 当前范围已从后端加载的文章总数）。每次 reload /
-      视图切换 / 范围切换时，按该范围自己的 per-scope 游标恢复（TASK-052）。
-      TASK-117：仅作 loaded 计数镜像（供 mock 兜底与调试观察），分页续拉不再
-      消费它——续拉游标见 articlesCursor。 */
+  /** 当前视图的加载进度镜像，亦供 mock 写入视图缓存时兜底。 */
   articlesLimit: number;
   /** 既有视图缓存的进度镜像；新会话续页只消费 readingSession 的固定成员与 loadedCount。 */
   articlesCursor: Record<string, ArticlesCursorState>;
@@ -453,11 +441,6 @@ export interface AppState {
   selectLayout: (layout: ContentLayoutType) => void;
   selectView: (view: ViewFilterType) => void;
   selectFeed: (feedId: string) => void;
-  /** 同步恢复分页游标（per-scope 游标表的唯一镜像写入点）：写 articlesLimit /
-      articlesCursor / articlesExhausted / articlesLoading 四处，entries 由调用方
-      保证与该游标匹配（缓存恢复路径）。
-      TASK-117：第二参从计数改为完整 keyset 游标（ArticlesCursorState）。 */
-  applyArticlesCursor: (scopeKey: string, cursor: ArticlesCursorState, exhausted: boolean) => void;
   toggleTimelineFilter: () => void;
   toggleTimelineSort: () => void;
   markCurrentViewAllRead: () => void;

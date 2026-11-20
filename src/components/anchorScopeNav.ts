@@ -6,16 +6,10 @@
    非组件函数会触发 oxlint 的 react/only-export-components（Fast Refresh 约束），
    故放到本文件，组件与断言共用同一份定义，避免「断言一套、组件一套」。
 
-   【TASK-052 行为变化】为什么必须先归一、再锚定：
-   anchorToArticle 按**调用时**的 activeFeedFilter / activeViewFilter /
-   timelineFilter 构造 article_index 与 list_articles 的查询参数（与
-   loadMoreArticles 共用 internals.scopeQueryArgs，per-scope 口径）。因此前置
-   导航若在锚定**之后**执行，锚定算出的「绝对位置」是**旧范围**下的位置，而它随后
-   加载的那一页要放进新范围的列表 —— 位置与该位置的列表不同口径，锚定错位；更糟的
-   情形是目标文章根本不在旧范围的筛选结果内（article_index 返回 null），锚定静默失败、
-   文章打不开。
-   改造前分页/锚定查询都不带范围，两种顺序结果相同，所以旧顺序看不出问题；是
-   per-scope 让这个顺序开始出错，故本修正属于「完成口径改造」而非新功能。
+   搜索结果可以来自当前范围/视图之外。打开前先将导航归一到可捕获目标的阅读范围，
+   再建立或复用当前 ReadingSession；若目标不属于捕获成员，Reader 仍可按文章 ID
+   注入详情行而不改变会话列表或加载进度。导航若放在打开之后，后续新会话会替换
+   目标上下文，破坏搜索打开动作与当前列表之间的关系。
    ============================================================ */
 
 import type { ViewFilterType } from '../types';

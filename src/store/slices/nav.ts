@@ -20,7 +20,6 @@ export type NavSlice = Pick<
   | 'selectLayout'
   | 'selectView'
   | 'selectFeed'
-  | 'applyArticlesCursor'
   | 'toggleTimelineFilter'
   | 'toggleTimelineSort'
   | 'markCurrentViewAllRead'
@@ -181,10 +180,6 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     set({ activeFeedFilter: feedId, readingSession: invalidatedSession(keepReadingPosition), openedReadIds: {}, articlesLoading: false, articlesExhausted: false });
     rebuildReadingSession(keepReadingPosition);
   },
-  applyArticlesCursor: (scopeKey, cursor, exhausted) => set((s) => ({
-    articlesLimit: cursor.loaded, articlesCursor: { ...s.articlesCursor, [scopeKey]: cursor },
-    articlesExhausted: exhausted, articlesLoading: false,
-  })),
   toggleTimelineFilter: () => {
     set((s) => ({ timelineFilter: s.timelineFilter === 'all' ? 'unread' : 'all',
       readingSession: null, openedReadIds: {}, articlesLoading: false, articlesExhausted: false }));

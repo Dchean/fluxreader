@@ -1,6 +1,6 @@
 // OPT-008B R2（主控清单②）：搜索跨布局结果的**真实组件**打开/返回/续页回归。
 //
-// 为什么必须挂组件：R1 的搜索回退（anchorToArticle 在 article_index=null 时按 id
+// 为什么必须挂组件：搜索回退（anchorToArticle 在目标不属于当前 ReadingSession 时按 id
 // 取详情并把视图行注入 entries + 置 activeArticleId）此前只有 store 层断言
 // （dedup-display (E)：get_article 调用 + entries.some + activeArticleId）——
 // 「数组里有条目 + activeID 正确」不能证明真实界面呈现：Reader 是否真渲染该行、
@@ -14,11 +14,10 @@
 //      （布局过滤仍是查询不变量）；
 //   6. Escape 返回：Reader 回到空态；
 //   7. 续页边界（第二例）：注入行在 entries 期间，自动/显式 loadMoreArticles 的
-//      在途响应照常落地并推进游标——注入不得动游标/窗口（deepEqual 不变量）。
+//      在途响应照常落地并推进成员进度——注入不得动会话/进度（deepEqual 不变量）。
 //
-// 后端 mock 只实现数据面（list/search/article_index 的真实口径：搜索跨布局命中、
-// 位置查询按布局过滤返回 null），不替身任何应用逻辑。
-// 卫生：本文件的 plan 覆写（list_articles/article_index/search_articles）在用例
+// 后端 mock 只实现数据面（成员查询按布局过滤，搜索可以返回跨布局结果），不替身任何应用逻辑。
+// 卫生：本文件的 plan 覆写（成员/属性查询与搜索）在用例
 // 结束（含断言失败）时经 finally resetPlan() 复原，避免跨用例模块级泄漏。
 
 import assert from 'node:assert/strict';
@@ -187,8 +186,8 @@ componentTest('OPT-008B 搜索跨布局结果：真实搜索面板点击打开�
 });
 
 /* ============================================================
-用例 2：跨布局注入期间，自动续页的在途响应照常落地并推进游标；
-注入行不污染游标/可见集合（deepEqual 精确不变量）。
+用例 2：跨布局注入期间，自动加载下一页的在途响应照常落地并推进会话；
+注入行不污染会话进度/可见集合（deepEqual 精确不变量）。
 ============================================================ */
 componentTest('ReadingSession 跨布局注入与在途续页：注入不改成员，已发ID页正常落地且保留Reader', { timeout: 40000 }, async () => {
   try {
@@ -215,19 +214,15 @@ componentTest('ReadingSession 跨布局注入与在途续页：注入不改成�
       published_at: new Date(base + 999999 * 60000).toISOString(),
     }));
 
-    /* 忠实分页 mock：首屏按 offset/limit；keyset 续页**两次请求各一个受控
-       deferred**——首次响应在锚定推进查询代次后到达（被代际守卫丢弃），
-       articlesLoading 复位触发自动重试（第二次请求）落地推进。区分两者是
-       本用例的取证核心（不声称「原响应照常落地」）。
-       （jsdom 无布局：Timeline 的 filledViewport 恒 false，装载后会真实触发
-       自动续拉——这正是生产路径的再一档消费。） */
+    /* 暂缓成员页的属性响应，等 Reader 打开会话外的文章再放行。
+       jsdom 无布局：Timeline 的 filledViewport 为 false，首屏后用真实组件的自动续页路径。 */
     const firstPage2 = deferred();
 
-    let keysetCalls = 0;
+    let memberPageCalls = 0;
     setPlan({
       get_article_updates: ({ ids }) => {
         if (ids.length === 1 && ids[0] === 101) {
-          keysetCalls += 1;
+          memberPageCalls += 1;
           return firstPage2.promise;
         }
         return Promise.resolve({ items: rows.filter(row => ids.includes(row.id)), missing_ids: [] });
@@ -240,16 +235,16 @@ componentTest('ReadingSession 跨布局注入与在途续页：注入不改成�
     const { default: App } = await import('../../src/App.tsx');
     const entry = await mount(createElement(App));
 
-    // 首屏 500 行装载后，自动续页（keyset 锚 = 102）已在途（**首次**请求挂起）。
+    // 首屏 500 个成员装载后，自动属性续页已在途（**首次**请求挂起）。
     await waitFor(
       () => useAppStore.getState().entries.length === 500 && useAppStore.getState().articlesLoading === true,
       { label: '首屏 500 行装载 + 自动续页在途', timeout: 10000 },
     );
     const cursorBeforeOpen = useAppStore.getState().articlesCursor['article|all'];
     assert.deepEqual(
-      { lastId: cursorBeforeOpen?.lastId, loaded: cursorBeforeOpen?.loaded },
-      { lastId: null, loaded: 500 },
-      '首屏只消费500个会话成员，属性回读不以时间游标续筛',
+      { loaded: cursorBeforeOpen?.loaded, session: useAppStore.getState().readingSession.loadedCount },
+      { loaded: 500, session: 500 },
+      '首屏进度与固定成员会话一致',
     );
 
     // ---- 续页在途期间：跨布局打开（与搜索结果项同一 action）注入行 ----
@@ -259,27 +254,24 @@ componentTest('ReadingSession 跨布局注入与在途续页：注入不改成�
     assert.equal(st.activeArticleId, '9001', '跨布局行应被打开');
     assert.ok(st.entries.some((e) => e.id === '9001'), '详情行注入 entries（Reader 可渲染）');
     assert.deepEqual(st.articlesCursor['article|all'], cursorBeforeOpen,
-      '回退注入不得改动分页游标（不污染查询窗口）');
+      '回退注入不得改动加载进度（不污染查询窗口）');
     assert.equal(st.entries.length, 501, 'entries = 首屏 500 + 注入 1（不整体替换窗口）');
     assert.ok(!selectVisibleEntries(st).some((e) => e.id === '9001'),
       '注入行不进入当前布局的可见集合（布局过滤不变量）');
     assert.equal(entry.container.querySelector('.reader-article-title')?.textContent, '跨布局社交卡 Z',
       'Reader 在真实挂载树上渲染注入行（同用例 1 的 DOM 取证）');
-    assert.equal(keysetCalls, 1, '固定成员查询未改变，搜索注入不重复发续页');
+    assert.equal(memberPageCalls, 1, '搜索注入不重复发起同一固定成员页');
 
-    /* ---- 放行**首次**续页响应：锚定推进了该键首屏代次 → 响应属于旧查询实例，
-       被代际守卫丢弃（不动游标、不接入行）。机制依据：anchorToArticle 入口
-       beginGlobalQuery；落地判据 currentFirstPageSerial(queryKey) !== firstPageGen。 */
+    // 既有会话的会话外打开不推进页代次；放行原待决请求，按固定成员追加。
     const page2Rows = rowsForLayoutSorted(rows, 'article').slice(500); // [id=101]
     assert.equal(page2Rows.length, 1, '续页恰 1 行（前置）');
     await act(async () => { firstPage2.resolve({ items: page2Rows, missing_ids: [] }); });
     await flush(3);
     st = useAppStore.getState();
-    const cursorAfter = st.articlesCursor['article|all'];
     assert.deepEqual(
-      { lastId: cursorAfter?.lastId, loaded: cursorAfter?.loaded },
-      { lastId: null, loaded: 501 },
-      '自动重试的续页响应落地并推进游标到新页末行（id=101, loaded=501）——注入行未被当作锚',
+      { loaded: st.articlesCursor['article|all']?.loaded, session: st.readingSession.loadedCount },
+      { loaded: 501, session: 501 },
+      '在途属性页追加捕获成员 id=101，注入行未改变进度',
     );
     assert.equal(useAppStore.getState().readingSession.memberIds[500], '101', '续页进度对应捕获的最后成员');
     assert.ok(st.entries.some((e) => e.id === '101'), '续页行真实追加进 entries');

@@ -5,6 +5,7 @@
 ## 本地环境
 
 - Windows x64；Node 版本由 `.node-version` 固定（当前 24），CI 用 `actions/setup-node@v4` 的 `node-version-file` 读取同一文件。不要用与 `.node-version` 不同的 Node 大版本直接判定门禁结果。
+- TypeScript `6.0.3` 由 lockfile 固定，`tsconfig.json`、`tsconfig.app.json`、`tsconfig.node.json` 与 `tsconfig.test.json` 显式设 `strict: true`；该选项固定现行严格默认值，不额外打开其它检查选项。
 - 安装依赖与脚本：`npm ci`（或 `npm install`）后使用 `package.json` 中的 `lint`、`build`、`test:frontend`、`test:components`、`test:ui-layout`。`test:ui-layout` 需要已装好的依赖：`node_modules` 为空时报「缺少 Vite 入口」，先跑 `npm ci`。
 - Edge/Chrome headless 由 `npm run test:ui-layout` 自动查找（`tools/ui-layout-regression.mjs` 的 `findBrowser` 内置常见安装位置，可用 `EDGE_PATH` 或 `CHROME_PATH` 覆盖）；找不到时报「未找到 Edge/Chrome」。
 - Rust 使用工作区隔离环境 `tmp/rust-env/`（rustc/cargo `1.98.1` + clang-cl/lld-link），入口 `activate-rust-env.ps1`；它只服务当前工作区，不外推到其他机器。

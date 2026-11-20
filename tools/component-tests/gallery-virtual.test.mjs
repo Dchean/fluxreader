@@ -318,14 +318,13 @@ componentTest('OPT-017C 画廊加载更多：追加批次可渲染可交互、�
     stubScrollHeight(scroller, 200000);
     /* 可滚动测量就绪后再放行续拉：挂载期容器不可滚动（scrollHeight 未替身）时
        自动续拉会先拉一页，使「首批 60 → 触底追加 120」的判别窗口消失。 */
-    const anchorRow = firstBatch[firstBatch.length - 1];
     await act(async () => {
       useAppStore.setState({
         readingSession: { ...createReadingSession(-1, captureReadingQuery({ layout: 'image', view: 'all', scope: 'all', filter: 'unread', sort: 'newest' }), pool.map(row => String(row.id))), ready: true, loadedCount: 60 },
         articlesExhausted: false,
         articlesLimit: 60,
         articlesCursor: {
-          'image|all': { loaded: 60, lastPublished: anchorRow.published_at, lastId: anchorRow.id },
+          'image|all': { loaded: 60 },
         },
       });
     });
