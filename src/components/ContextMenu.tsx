@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { selectArticleBody, useAppStore } from '../store';
+import { useShallow } from 'zustand/react/shallow';
+import { selectArticleBody, selectReaderFulltextAction, useAppStore } from '../store';
 import { Icons } from './icons';
 import { openExternalWithFeedback } from '../lib/external';
 import { refreshAllLabel } from '../lib/copyPolicy';
@@ -26,8 +27,17 @@ interface MenuItem {
   onSelect: () => void;
 }
 
+type MenuEntry = MenuItem | { fulltextArticleId: string };
+
 export function ContextMenuHost() {
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null);
+  const fulltextArticleId = menu?.items.find((it) => 'fulltextArticleId' in it)?.fulltextArticleId;
+  // 全文请求可在菜单打开期间完成；只更新该项，不重建菜单或重置焦点。
+  const fulltextAction = useAppStore(useShallow((s) =>
+    fulltextArticleId && s.activeArticleId === fulltextArticleId
+      ? selectReaderFulltextAction(selectArticleBody(s, fulltextArticleId), s).action
+      : null,
+  ));
   const menuRef = useRef<HTMLDivElement>(null);
   /* 打开前持有焦点的元素：关闭时还原（键盘用户回到触发处，不落 body）。 */
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -114,9 +124,12 @@ export function ContextMenuHost() {
 
   if (!menu) return null;
 
+  const items = menu.items.map((it): MenuItem | null => 'fulltextArticleId' in it
+    ? fulltextAction && { ...fulltextAction, icon: <Icons.doc />, onSelect: () => useAppStore.getState().toggleReaderFulltext() }
+    : it);
   /* 位置钳制：菜单不超出视口右下角 */
   const estW = 200;
-  const estH = menu.items.length * 34 + 12;
+  const estH = items.filter(Boolean).length * 34 + 12;
   const style: CSSProperties = {
     position: 'fixed',
     left: Math.min(menu.x, window.innerWidth - estW - 8),
@@ -160,7 +173,7 @@ export function ContextMenuHost() {
         items[next]?.focus({ preventScroll: true });
       }}
     >
-      {menu.items.map((it, i) => (
+      {items.map((it, i) => it && (
         <div
           key={i}
           className={`ctx-menu-item ${it.danger ? 'danger' : ''} ${it.disabled ? 'disabled' : ''}`}
@@ -194,7 +207,7 @@ export function ContextMenuHost() {
    菜单构建：根据右键目标类型生成菜单项
    ============================================================ */
 
-function buildMenuFor(target: HTMLElement): MenuItem[] {
+function buildMenuFor(target: HTMLElement): MenuEntry[] {
   const st = useAppStore.getState();
   // 从右键点向上找最近的 data-ctx 标记元素
   const el = target.closest<HTMLElement>('[data-ctx]');
@@ -255,7 +268,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
     }
 
     case 'reader': {
-      const items: MenuItem[] = [];
+      const items: MenuEntry[] = [];
       // 有选中文字 → 优先提供「复制」
       const sel = window.getSelection()?.toString() ?? '';
       if (sel) {
@@ -277,13 +290,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           icon: art.isRead ? <Icons.unreadDot /> : <Icons.check />,
           onSelect: () => st.toggleCurrentReadStatus(),
         });
-        const body = selectArticleBody(st, art.id);
-        const ready = body.state === 'ready' || (body.state === 'cleared' && body.content !== '');
-        if (ready && (!body.fulltextExtracted || (body.rawContent && body.rawContent !== body.content))) items.push({
-          label: !body.fulltextExtracted ? '提取全文' : st.showFulltext ? 'RSS 原文' : '显示全文',
-          icon: <Icons.doc />,
-          onSelect: () => st.toggleReaderFulltext(),
-        });
+        items.push({ fulltextArticleId: art.id });
         items.push({
           label: st.isShowingTranslatedProse ? '显示原文' : '翻译',
           icon: <Icons.globe />,

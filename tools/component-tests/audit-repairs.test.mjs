@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { componentTest, mount, flush, waitFor, resetStore, getBodyEntry, useAppStore } from './harness.mjs';
-import { installBackend, seedFromRows, mkRow, setPlan, setCurrentRows, deferred, invokeCalls } from './fixtures.mjs';
+import { installBackend, seedFromRows, mkRow, setPlan, resetPlan, setCurrentRows, deferred, invokeCalls } from './fixtures.mjs';
 
 componentTest('NF2 RSS 回切只在独立原文仍在缓存时出现；重开仅有全文时隐藏工具栏/菜单入口', async () => {
   installBackend(); resetStore();
@@ -74,3 +74,100 @@ componentTest('AF2 已提取文章loading时工具栏/菜单不露提取；其�
   assert.ok(entry.container.querySelector('.article-prose')?.textContent.includes('新提取全文'), '实际DOM保持新全文');
   assert.equal(fulltextButtons().length, 0, '没有独立RSS仍不露切换');
 });
+
+componentTest('X-20 全文入口：提取期间菜单显示忙态、禁用并跟随请求完成', { timeout: 15000 }, async () => {
+  installBackend(); resetStore(); resetPlan();
+  seedFromRows([mkRow({ id: 88201, content_id: 62, content_revision: 1, content_html: '<p>可提取正文</p>' })]);
+  const extraction = deferred();
+  setPlan({ extract_fulltext: () => extraction.promise });
+  const { createElement, act } = await import('react');
+  const { Reader } = await import('../../src/components/Reader.tsx');
+  const { ContextMenuHost } = await import('../../src/components/ContextMenu.tsx');
+  const entry = await mount(createElement('div', null, createElement(Reader), createElement(ContextMenuHost)));
+  const toolbarAction = () => [...entry.container.querySelectorAll('.toggle-action-btn')]
+    .find((node) => /从原文网页提取全文/.test(node.getAttribute('title') ?? '')
+      || /提取全文|RSS 原文|显示全文|正在提取/.test(node.textContent));
+  const menuAction = () => [...document.querySelectorAll('.ctx-menu [role="menuitem"]')]
+    .find((node) => /提取全文|RSS 原文|显示全文|正在提取/.test(node.textContent));
+  const openReaderMenu = async () => {
+    await act(async () => {
+      entry.container.querySelector('[data-ctx="reader"]').dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    await flush(2);
+  };
+  const closeMenu = async () => {
+    await act(async () => {
+      (document.activeElement ?? document.body).dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    });
+    await flush(1);
+  };
+
+  try {
+    await act(async () => { useAppStore.getState().selectArticle('88201'); });
+    await waitFor(() => getBodyEntry('88201')?.state === 'ready', { label: '提取入口正文就绪' });
+    assert.equal(toolbarAction()?.textContent.trim(), '提取全文', 'Reader 就绪时展示提取入口');
+    await openReaderMenu();
+    assert.equal(menuAction()?.textContent.trim(), toolbarAction()?.textContent.trim(),
+      '右键菜单和 Reader 呈现相同全文动作');
+    await closeMenu();
+
+    await act(async () => { useAppStore.getState().extractCurrentArticle(); });
+    await waitFor(() => getBodyEntry('88201')?.fulltextRequest !== undefined, { label: '全文请求进入在途' });
+    await flush(2);
+    assert.ok(toolbarAction(), '全文请求在途时 Reader 入口仍显示');
+    assert.equal(toolbarAction()?.disabled, true, 'Reader 在途入口禁用');
+    await openReaderMenu();
+    assert.equal(menuAction()?.textContent.trim(), toolbarAction()?.textContent.trim(),
+      '全文请求在途时菜单保留同一动作文案');
+    assert.equal(menuAction()?.getAttribute('aria-disabled'), 'true', '菜单在途入口禁用');
+    await act(async () => { menuAction()?.click(); });
+    assert.ok(document.querySelector('.ctx-menu'), '点击禁用的菜单项不得激活或关闭菜单');
+    assert.equal(invokeCalls.filter(({ cmd }) => cmd === 'extract_fulltext').length, 1);
+  } finally {
+    await act(async () => {
+      extraction.resolve({ html: '<p>提取后的完整正文</p>', degraded: false, contentId: 63, contentRevision: 1 });
+    });
+    await flush(2);
+    resetPlan();
+  }
+  await waitFor(() => getBodyEntry('88201')?.fulltextExtracted, { label: '在途全文请求完成' });
+  assert.equal(menuAction()?.textContent.trim(), 'RSS 原文', '菜单仍打开时随提取完成更新为回切动作');
+  assert.equal(menuAction()?.getAttribute('aria-disabled'), null, '提取完成后可回切');
+});
+
+for (const scenario of ['本机空正文', '非 Tauri 模式', '资料库恢复中']) {
+  componentTest(`X-20 全文入口：${scenario}与 Reader 同口径`, { timeout: 15000 }, async () => {
+  installBackend(); resetStore(); resetPlan();
+  const isEmpty = scenario === '本机空正文';
+  const isRestoring = scenario === '资料库恢复中';
+  seedFromRows([mkRow({ id: 88202, content_id: 64, content_revision: 1, content_html: isEmpty ? null : '<p>已有正文</p>' })]);
+  const { createElement, act } = await import('react');
+  const { Reader } = await import('../../src/components/Reader.tsx');
+  const { ContextMenuHost } = await import('../../src/components/ContextMenu.tsx');
+  const entry = await mount(createElement('div', null, createElement(Reader), createElement(ContextMenuHost)));
+  const menuAction = () => [...document.querySelectorAll('.ctx-menu [role="menuitem"]')]
+    .find((node) => /提取全文|RSS 原文|显示全文/.test(node.textContent));
+  await act(async () => { useAppStore.getState().selectArticle('88202'); });
+  await waitFor(() => getBodyEntry('88202')?.state === 'ready', { label: '正文读取终态' });
+  assert.equal(getBodyEntry('88202').content, isEmpty ? '' : '<p>已有正文</p>');
+  await act(async () => {
+    if (isRestoring) useAppStore.setState({ libraryRestoreBusy: true });
+    if (scenario === '非 Tauri 模式') useAppStore.setState({ dataMode: 'mock' });
+    entry.container.querySelector('[data-ctx="reader"]').dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  const toolbarAction = [...entry.container.querySelectorAll('.toggle-action-btn')]
+    .find((node) => /提取全文|RSS 原文|显示全文/.test(node.textContent));
+  assert.ok(document.querySelector('.ctx-menu'), 'Reader 右键菜单确实打开');
+  if (isRestoring) {
+    assert.equal(toolbarAction?.disabled, true, '恢复中 Reader 全文入口仍显示但禁用');
+    assert.equal(menuAction()?.textContent.trim(), '提取全文', '恢复中菜单仍显示提取入口');
+    assert.equal(menuAction()?.getAttribute('aria-disabled'), 'true', '恢复中菜单禁用全文入口');
+  } else {
+    assert.ok(!toolbarAction, `${scenario}时 Reader 不提供全文入口`);
+    assert.ok(!menuAction(), `${scenario}时菜单不提供全文入口`);
+  }
+  });
+}

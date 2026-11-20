@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, selectArticleBody, selectAiProductState, selectAiCacheStatus, selectAiStatusInput, selectFeedConfig } from '../store';
+import { useAppStore, selectArticleBody, selectReaderFulltextAction, selectAiProductState, selectAiCacheStatus, selectAiStatusInput, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { handleArticleLinkClick, isHttpUrl, openExternalWithFeedback } from '../lib/external';
@@ -67,15 +67,13 @@ export function Reader() {
      字段值不变即命中缓存引用，只有记录真变才触发渲染。同 Sidebar.tsx 的既有约定：
      返回新引用的派生 selector 必须包 useShallow。 */
   const body = useAppStore(useShallow((s) => selectArticleBody(s, s.activeArticleId)));
-  // ready + 空正文是已查询到的本机事实；missing 仍只表示条目缺行。
-  const locallyMissingBody = dataMode === 'tauri' && body.state === 'ready' && !body.content.trim();
+  const { locallyMissingBody, action: fulltextAction } = selectReaderFulltextAction(body, { dataMode, showFulltext, libraryRestoreBusy });
   const hasOriginalUrl = isHttpUrl(art?.url);
   /* 文章之间切换、以及原文↔译文视图切换时，正文淡入一次（REQ-005） */
   const readerViewRef = useRef<HTMLDivElement>(null);
   useEnteringClass(readerViewRef, `${art?.id ?? ''}|${isShowingTranslatedProse}`, 'reader-entering');
   /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
      由 ReaderProse 按可见图片节点获取共享租约；正文缓存仍保留原 URL。 */
-  const canSwitchFulltext = !!body.rawContent && body.rawContent !== body.content;
   const baseHtml = showFulltext || !body.rawContent ? body.content : body.rawContent;
   /* 正文两路呈现（审计 F14 / OPT-012）：源码态展示的是**原始文本**（当前用户选择的
      RSS 原文/提取全文/已消毒译文，未经图片代理——显示代理 base64 会冒充源码），
@@ -299,10 +297,10 @@ export function Reader() {
                     </button>
                   </>
                 ) : null}
-                {dataMode === 'tauri' && !locallyMissingBody && (body.state === 'ready' || (body.state === 'cleared' && body.content !== '')) && (!body.fulltextExtracted || canSwitchFulltext) && (
+                {fulltextAction && (
                   <button
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
-                    disabled={body.extractingFulltext || libraryRestoreBusy}
+                    disabled={fulltextAction.disabled}
                     onClick={toggleReaderFulltext}
                     title={
                       !body.fulltextExtracted
@@ -313,9 +311,7 @@ export function Reader() {
                     }
                   >
                     <Icons.doc />
-                    <span>
-                      {body.extractingFulltext ? '正在提取…' : !body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
-                    </span>
+                    <span>{fulltextAction.label}</span>
                   </button>
                 )}
                 <button className="toggle-action-btn" onClick={toggleReaderRenderMode} title={isRawRenderMode ? '切换到 HTML 渲染' : '查看原始 HTML 源码'}>

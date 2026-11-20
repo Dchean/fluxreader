@@ -212,6 +212,36 @@ export async function run(ctx) {
     checkNew('(fix-3) 删除非活动订阅源 → 当前范围保持不变',
       store.getState().activeFeedFilter === '11');
 
+    /* N-13：四个写入失败路径保留 extractError 的详情与原有上下文前缀。 */
+    await bootFixture();
+    S.rejectCmds.add('delete_folder');
+    store.getState().deleteCategory('cat-1');
+    await nTick(20);
+    checkNew('(N-13) 删除分类失败提示包含后端错误详情',
+      store.getState().toasts.some((t) => t.text === '删除分类失败：注入失败:delete_folder'));
+
+    await bootFixture();
+    S.rejectCmds.add('delete_feed');
+    store.getState().deleteFeed('cat-1', '10');
+    await nTick(20);
+    checkNew('(N-13) 删除订阅源失败提示包含后端错误详情',
+      store.getState().toasts.some((t) => t.text === '删除订阅源失败：注入失败:delete_feed'));
+
+    await bootFixture();
+    S.rejectCmds.add('update_folder_layout');
+    store.getState().updateCatLayout('cat-1', 'social');
+    await nTick(20);
+    checkNew('(N-13) 分类布局保存失败保留重启回退提示并追加错误详情',
+      store.getState().toasts.some((t) => t.text === '布局未能保存，重启后可能回退：注入失败:update_folder_layout'));
+
+    await bootFixture();
+    S.rejectCmds.add('update_feed_layout');
+    store.getState().updateFeedLayout('cat-1', '10', 'social');
+    await nTick(20);
+    checkNew('(N-13) 订阅源布局保存失败保留重启回退提示并追加错误详情',
+      store.getState().toasts.some((t) => t.text === '布局未能保存，重启后可能回退：注入失败:update_feed_layout'));
+    S.rejectCmds.clear();
+
     /* fix-4（自检 P2-2）：reloadFilteredEntries 的口径守卫——「范围×布局」在途时
        被切换 ⇒ 迟到的旧响应整体丢弃（entries 不被覆盖、过期游标不写入），且
        新口径自己的响应照常落地。修前守卫只比 view：切范围后旧响应放行，

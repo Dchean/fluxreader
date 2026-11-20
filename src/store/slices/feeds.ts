@@ -106,7 +106,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       void api
         .deleteFolder(id)
         .then(() => get().reloadFromBackend())
-        .catch(() => get().showToast('删除分类失败'));
+        .catch((e) => get().showToast(`删除分类失败：${extractError(e)}`));
       return;
     }
     set((s) => {
@@ -293,7 +293,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       void api
         .deleteFeed(Number(feedId))
         .then(() => get().reloadFromBackend())
-        .catch(() => get().showToast('删除订阅源失败'));
+        .catch((e) => get().showToast(`删除订阅源失败：${extractError(e)}`));
       return;
     }
     set((s) => {
@@ -438,7 +438,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     set((s) => reconcileCategories(s, s.categories.map((c) => (c.id === catId ? { ...c, layout } : c))));
     void api
       .updateFolderLayout(numericId(catId), layout)
-      .catch(() => get().showToast('布局未能保存，重启后可能回退'));
+      .catch((e) => get().showToast(`布局未能保存，重启后可能回退：${extractError(e)}`));
   },
 
   updateFeedLayout: (catId, feedId, layout) => {
@@ -458,7 +458,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     );
     void api
       .updateFeedLayout(numericId(feedId), next)
-      .catch(() => get().showToast('布局未能保存，重启后可能回退'));
+      .catch((e) => get().showToast(`布局未能保存，重启后可能回退：${extractError(e)}`));
   },
 
   /* OPT-011 R4：AI 开关统一走 issueAiWrite（aiConfigWrites 协议单点）——

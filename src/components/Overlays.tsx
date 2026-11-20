@@ -10,6 +10,7 @@ import { LAYOUT_NO_AI } from './settings/shared';
 import { normalizeFeedAiMode } from '../types';
 import { categoryAiDefaults } from '../store/aiPolicy';
 import type { ArticleEntry, CategoryGroup, ContentLayoutType, FeedAiMode, FeedItem } from '../types';
+import type { SettingsState } from '../store/types';
 import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
 import { galleryMediaKey } from '../lib/galleryMedia';
@@ -584,6 +585,45 @@ export function AddFeedModal() {
   );
 }
 
+function FeedAiModeFields({
+  layout, settings, category, summaryMode, translateMode, onSummaryChange, onTranslateChange,
+}: {
+  layout: string;
+  settings: SettingsState;
+  category?: CategoryGroup;
+  summaryMode: FeedAiMode;
+  translateMode: FeedAiMode;
+  onSummaryChange: (mode: FeedAiMode) => void;
+  onTranslateChange: (mode: FeedAiMode) => void;
+}) {
+  if (LAYOUT_NO_AI.has(layout)) return null;
+  const { autoSummary, autoTranslate } = categoryAiDefaults(settings, layout as ContentLayoutType, category);
+  return (
+    <>
+      <label className="mini-dialog-checkbox" style={layout === 'social' ? { display: 'none' } : undefined}>
+        <AiModeSelect
+          mode={summaryMode}
+          categoryOn={autoSummary}
+          onChange={onSummaryChange}
+          title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+          ariaLabel="自动摘要"
+        />
+        自动摘要
+      </label>
+      <label className="mini-dialog-checkbox">
+        <AiModeSelect
+          mode={translateMode}
+          categoryOn={autoTranslate}
+          onChange={onTranslateChange}
+          title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+          ariaLabel="自动翻译"
+        />
+        自动翻译
+      </label>
+    </>
+  );
+}
+
 function AddFeedModalBody({
   initialCatId,
   categories,
@@ -621,7 +661,6 @@ function AddFeedModalBody({
   const curCat = categories.find((c) => c.id === catId);
   const curCatLayout = curCat?.layout ?? 'article';
   const effLayout = layout === 'inherit' ? curCatLayout : layout;
-  const noAi = LAYOUT_NO_AI.has(effLayout);
 
   return (
     <div className="mini-dialog">
@@ -682,30 +721,11 @@ function AddFeedModalBody({
         </div>
 
         <div className="mini-dialog-checkbox-row">
-          {!noAi && (
-            <>
-              <label className="mini-dialog-checkbox" style={effLayout === 'social' ? { display: 'none' } : undefined}>
-                <AiModeSelect
-                  mode={summaryMode}
-                  categoryOn={categoryAiDefaults(settings, effLayout as ContentLayoutType, curCat).autoSummary}
-                  onChange={setSummaryMode}
-                  title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
-                  ariaLabel="自动摘要"
-                />
-                自动摘要
-              </label>
-              <label className="mini-dialog-checkbox">
-                <AiModeSelect
-                  mode={translateMode}
-                  categoryOn={categoryAiDefaults(settings, effLayout as ContentLayoutType, curCat).autoTranslate}
-                  onChange={setTranslateMode}
-                  title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
-                  ariaLabel="自动翻译"
-                />
-                自动翻译
-              </label>
-            </>
-          )}
+          <FeedAiModeFields
+            layout={effLayout} settings={settings} category={curCat}
+            summaryMode={summaryMode} translateMode={translateMode}
+            onSummaryChange={setSummaryMode} onTranslateChange={setTranslateMode}
+          />
           {addFeedShowsSyncSwitch(syncConnected, syncProtocol) && (
             <label className="mini-dialog-checkbox">
               <SwitchInline checked={syncToBackend} onChange={(v) => setSyncToBackend(v)} />
@@ -787,6 +807,7 @@ function EditFeedModalBody({
   const [layout, setLayout] = useState<string>(feed.layout);
   const curCat = categories.find((c) => c.id === catId);
   const curCatLayout = curCat?.layout ?? 'article';
+  const effLayout = layout === 'inherit' ? curCatLayout : layout;
   /* OPT-011：显示与提交都取三态真值 */
   const [summaryMode, setSummaryMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.summaryMode));
   const [translateMode, setTranslateMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.translateMode));
@@ -840,35 +861,11 @@ function EditFeedModalBody({
       </div>
 
       <div className="mini-dialog-checkbox-row">
-        {(() => {
-          /* 生效布局：显式选择优先，否则继承分类布局 */
-          const eff = layout === 'inherit' ? curCatLayout : layout;
-          if (LAYOUT_NO_AI.has(eff)) return null;
-          return (
-            <>
-              <label className="mini-dialog-checkbox" style={eff === 'social' ? { display: 'none' } : undefined}>
-                <AiModeSelect
-                  mode={summaryMode}
-                  categoryOn={categoryAiDefaults(settings, eff as ContentLayoutType, curCat).autoSummary}
-                  onChange={setSummaryMode}
-                  title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
-                  ariaLabel="自动摘要"
-                />
-                自动摘要
-              </label>
-              <label className="mini-dialog-checkbox">
-                <AiModeSelect
-                  mode={translateMode}
-                  categoryOn={categoryAiDefaults(settings, eff as ContentLayoutType, curCat).autoTranslate}
-                  onChange={setTranslateMode}
-                  title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
-                  ariaLabel="自动翻译"
-                />
-                自动翻译
-              </label>
-            </>
-          );
-        })()}
+        <FeedAiModeFields
+          layout={effLayout} settings={settings} category={curCat}
+          summaryMode={summaryMode} translateMode={translateMode}
+          onSummaryChange={setSummaryMode} onTranslateChange={setTranslateMode}
+        />
       </div>
 
       <div className="mini-dialog-actions">

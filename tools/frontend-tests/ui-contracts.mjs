@@ -1801,9 +1801,10 @@ export async function run(ctx) {
     store.setState({ activeContentLayout: prevLayout114, entries: [], feedIndex: new Map() });
   }
 
+  /* 大小写 J/K 的实际导航由 keyboard-a11y 组件用例覆盖。 */
   checkNew('(t114-x3e) App.tsx J/K 分支消费纯函数（门控 + 推进），旧「仅 article」内联门控与内隔回绕判定清零',
     app114.includes('jkLayoutAllowed(s.activeContentLayout)')
-    && app114.includes("jkNextIndex(items.length, curIdx, e.key === 'j')")
+    && app114.includes("jkNextIndex(items.length, curIdx, e.key === 'j' || e.key === 'J')")
     && !app114.includes("s.activeContentLayout !== 'article'")
     && !app114.includes('nextIdx = e.key'));
   checkNew('(t114-x3f) ShortcutsTab J/K 行同步：范围=全部内容布局（旧「文章布局」/「画廊不支持」清零）',

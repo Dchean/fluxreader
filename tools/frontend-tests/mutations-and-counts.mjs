@@ -1301,11 +1301,11 @@ export async function run(ctx) {
     store.getState().toggleEntryFlag('53001', 'isRead');  // unread→read（最终意图=已读，set_read(true) 落库）
     await nTick(10);                                       // bulk 失败回滚落地
     const bulk118 = store.getState();
-    checkNew('(t118-bulk-rollback) set_read_bulk 失败：未被接管的行（53002/53003）恢复未读、unread 逐 feed 回补、失败 toast 可见（修前只提示不回滚）',
+    checkNew('(N-13/t118-bulk-rollback) set_read_bulk 失败保留错误详情，未被接管的行恢复未读、unread 逐 feed 回补',
       bulk118.entries.find((a) => a.id === '53002')?.isRead === false
       && bulk118.entries.find((a) => a.id === '53003')?.isRead === false
       && bulk118.feedCounts.get('10')?.unread === 2
-      && bulk118.toasts.some((t) => t.text === '批量标读失败'));
+      && bulk118.toasts.some((t) => t.text === '批量标读失败：注入失败:set_read_bulk'));
     checkNew('(t118-bulk-rollback) 版本守卫：窗口内双击停在读的 53001 不被回踩（isRead 版本已前进），UI 与 DB 真值一致（修前无回滚/值守卫均无法同时满足）',
       bulk118.entries.find((a) => a.id === '53001')?.isRead === true
       && S.backendRows.find((r) => r.id === 53001)?.is_read === true

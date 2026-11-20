@@ -683,11 +683,11 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         /* OPT-008B R2/N1：整批回执（含闭包副本）驱动条目/计数本地收敛。 */
         applyReadReceipt(asReadReceipts(receipt), marked, intent.serial);
         scheduleCountsReconcile();
-      }).catch(() => {
+      }).catch((e) => {
         const { takenOver } = intent.finish(true);
         /* R2：同单条路径——存在被接管跳过的声明时强制权威对账。 */
         scheduleCountsReconcile(takenOver ? { force: true } : undefined);
-        get().showToast('批量标读失败');
+        get().showToast(`批量标读失败：${extractError(e)}`);
       });
     }
   },

@@ -94,6 +94,22 @@ componentTest('键盘与焦点：J/K 在五布局同步 activeArticleId、DOM fo
       `${layout}: 第二次 J 应前进到第二条`);
     assert.equal(focusedCardId(), visible[1], `${layout}: 第二次 J 后焦点应跟随第二条`);
 
+    await act(async () => { pressKey('J'); });
+    await flush(4, 30);
+    assert.equal(useAppStore.getState().activeArticleId, visible[2],
+      `${layout}: 大写 J 应前进到第三条`);
+    assert.equal(focusedCardId(), visible[2], `${layout}: 大写 J 后 DOM 焦点应跟随第三条`);
+    assert.equal(document.activeElement?.getAttribute('aria-current'), 'true',
+      `${layout}: 大写 J 目标仍带 aria-current=true`);
+    assert.ok(entry.container.querySelector(`.active-selected[data-id="${visible[2]}"]`),
+      `${layout}: 大写 J 目标仍有可见选中态`);
+
+    await act(async () => { pressKey('K'); });
+    await flush(4, 30);
+    assert.equal(useAppStore.getState().activeArticleId, visible[1],
+      `${layout}: 大写 K 应回退到第二条`);
+    assert.equal(focusedCardId(), visible[1], `${layout}: 大写 K 后 DOM 焦点应跟随第二条`);
+
     await act(async () => { pressKey('k'); });
     await flush(4, 30);
     assert.equal(useAppStore.getState().activeArticleId, visible[0],

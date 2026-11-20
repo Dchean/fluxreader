@@ -339,11 +339,11 @@ export default function App() {
          Timeline 负责目标卡入窗 + DOM focus + aria-current；门控与推进判定
          仍收口在纯函数 jkLayoutAllowed/jkNextIndex，回归网直接断言真值表、
          五布局 store 模拟与真实组件焦点。 */
-      if (e.key === 'j' || e.key === 'k') {
+      if (e.key === 'j' || e.key === 'J' || e.key === 'k' || e.key === 'K') {
         if (!jkLayoutAllowed(s.activeContentLayout)) return;
         const items = selectVisibleEntries(s);
         const curIdx = items.findIndex((a) => a.id === s.activeArticleId);
-        const nextIdx = jkNextIndex(items.length, curIdx, e.key === 'j');
+        const nextIdx = jkNextIndex(items.length, curIdx, e.key === 'j' || e.key === 'J');
         if (nextIdx >= 0 && items[nextIdx]) s.selectArticle(items[nextIdx].id);
       }
     };

@@ -164,6 +164,23 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
   };
 }
 
+/** 阅读器工具栏与右键菜单共用入口资格，保留本机缺正文的独立恢复入口。 */
+export function selectReaderFulltextAction(
+  body: ArticleBodyView,
+  { dataMode, showFulltext, libraryRestoreBusy }: Pick<AppState, 'dataMode' | 'showFulltext' | 'libraryRestoreBusy'>,
+) {
+  const locallyMissingBody = dataMode === 'tauri' && body.state === 'ready' && !body.content.trim();
+  const canSwitchFulltext = !!body.rawContent && body.rawContent !== body.content;
+  const visible = dataMode === 'tauri' && !locallyMissingBody
+    && (body.state === 'ready' || (body.state === 'cleared' && body.content !== ''))
+    && (!body.fulltextExtracted || canSwitchFulltext);
+  const action = visible ? {
+    disabled: body.extractingFulltext || libraryRestoreBusy,
+    label: body.extractingFulltext ? '正在提取…' : !body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文',
+  } : null;
+  return { locallyMissingBody, action };
+}
+
 /** TASK-122：单张卡片「需要水合正文」的判定 —— 条目仍在 && （bodyById 无记录
     或记录是**正文已失效清空的 cleared**）。
     记录存在即不需要水合：loading=在途（重复入队由记录状态拦下，替代原模块级

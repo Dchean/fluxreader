@@ -125,10 +125,10 @@ export async function run(ctx) {
   {
     const { shouldYieldToOverlay, OVERLAY_YIELD_KEYS, OVERLAY_SOURCES, anyOverlayOpen }
       = await import('../../src/components/shortcutYield.ts');
-    checkNew('(P3[F2]) 浮层打开 + 单键 S/M/J/K ⇒ 让路（修前会作用到浮层背后的当前文章）',
-      ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(true, k, false) === 'yield'));
-    checkNew('(P3[F2]) 浮层未打开 + 单键 ⇒ 不让路（快捷键照常生效）',
-      ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(false, k, false) === 'proceed'));
+    checkNew('(P3[F2]) 浮层打开 + 单键 S/M/J/K（含大小写）⇒ 让路（修前会作用到浮层背后的当前文章）',
+      ['s', 'S', 'm', 'M', 'j', 'k', 'J', 'K'].every((k) => shouldYieldToOverlay(true, k, false) === 'yield'));
+    checkNew('(P3[F2]) 浮层未打开 + 单键 S/M/J/K（含大小写）⇒ 不让路（快捷键照常生效）',
+      ['s', 'S', 'm', 'M', 'j', 'k', 'J', 'K'].every((k) => shouldYieldToOverlay(false, k, false) === 'proceed'));
     checkNew('(P3[F2]) 浮层打开 + 带 Ctrl/Meta/Alt ⇒ 不让路（组合键属浮层自身操作，不受影响）',
       shouldYieldToOverlay(true, 's', true) === 'proceed'
       && shouldYieldToOverlay(true, 'k', true) === 'proceed');
@@ -136,8 +136,8 @@ export async function run(ctx) {
       shouldYieldToOverlay(true, 'a', false) === 'proceed'
       && shouldYieldToOverlay(true, 'Enter', false) === 'proceed'
       && shouldYieldToOverlay(true, 'Escape', false) === 'proceed');
-    checkNew('(P3[F2]) 适配性：让路键集合恰为 s/S/m/M/j/k（新增可让路键须同步本表）',
-      OVERLAY_YIELD_KEYS.length === 6 && OVERLAY_YIELD_KEYS.join(',') === 's,S,m,M,j,k');
+    checkNew('(P3[F2]) 适配性：让路键集合恰为 s/S/m/M/j/k/J/K（新增可让路键须同步本表）',
+      OVERLAY_YIELD_KEYS.length === 8 && OVERLAY_YIELD_KEYS.join(',') === 's,S,m,M,j,k,J,K');
     /* 浮层集合逐项钉死：这是 TASK-086 审查者指出「文本断言可被绕过」的正面修复。
        此前 overlayOpen 是内联的 `a || b || c`，回归网只能查 token 在场——
        实测把「全屏播放器」从并集里删掉，322 条断言**全绿**（真实回归零告警）。
@@ -206,9 +206,9 @@ export async function run(ctx) {
       closeAskVisible: sCloseAsk.closeAskVisible,
       errorCenterOpen: sCloseAsk.errorCenterOpen,
     });
-    checkNew('(P3[F2]/OPT-012) 真实 store：关闭确认框打开（closeAskVisible=true）⇒ anyOverlayOpen=true 且 s/m/j/k 全部让路（修前 proceed：单键作用到确认框背后的文章）',
+    checkNew('(P3[F2]/OPT-012) 真实 store：关闭确认框打开（closeAskVisible=true）⇒ anyOverlayOpen=true 且 s/m/j/k/J/K 全部让路（修前 proceed：单键作用到确认框背后的文章）',
       overlayOpenWithCloseAsk === true
-      && ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(overlayOpenWithCloseAsk, k, false) === 'yield'));
+      && ['s', 'S', 'm', 'M', 'j', 'k', 'J', 'K'].every((k) => shouldYieldToOverlay(overlayOpenWithCloseAsk, k, false) === 'yield'));
     checkNew('(P3[F2]/OPT-012) 关闭确认框不吞组合键/非目标键（Ctrl+S 等照旧 proceed；Escape 不在让路集合，保持 App.tsx 专门分支语义）',
       shouldYieldToOverlay(overlayOpenWithCloseAsk, 's', true) === 'proceed'
       && shouldYieldToOverlay(overlayOpenWithCloseAsk, 'Escape', false) === 'proceed'

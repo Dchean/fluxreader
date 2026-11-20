@@ -10,7 +10,7 @@
 // 未预期 console/jsdom/React 错误由 componentTest 统一账本终检判红。
 
 import assert from 'node:assert/strict';
-import { componentTest, mount, flush, waitFor, resetStore, getBodyEntry, useAppStore } from './harness.mjs';
+import { componentTest, mount, unmount, flush, waitFor, resetStore, getBodyEntry, useAppStore } from './harness.mjs';
 import { installBackend, seedFromRows, mkRow, clearInvokeCalls, invokeCount, invokeCalls, setPlan, resetPlan, deferred, FEEDS } from './fixtures.mjs';
 
 const ROWS = [
@@ -310,4 +310,107 @@ componentTest('OPT-011 FeedsTab：三态下拉真实点击 → store 原子更�
   const { selectFeedConfig } = await import('../../dist-test/store/selectors.js');
   assert.equal(selectFeedConfig(useAppStore.getState(), '10').autoSummary, false,
     '分类开 + 源显式 off → 有效值关（可在分类开启下明确关闭）');
+});
+
+componentTest('X-19 添加/编辑订阅 AI 三态字段保真：DOM/ARIA顺序、布局显隐与提交值', { timeout: 40000 }, async () => {
+  const { createElement, act } = await import('react');
+  installBackend();
+  resetStore();
+  seedFromRows(ROWS, { dataMode: 'mock' });
+  await act(async () => {
+    useAppStore.setState({
+      addFeedModalOpen: true,
+      addFeedTargetCatId: 'cat-1',
+      syncConnected: true,
+      syncProtocol: 'greader',
+    });
+  });
+
+  const { AddFeedModal, EditFeedModal } = await import('../../src/components/Overlays.tsx');
+  const controls = (root) => [...root.querySelectorAll('.mini-dialog-checkbox-row .mini-dialog-checkbox')];
+  const byName = (root, name) => root.querySelector(`[aria-label="${name}"]`);
+  const selectOption = async (root, label) => {
+    const trigger = root.querySelector('[aria-label="内容布局绑定"]');
+    assert.ok(trigger, '表单保留布局选择控件名称');
+    await act(async () => { trigger.click(); });
+    await flush(2);
+    const option = [...document.querySelectorAll('[role="option"]')]
+      .find((node) => node.textContent.trim() === label);
+    assert.ok(option, `布局选项 ${label} 可用`);
+    await act(async () => { option.click(); });
+    await flush(2);
+  };
+  const chooseMode = async (root, name, label) => {
+    const trigger = byName(root, name);
+    assert.ok(trigger, `${name} 三态下拉有稳定可访问名`);
+    await act(async () => { trigger.click(); });
+    await flush(2);
+    const option = [...document.querySelectorAll('[role="option"]')]
+      .find((node) => node.textContent.trim() === label);
+    assert.ok(option, `${name} 可选 ${label}`);
+    await act(async () => { option.click(); });
+    await flush(2);
+  };
+  const inputValue = (input, value) => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const add = await mount(createElement(AddFeedModal));
+  assert.equal(controls(add.container).length, 3, '添加表单摘要、翻译与同步开关同排');
+  assert.equal(byName(add.container, '自动摘要').getAttribute('aria-label'), '自动摘要');
+  assert.equal(byName(add.container, '自动翻译').getAttribute('aria-label'), '自动翻译');
+  assert.equal(controls(add.container)[0].querySelector('[role="combobox"]').getAttribute('aria-label'), '自动摘要');
+  assert.equal(controls(add.container)[1].querySelector('[role="combobox"]').getAttribute('aria-label'), '自动翻译');
+  assert.equal(controls(add.container)[2].textContent.trim(), '同步到账户');
+  assert.equal(byName(add.container, '自动摘要').textContent.trim(), '继承（关）',
+    '新增表单摘要状态仍从 inherit 初始化');
+  assert.equal(byName(add.container, '自动翻译').textContent.trim(), '继承（关）',
+    '新增表单翻译状态仍从 inherit 初始化');
+
+  await chooseMode(add.container, '自动摘要', '关闭');
+  await chooseMode(add.container, '自动翻译', '开启');
+  await selectOption(add.container, '社交');
+  assert.equal(controls(add.container)[0].style.display, 'none', 'social 下摘要 label 保持隐藏');
+  assert.equal(controls(add.container)[1].style.display, '', 'social 下翻译仍显示');
+  await selectOption(add.container, '画廊');
+  assert.equal(byName(add.container, '自动摘要'), null, 'image 布局隐藏摘要');
+  assert.equal(byName(add.container, '自动翻译'), null, 'image 布局隐藏翻译');
+  assert.equal(controls(add.container).length, 1, 'AI 整组隐藏但同步开关仍在原行');
+  assert.equal(controls(add.container)[0].textContent.trim(), '同步到账户');
+  await selectOption(add.container, '文章');
+  assert.equal(byName(add.container, '自动摘要').textContent.trim(), '关闭', '添加摘要选择跨隐藏布局保留');
+  assert.equal(byName(add.container, '自动翻译').textContent.trim(), '开启', '添加翻译选择跨隐藏布局保留');
+  inputValue(add.container.querySelector('[aria-label="RSS/Atom 订阅地址"]'), 'https://new.example/rss');
+  await act(async () => { add.container.querySelector('.mini-dialog-actions .btn-primary').click(); });
+  await flush(2);
+  const added = useAppStore.getState().categories.flatMap((category) => category.feeds)
+    .find((feed) => feed.url === 'https://new.example/rss');
+  assert.equal(added?.summaryMode, 'off', '添加提交仍写入摘要三态');
+  assert.equal(added?.translateMode, 'on', '添加提交仍写入翻译三态');
+  await unmount(add);
+
+  resetStore();
+  seedFromRows(ROWS, { dataMode: 'mock' });
+  await act(async () => { useAppStore.setState({ editFeedModalOpen: true, editFeedTargetId: '10' }); });
+  const edit = await mount(createElement(EditFeedModal));
+  assert.equal(controls(edit.container).length, 2, '编辑表单只渲染摘要和翻译控件');
+  assert.equal(byName(edit.container, '自动摘要').textContent.trim(), '关闭', '编辑摘要仍从源配置初始化');
+  assert.equal(byName(edit.container, '自动翻译').textContent.trim(), '关闭', '编辑翻译仍从源配置初始化');
+  assert.equal(controls(edit.container)[0].querySelector('[role="combobox"]').getAttribute('aria-label'), '自动摘要');
+  assert.equal(controls(edit.container)[1].querySelector('[role="combobox"]').getAttribute('aria-label'), '自动翻译');
+  await chooseMode(edit.container, '自动摘要', '开启');
+  await selectOption(edit.container, '社交');
+  assert.equal(controls(edit.container)[0].style.display, 'none', '编辑 social 下摘要保持隐藏');
+  assert.equal(controls(edit.container)[1].style.display, '', '编辑 social 下翻译仍显示');
+  await selectOption(edit.container, '播客');
+  assert.equal(byName(edit.container, '自动摘要'), null, '编辑 podcast 布局隐藏摘要');
+  assert.equal(byName(edit.container, '自动翻译'), null, '编辑 podcast 布局隐藏翻译');
+  await selectOption(edit.container, '文章');
+  assert.equal(byName(edit.container, '自动摘要').textContent.trim(), '开启', '编辑摘要选择跨隐藏布局保留');
+  assert.equal(byName(edit.container, '自动翻译').textContent.trim(), '关闭', '编辑翻译选择跨隐藏布局保留');
+  await act(async () => { edit.container.querySelector('.mini-dialog-actions .btn-primary').click(); });
+  await flush(2);
+  assert.equal(useAppStore.getState().feedIndex.get('10')?.feed.summaryMode, 'on', '编辑提交保留摘要 mode');
+  assert.equal(useAppStore.getState().feedIndex.get('10')?.feed.translateMode, 'off', '编辑提交保留翻译 mode');
 });
