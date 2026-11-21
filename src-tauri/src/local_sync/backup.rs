@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tauri::{Emitter, State};
@@ -25,6 +25,17 @@ const BACKUP_FORMAT: u32 = 4;
 const BLOCK_TARGET: usize = 1024 * 1024;
 const BLOCK_LIMIT: usize = 128 * 1024 * 1024;
 const ROW_LIMIT: usize = 1_000_000;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WritePoint {
+    Magic,
+    BlockHeader,
+    BlockBody,
+    Footer,
+}
+#[cfg(test)]
+thread_local! {
+    static FAIL_WRITE: std::cell::Cell<Option<WritePoint>> = const { std::cell::Cell::new(None) };
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Header {
@@ -127,32 +138,85 @@ pub struct PortableBackupInfo {
 fn io(error: std::io::Error) -> AppError {
     AppError::new("backup", error.to_string())
 }
+struct CreatedTarget {
+    path: PathBuf,
+    preserve: bool,
+}
+impl CreatedTarget {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            preserve: false,
+        }
+    }
+    fn preserve(&mut self) {
+        self.preserve = true;
+    }
+}
+impl Drop for CreatedTarget {
+    fn drop(&mut self) {
+        if self.preserve || preview(&self.path).is_ok() {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "failed to remove incomplete portable backup {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
 struct Writer {
+    // Field drop order closes the file before the owned-target cleanup runs.
     file: BufWriter<File>,
+    cleanup: Option<CreatedTarget>,
     hash: Sha256,
     records: Vec<Record>,
     estimate: usize,
     size: u64,
 }
 impl Writer {
+    fn write_bytes(&mut self, point: WritePoint, bytes: &[u8]) -> AppResult<()> {
+        #[cfg(test)]
+        if FAIL_WRITE.with(|fault| {
+            if fault.get() == Some(point) {
+                fault.set(None);
+                true
+            } else {
+                false
+            }
+        }) {
+            return Err(io(std::io::Error::other(format!(
+                "injected {point:?} write failure"
+            ))));
+        }
+        #[cfg(not(test))]
+        let _ = point;
+        self.file.write_all(bytes).map_err(io)
+    }
+
     fn new(path: &Path) -> AppResult<Self> {
-        let mut file = BufWriter::new(
-            OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(path)
-                .map_err(io)?,
-        );
-        file.write_all(MAGIC).map_err(io)?;
+        let opened = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(io)?;
+        let cleanup = CreatedTarget::new(path);
+        let file = BufWriter::new(opened);
         let mut hash = Sha256::new();
         hash.update(MAGIC);
-        Ok(Self {
+        let mut writer = Self {
             file,
+            cleanup: Some(cleanup),
             hash,
             records: Vec::new(),
             estimate: 0,
             size: 16,
-        })
+        };
+        writer.write_bytes(WritePoint::Magic, MAGIC)?;
+        Ok(writer)
     }
     fn push(&mut self, record: Record) -> AppResult<()> {
         let size = serde_json::to_vec(&record)?.len();
@@ -177,8 +241,8 @@ impl Writer {
         header[0] = 1;
         header[1..9].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
         header[9..].copy_from_slice(&Sha256::digest(&bytes));
-        self.file.write_all(&header).map_err(io)?;
-        self.file.write_all(&bytes).map_err(io)?;
+        self.write_bytes(WritePoint::BlockHeader, &header)?;
+        self.write_bytes(WritePoint::BlockBody, &bytes)?;
         self.hash.update(header);
         self.hash.update(&bytes);
         self.size += 41 + bytes.len() as u64;
@@ -186,16 +250,17 @@ impl Writer {
         self.estimate = 0;
         Ok(())
     }
-    fn finish(mut self) -> AppResult<(String, u64)> {
+    fn finish(mut self) -> AppResult<(String, u64, CreatedTarget)> {
         self.flush()?;
-        let hash = self.hash.finalize();
+        let hash = self.hash.clone().finalize();
         let mut footer = [0u8; 41];
         footer[0] = 255;
         footer[9..].copy_from_slice(&hash);
-        self.file.write_all(&footer).map_err(io)?;
+        self.write_bytes(WritePoint::Footer, &footer)?;
         self.file.flush().map_err(io)?;
         self.file.get_ref().sync_all().map_err(io)?;
-        Ok((format!("{hash:x}"), self.size + 41))
+        let cleanup = self.cleanup.take().expect("Writer owns its new target");
+        Ok((format!("{hash:x}"), self.size + 41, cleanup))
     }
 }
 fn open_locked(path: &Path) -> AppResult<File> {
@@ -902,8 +967,9 @@ pub fn export(conn: &Connection, path: &Path) -> AppResult<PortableBackupInfo> {
             }
         }
     }
-    let (hash, size) = writer.finish()?;
+    let (hash, size, mut created_target) = writer.finish()?;
     tx.commit()?;
+    created_target.preserve();
     Ok(PortableBackupInfo {
         path: path.to_string_lossy().into_owned(),
         size_bytes: size,
@@ -1235,6 +1301,43 @@ pub async fn choose_portable_backup_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    struct FailWrite;
+
+    impl FailWrite {
+        fn enable(point: WritePoint) -> Self {
+            FAIL_WRITE.with(|fail| fail.set(Some(point)));
+            Self
+        }
+    }
+
+    impl Drop for FailWrite {
+        fn drop(&mut self) {
+            FAIL_WRITE.with(|fail| fail.set(None));
+        }
+    }
+
+    fn initialized_export_database() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        database::register_functions(&conn).unwrap();
+        database::initialize(&conn, &"a".repeat(32)).unwrap();
+        conn
+    }
+
+    fn isolated_export_path(label: &str, conn: &Connection) -> PathBuf {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tmp/s4b-2026-11-21/x10/targets");
+        std::fs::create_dir_all(&root).unwrap();
+        root.join(format!(
+            "{label}-{}.flxb",
+            storage::random_id(conn).unwrap()
+        ))
+    }
+
     fn file(label: &str) -> std::path::PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1308,8 +1411,48 @@ mod tests {
         for record in records {
             writer.push(record).unwrap();
         }
-        writer.finish().unwrap();
+        let (_, _, mut created_target) = writer.finish().unwrap();
+        created_target.preserve();
     }
+    #[test]
+    fn portable_export_cleans_new_target_after_magic_and_footer_write_failures() {
+        let conn = initialized_export_database();
+        let existing = isolated_export_path("existing-target", &conn);
+        let target = isolated_export_path("same-target-retry", &conn);
+
+        for point in [WritePoint::Magic, WritePoint::Footer] {
+            let result = {
+                let _fault = FailWrite::enable(point);
+                export(&conn, &target)
+            };
+            assert!(result.is_err(), "{point:?} write fault must fail export");
+            assert!(
+                !target.exists(),
+                "a failed {point:?} write must remove only the new incomplete target"
+            );
+        }
+
+        let sentinel = b"pre-existing portable backup must remain byte-for-byte unchanged";
+        std::fs::write(&existing, sentinel).unwrap();
+        let sentinel_hash = Sha256::digest(sentinel);
+        assert!(export(&conn, &existing).is_err());
+        let unchanged = std::fs::read(&existing).unwrap();
+        assert_eq!(unchanged.as_slice(), sentinel);
+        assert_eq!(Sha256::digest(&unchanged), sentinel_hash);
+
+        let completed = export(&conn, &target).unwrap();
+        let checked = preview(&target).unwrap();
+        assert_eq!(checked.digest, completed.digest);
+        assert_eq!(checked.format, BACKUP_FORMAT);
+
+        let restore_conn = initialized_export_database();
+        let restored = restore(&restore_conn, &target, &checked.digest).unwrap();
+        assert_eq!(restored.digest, checked.digest);
+
+        std::fs::remove_file(target).unwrap();
+        std::fs::remove_file(existing).unwrap();
+    }
+
     #[test]
     fn portable_v4_validates_references_order_and_container_integrity() {
         let good = file("valid");

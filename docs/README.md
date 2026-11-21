@@ -30,13 +30,13 @@
 | [开发与门禁](development.md) | 本地环境、脚本与 CI job 对应、测试分层、证据纪律、常见故障 | `package.json`、`.github/workflows/ci.yml`、`tmp/rust-env/` | 脚本、CI、测试分层或环境变化 | 2026-11-21（基线 9a5e3b8；局部核对 TypeScript 严格配置） |
 | [同步兼容矩阵](sync-compat-matrix.md) | GR/Fever/WebDAV 的能力差异、冲突政策、真实服务端证据与边界 | `sync/conflict_policy.rs`、`greader.rs`、`fever.rs`、`sync/`、`local_sync/` | 协议实现、冲突政策或服务端证据变化 | 2026-11-19（基线 30cfd65；真实服务端实测 2026-11-07 见本篇） |
 | [性能基线](performance.md) | 判定线、测量纪律、10k/50k 基线与查询/封面/画廊/图片代理预算 | `scheduler.rs`、`db/articles.rs`、`commands/settings.rs`、`src/lib/imageProxy.ts` | 预算、索引、容量口径或方法与基线变化 | 2026-11-19（基线 30cfd65） |
-| [备份与恢复](backup.md) | 便携 v4、WebDAV 持续同步、本机故障快照与恢复边界 | `local_sync/backup.rs`、`db/backup.rs` | 备份格式、恢复语义或生命周期变化 | 2026-11-19（基线 30cfd65） |
+| [备份与恢复](backup.md) | 便携 v4、WebDAV 持续同步、本机故障快照与恢复边界 | `local_sync/backup.rs`、`db/backup.rs` | 备份格式、恢复语义或生命周期变化 | 2026-11-21（基线 c369bd4；局部核对 X10 新建导出目标失败清理） |
 | [发布流程](release.md) | 分支、CI、tag 附注与 Release 正文的关系 | `.github/workflows/release.yml`、`tools/release/` | 发布步骤、tag 或资产策略变化 | 2026-11-19（基线 30cfd65） |
 | [当前缺口](roadmap.md) | 仍成立的开放缺口、接受的边界与未验收范围 | 各条目的主题篇 | 缺口关闭、新增或范围变化 | 2026-11-19（基线 30cfd65） |
-| [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-21（基线 9a5e3b8；S3e 独审与证据登记） |
+| [审计记录](audits.md) | 各轮审计与证伪的结论摘要、基线、证据位置与复跑入口 | `tmp/` 证据 | 新一轮审计或结论状态变化 | 2026-11-21（基线 c369bd4；S4b/X10 局部独审与差分补验证据登记） |
 | [前端结构台账](frontend.md) | 组件清单、类名账目、令牌使用与动态拼接契约、控件层现状 | `src/components/`、`src/store/`、`src/styles/`、`src/lib/syncPill.ts` | 增删组件、类名体系或令牌变化 | 2026-11-20（基线 d40c4f1；社交/通知卡局部译文状态行；类计数口径见本篇） |
 
-本页（索引）最近核对：2026-11-21（基线 9a5e3b8；S3e 前端分页、TypeScript 配置及审计登记的局部索引核对）；各篇「最近核对」的填写口径见 [维护与文档纪律](maintenance.md) 第 7 节。
+本页（索引）最近核对：2026-11-21（基线 c369bd4；S4b/X10 备份生命周期及审计登记的局部索引核对）；各篇「最近核对」的填写口径见 [维护与文档纪律](maintenance.md) 第 7 节。
 
 ## 决定记录
 
