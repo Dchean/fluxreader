@@ -324,8 +324,9 @@ export async function run(ctx) {
     retrySites > 0 && missingKey.length === 0, missingKey.join('；'));
   // Reader自动/主动全文提取的4处失败入口合并为reportFailure，另保留LRU回读失败入口：总数30→28。
   // ReadingSession忙页重试仍在清单；AiTab初读用内联按钮，不属于toast清单。
-  checkNew('(e9) toast重试入口清单28处（全文失败共用处理且保留LRU回读重试），增删入口必须复核key',
-    retrySites === 28);
+  // S4a X-1：移除摘要、卡片翻译、Reader 翻译三个不可达 Channel error 分支，保留三处 invoke 拒绝。
+  checkNew('(e9) toast重试入口清单25处（保留全文回读与三个 AI invoke 拒绝入口），增删入口必须复核key',
+    retrySites === 25);
   checkNew('(e9) key 形态守卫：各操作实体族 key 以「key: \'…\' / key: `…`」字面出现在 src（域:操作:实体；注释里的示例提及不算）',
     ['feed:refresh:', 'feed:add:', 'ai:summary:', 'ai:translate:', 'reader:fulltext:', 'reader:content:', 'list:load-more', 'mark:all-read', 'sync:manual', 'sync:save-and-sync', 'sync:instant-push', 'sync:local-feeds']
       .every((k) => allSrc.includes(`'${k}`) || allSrc.includes(`\`${k}`)));

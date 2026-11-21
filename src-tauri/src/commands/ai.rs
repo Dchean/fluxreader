@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use tauri::State;
 
 /* ============================================================
-AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi 中转）
+AI 引擎（OpenAI 兼容协议）
 ============================================================ */
 
 /// 推给前端的流式事件（camelCase）。
@@ -71,10 +71,7 @@ impl AiConfigSnapshot {
         let Some(raw) = raw else {
             return Err(AppError::new("aiNotConfigured", "请先在设置中配置 AI 服务"));
         };
-        let cfg = crate::ai::AiConfig::from_json(raw)?;
-        // from_json 已成功 = 合法 JSON；此处再解析不会失败（失败按「无提示词」，
-        // 与旧 load_prompts 的 fallback 行为一致，且不与有效配置判定冲突）。
-        let v: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+        let (cfg, v) = crate::ai::AiConfig::parse_with_fields(raw)?;
         let summary_system = v["summaryPrompt"]
             .as_str()
             .unwrap_or(DEFAULT_SUMMARIZE_SYSTEM)
@@ -98,7 +95,7 @@ impl AiConfigSnapshot {
     }
 }
 
-/// 当前输入下的期望签名（生成/提交/校验三处同源）。
+/// 生成（并随快照提交）与缓存校验各自读取所需行，共用同一份签名公式。
 fn expected_signature(
     cfg: &crate::ai::AiConfig,
     system: &str,
@@ -238,9 +235,14 @@ fn translation_segment_plan(
         db::AI_PRODUCT_TRANSLATION,
         translation_signature,
     )?;
+    // 当前签名固定同一分段计划，生成只写该计划中唯一的段号。
+    debug_assert!(
+        completed <= total,
+        "当前签名完成段数 {completed} 超过计划 {total}"
+    );
     Ok(TranslationSegmentPlan {
         total,
-        completed: completed.min(total),
+        completed,
         discarded,
     })
 }
@@ -364,7 +366,7 @@ pub async fn get_ai_config(state: State<'_, AppState>) -> AppResult<Option<Strin
     .await
 }
 
-/// 连通性测试 + 拉模型列表（官方与 newapi 都支持 /models）。
+/// 按用户提供的地址请求 OpenAI 兼容的 `/models`。
 #[tauri::command]
 pub async fn ai_list_models(
     state: State<'_, AppState>,
@@ -626,7 +628,7 @@ async fn ai_translate_inner(
             // 未分段（单段）路径保持 013A/B1 语义：空文本不落缓存、照发 Done，
             // 也不写入空产物/空段。
             let _ = on_channel.send(AiEvent::Done);
-            return Ok(outcome.text);
+            return Ok(safe);
         }
         let source = crate::sanitize::sanitize(segment, None);
         let safe = crate::ai_segments::restore_list_semantics(&source, &safe)?;
@@ -710,7 +712,7 @@ async fn ai_translate_inner(
         }
     }
     let _ = on_channel.send(AiEvent::Done);
-    Ok(full)
+    Ok(safe_full)
 }
 
 #[cfg(test)]
@@ -1768,6 +1770,178 @@ mod ai_segment_tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sanitized_empty_single_segment_returns_empty_sends_done_and_writes_no_cache() {
+        let (port, requests) =
+            start_recording_sse(vec![Reply::Text("<iframe width=\"300\"></iframe>".into())]);
+        let tmp = TempAiDb::new("sanitized-empty-single-segment");
+        let state = setup_migrated(&tmp.path, port, "<p>甲</p>", "正文");
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let result = ai_translate_inner(&state, 1, &recording_channel(events.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "只发一笔合成 loopback 请求"
+        );
+        assert!(
+            crate::sanitize::sanitize("<iframe width=\"300\"></iframe>", None).is_empty(),
+            "样本必须经生产 sanitizer 净化为空"
+        );
+        assert_eq!(result, "", "成功返回最终净化结果");
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["delta", "done"],
+            "既有 delta 和 Done 保持"
+        );
+        assert_eq!(
+            translated_of(&state).await,
+            None,
+            "单段净化为空不得写完整缓存"
+        );
+        assert_eq!(
+            translated_sig_of(&state).await,
+            None,
+            "单段净化为空不得写签名"
+        );
+        assert!(
+            segments_snapshot(&state).await.is_empty(),
+            "单段净化为空不得写恢复片段"
+        );
+    }
+
+    #[tokio::test]
+    async fn sanitized_empty_later_segment_is_incomplete_and_keeps_only_completed_parts() {
+        let (port, requests) = start_recording_sse(vec![
+            Reply::Text("<p>第一段译文</p>".into()),
+            Reply::Text("<iframe width=\"300\"></iframe>".into()),
+        ]);
+        let tmp = TempAiDb::new("sanitized-empty-multi-segment");
+        let html = long_html(40);
+        assert!(expected_segments(&html).len() > 1);
+        let state = setup_migrated(&tmp.path, port, &html, "正文");
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let result = ai_translate_inner(&state, 1, &recording_channel(events.clone())).await;
+        let err = result.expect_err("多段中净化为空仍报告整篇不完整");
+        assert_eq!(err.code, "aiIncomplete");
+        assert!(err.message.contains("第 2/"));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(&*events.lock().unwrap(), &["delta", "delta"]);
+        assert_eq!(translated_of(&state).await, None);
+        assert_eq!(translated_sig_of(&state).await, None);
+        let segments = segments_snapshot(&state).await;
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].1, 0);
+        assert_eq!(segments[0].2, "<p>第一段译文</p>");
+    }
+
+    #[tokio::test]
+    async fn saved_empty_model_blocks_generation_until_explicit_model_is_saved() {
+        let (port, requests) = start_recording_sse(vec![Reply::Text("<p>译文</p>".into())]);
+        let tmp = TempAiDb::new("explicit-config");
+        let state = setup_migrated(&tmp.path, port, "<p>正文</p>", "正文");
+        let event_types = Arc::new(StdMutex::new(Vec::new()));
+        let mut config = serde_json::json!({
+            "preset": "deepseek", "baseUrl": format!("http://127.0.0.1:{port}/custom/v1/"),
+            "apiKey": "synthetic-key", "model": "", "translatePrompt": "explicit prompt",
+            "unknown": ["unchanged"]
+        });
+        let original = config.to_string();
+        // 使用读写配置命令委托的真实存储入口，以及生成命令使用的同一 inner。
+        let loaded = {
+            let conn = state.db.lock().await;
+            db::set_setting(&conn, "ai_config", &original).unwrap();
+            db::get_setting(&conn, "ai_config").unwrap()
+        };
+        assert!(
+            loaded.as_deref() == Some(original.as_str()),
+            "原始配置逐字回读"
+        );
+
+        let missing = ai_translate_inner(&state, 1, &recording_channel(event_types.clone())).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            0,
+            "空模型不得向合成端点发生成请求"
+        );
+        let err = missing.expect_err("空模型必须由用户补填");
+        assert_eq!(err.code, "aiNotConfigured");
+        assert!(err.message.contains("模型"));
+        assert!(event_types.lock().unwrap().is_empty());
+        config["model"] = serde_json::json!("explicit-model");
+        let completed = config.to_string();
+        {
+            let conn = state.db.lock().await;
+            assert!(
+                db::get_setting(&conn, "ai_config").unwrap() == loaded,
+                "生成拒绝不改写存量配置"
+            );
+            db::set_setting(&conn, "ai_config", &completed).unwrap();
+        }
+        drop(state);
+        let reopened = reopen_migrated(&tmp.path);
+        let stored = db::get_setting(&*reopened.db.lock().await, "ai_config").unwrap();
+        assert!(
+            stored.as_deref() == Some(completed.as_str()),
+            "关闭后重开保留配置及扩展字段"
+        );
+
+        let result = ai_translate_inner(&reopened, 1, &recording_channel(event_types.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result, "<p>译文</p>");
+        assert_eq!(
+            translated_of(&reopened).await.as_deref(),
+            Some(result.as_str())
+        );
+        assert_eq!(&*event_types.lock().unwrap(), &["delta", "done"]);
+        let received = requests.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let (head, body) = received[0].split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST /custom/v1/chat/completions "));
+        assert!(
+            head.lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer synthetic-key")),
+            "使用显式 Key"
+        );
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload["model"], "explicit-model");
+        assert_eq!(payload["messages"][0]["content"], "explicit prompt");
+    }
+
+    #[test]
+    fn malformed_json_is_explicitly_rejected_by_the_config_snapshot() {
+        let err = AiConfigSnapshot::from_raw(Some("{"))
+            .err()
+            .expect("坏 JSON 必须显错");
+        assert_eq!(err.code, "aiNotConfigured");
+        assert!(err.message.contains("格式无效"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "超过计划 1")]
+    fn segment_plan_debug_asserts_on_impossible_same_signature_count() {
+        let tmp = TempAiDb::new("impossible-plan");
+        let conn = db::open(&tmp.path).unwrap();
+        seed_fixture(&conn, 0, "<p>正文</p>", "正文");
+        // 人为制造同签名但已有两个段号的不可达状态；生产只按当前分段写入。
+        for index in [0, 1] {
+            conn.execute(
+                "INSERT INTO ai_segments(article_id, product, signature, segment_index, content) VALUES(1, ?1, 'fixture', ?2, '<p>片段</p>')",
+                rusqlite::params![db::AI_PRODUCT_TRANSLATION, index],
+            ).unwrap();
+        }
+        let _ = translation_segment_plan(&conn, 1, "<p>正文</p>", "fixture").unwrap();
     }
 
     #[tokio::test]

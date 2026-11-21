@@ -628,19 +628,6 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             })
             .catch(() => { /* 回读失败：保留流式产物，不置错误态（与生成成功无关） */ });
         },
-        (msg) => {
-          /* 内联错误（卡片上直接可见）+ 非 silent 时 toast 带重试 */
-          if (!current()) return;
-          set((st) => {
-            const nextIds = { ...st.summarizingIds };
-            delete nextIds[id];
-            return { summarizingIds: nextIds, summaryErrors: { ...st.summaryErrors, [id]: msg } };
-          });
-          refreshAiStatus(id, true); // 生成终态必须读新状态，不 join 生成中的早期校验。
-          if (!silent) {
-            get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
-          }
-        },
         canStart,
       )
       .catch((e) => {
@@ -747,29 +734,6 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               if (!silent) get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
             });
         },
-        (msg) => {
-          if (!current()) return;
-          set((st) => {
-            const nextIds = { ...st.translatingIds };
-            delete nextIds[id];
-            const nextRaw = { ...st.rawTranslatedIds };
-            /* TASK-065 N11 × P2-9：清标记的前提是「已无未消毒产物可保护」。
-               流内已落过半截（译文非空）⇒ 标记必须保留，卡片按纯文本渲染，
-               不得进 HTML 路径；半截为空 ⇒ 标记已无保护对象，留着会让后续
-               水合写回的 DB 消毒译文走纯文本分支（字面显示 <p>已消毒译文</p>，
-               即 P2-9 的标记粘连症状）。 */
-            if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
-            return {
-              translatingIds: nextIds,
-              rawTranslatedIds: nextRaw,
-              translateErrors: { ...st.translateErrors, [id]: msg },
-            };
-          });
-          refreshAiStatus(id, true); // B3：失败后的当前 partial/failed。
-          if (!silent) {
-            get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
-          }
-        },
         canStart,
       )
       .catch((e) => {
@@ -779,7 +743,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           const nextIds = { ...st.translatingIds };
           delete nextIds[id];
           const nextRaw = { ...st.rawTranslatedIds };
-          /* 同上：清标记与「是否有未消毒半截」绑定 */
+          // 有未净化半截则继续按纯文本展示；无半截时释放标记，供安全回读使用。
           if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
           return {
             translatingIds: nextIds,
@@ -891,41 +855,11 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               }
             });
         },
-        (msg) => {
-          /* 内联错误（Reader 正文上方展示）+ 非 silent 时 toast 带重试。
-             F3（Batch 1/2 独立审查 P3）：失败路径与 translateEntry 同口径处理
-             rawTranslatedIds——无半截未消毒产物（译文为空）即清标记，
-             留着会让后续水合写回的 DB 消毒译文走纯文本分支（字面显示 <p>…</p>，
-             即 P2-9 标记粘连）；有半截则保留，按纯文本渲染（重试语义，D1b）。 */
-          if (!current()) return;
-          const ownsView = ownsReaderView();
-          set((st) => {
-            const nextRaw = { ...st.rawTranslatedIds };
-            const nextIds = { ...st.translatingIds };
-            delete nextIds[id];
-            if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
-            return {
-              translating: false,
-              ...(ownsView ? { isShowingTranslatedProse: false } : {}),
-              translatingIds: nextIds,
-              rawTranslatedIds: nextRaw,
-              translateErrors: { ...st.translateErrors, [id]: msg },
-            };
-          });
-          refreshAiStatus(id, true); // B3：失败后的当前 partial/failed。
-          if (!silent) {
-            get().showToast(`翻译失败：${msg}`, {
-              label: '重试',
-              key: `ai:translate:${id}`,
-              run: () => retryTranslationFor(id),
-            });
-          }
-        },
         canStart,
       )
       .catch((e) => {
-        /* F3：同上——清标记与「是否有未消毒半截」绑定（与 translateEntry 同口径） */
         if (!current()) return;
+        const msg = aiRejectionMessage(e);
         const ownsView = ownsReaderView();
         set((st) => {
           const nextRaw = { ...st.rawTranslatedIds };
@@ -937,12 +871,12 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             ...(ownsView ? { isShowingTranslatedProse: false } : {}),
             translatingIds: nextIds,
             rawTranslatedIds: nextRaw,
-            translateErrors: { ...st.translateErrors, [id]: aiRejectionMessage(e) },
+            translateErrors: { ...st.translateErrors, [id]: msg },
           };
         });
         refreshAiStatus(id, true);
         if (!silent) {
-          get().showToast(`翻译失败：${aiRejectionMessage(e)}`, {
+          get().showToast(`翻译失败：${msg}`, {
             label: '重试',
             key: `ai:translate:${id}`,
             run: () => retryTranslationFor(id),

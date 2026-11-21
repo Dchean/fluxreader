@@ -735,7 +735,7 @@ export const api = {
       : null;
   },
 
-  /* ---- AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi） ---- */
+  /* ---- AI 引擎（OpenAI 兼容协议） ---- */
   async getAiConfig(): Promise<string | null> {
     const inv = await getInvoke();
     return inv ? (await inv('get_ai_config') as string | null) : null;
@@ -755,17 +755,11 @@ export const api = {
     if (Array.isArray(raw)) return raw as string[];
     throw new Error(String(raw));
   },
-  /** 流式 AI 事件（channel 推送）
-   *
-   * TASK-070（REQ-104）：后端 `AiEvent::Error` 变体已删除（生产从不构造，
-   * 失败经 invoke rejection 与调用方 .catch 传达）。此处 `'error'` 分支保留为
-   * **防御性兜底**：channel 收到未知/畸形 type 时仍能报错而不是静默丢弃；
-   * 不再有任何 Rust 侧路径会发出它。 */
+  /** Channel 仅推送 Delta 与 Done；生成失败由对应 invoke 的拒绝传达。 */
   async aiSummarize(
     articleId: number,
     onDelta: (text: string) => void,
     onDone: () => void,
-    onError: (msg: string) => void,
     canStart?: () => boolean,
   ): Promise<string | null> {
     const inv = await getInvoke();
@@ -776,7 +770,6 @@ export const api = {
       const m = msg as { type?: string; data?: unknown };
       if (m.type === 'delta') onDelta(String(m.data ?? ''));
       else if (m.type === 'done') onDone();
-      else if (m.type === 'error') onError(String(m.data ?? 'AI 错误')); // 防御性兜底，见上方说明
     };
     if (canStart && !canStart()) return null;
     return (await inv('ai_summarize', { articleId, onChannel: channel })) as string;
@@ -785,7 +778,6 @@ export const api = {
     articleId: number,
     onDelta: (text: string) => void,
     onDone: () => void,
-    onError: (msg: string) => void,
     canStart?: () => boolean,
   ): Promise<string | null> {
     const inv = await getInvoke();
@@ -796,7 +788,6 @@ export const api = {
       const m = msg as { type?: string; data?: unknown };
       if (m.type === 'delta') onDelta(String(m.data ?? ''));
       else if (m.type === 'done') onDone();
-      else if (m.type === 'error') onError(String(m.data ?? 'AI 错误'));
     };
     if (canStart && !canStart()) return null;
     return (await inv('ai_translate', { articleId, onChannel: channel })) as string;

@@ -192,8 +192,7 @@ function countsFromRows() {
 }
 function emitAi(plan, ch) {
   for (const d of plan.deltas) ch.onmessage?.({ type: 'delta', data: d });
-  if (plan.error) { ch.onmessage?.({ type: 'error', data: plan.error }); return; }
-  if (plan.finish) ch.onmessage?.({ type: 'done' });
+  if (!plan.reject && plan.finish) ch.onmessage?.({ type: 'done' });
 }
 
 // ---- 两套 __INVOKE__：阶段一冒烟 / 主假后端 ----
@@ -401,13 +400,13 @@ globalThis.__INVOKE__ = (cmd, args) => {
       const plan = cmd === 'ai_summarize' ? S.aiSum : S.aiTr;
       const id = Number(args.articleId);
       const ch = args.onChannel;
-      if (plan.reject) return Promise.reject(plan.reject);
+      if (plan.reject) { emitAi(plan, ch); return Promise.reject(plan.reject); }
       if (plan.holdIds.includes(id)) { S.heldAi.push({ cmd, id, ch }); return new Promise(() => {}); }
       /* OPT-013 B1：deferIds = 由用例手动落定的 invoke（与 holdIds 的区别：返回
-         可 resolve 的 Promise——「流已 done 但 invoke 尚未 settle」的时序窗口
+         可 resolve/reject 的 Promise——「流已 done 但 invoke 尚未 settle」的时序窗口
          需要它，如逆序回读场景的两笔请求先后发起）。 */
       if ((plan.deferIds ?? []).includes(id)) {
-        return new Promise((resolve) => { S.heldAi.push({ cmd, id, ch, resolve }); });
+        return new Promise((resolve, reject) => { S.heldAi.push({ cmd, id, ch, resolve, reject }); });
       }
       emitAi(plan, ch);
       return Promise.resolve('');

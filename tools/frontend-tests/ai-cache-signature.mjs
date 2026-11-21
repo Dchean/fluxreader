@@ -426,12 +426,12 @@ export async function run(ctx) {
      清除 summary——summary 清除不得触碰译文侧未消毒标记，否则无后续 delta 的
      未消毒半截长期滞留 Timeline 的 HTML 渲染路径（持续态，非竞态窗口）。 */
   await entityFixture();
-  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [], deferIds: [201] };
   store.getState().translateEntry('201');
   await nTick(5);
   const heldHalf = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
   heldHalf.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
-  heldHalf.ch.onmessage?.({ type: 'error', data: '限流' });
+  heldHalf.reject({ code: 'aiStream', message: '限流' });
   await nTick(10);
   checkNew('(b3-6) 前置：译文流错误留半截且未消毒标记保留（失败重试语义）',
     store.getState().rawTranslatedIds['201'] === true
@@ -485,7 +485,7 @@ export async function run(ctx) {
   checkNew('(b3-4) stale：签名不匹配的旧产物如实标注（不再冒充可复用缓存）',
     stateOf('201', 'translation') === 'stale');
   S.invokeCalls.length = 0;
-  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [], deferIds: [201] };
   store.getState().translateEntry('201');
   await nTick(20);
   checkNew('(b3-4) 重新生成前不得被当完整缓存短路：入口真实发起生成',
@@ -497,7 +497,7 @@ export async function run(ctx) {
   /* 失败收尾（不悬挂）：流内错误 → 残段按 partial/failed 如实呈现 */
   const heldB34 = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
   heldB34.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
-  heldB34.ch.onmessage?.({ type: 'error', data: '限流' });
+  heldB34.reject({ code: 'aiStream', message: '限流' });
   await nTick(20);
   checkNew('(b3-4) 失败残段按 partial/failed 呈现（半截文本仍按纯文本渲染口径）',
     store.getState().rawTranslatedIds['201'] === true

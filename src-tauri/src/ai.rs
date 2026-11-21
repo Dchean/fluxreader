@@ -1,5 +1,5 @@
 //! AI 引擎：OpenAI 兼容协议的流式对话（摘要/翻译）。
-//! 兼容官方 OpenAI/DeepSeek/GLM 与任意 newapi 类中转（协议相同）。
+//! 服务地址、API Key 与模型由用户配置。
 //!
 //! UI-free：token 增量通过 `FnMut(&str) -> bool` sink 推送（返回 false 提前
 //! 停止），Tauri 命令层把 sink 包装成 ipc::Channel 推给前端。
@@ -30,19 +30,6 @@ const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 /// 达到即明确失败，防故障/恶意端点拖爆内存——不静默截断、不假装完成。
 const MAX_OUTPUT_TEXT: usize = 256 * 1024;
 
-/// 官方预设：preset 名 → (base_url, 默认模型)。
-/// 自定义预设（newapi 等）直接存 base_url，走同一条 OpenAI 兼容路径。
-///
-/// 注意：OpenAI 的 gpt-4.1 系列（及 o1 推理模型）已弃用 `max_tokens`，改用
-/// `max_completion_tokens`；而 DeepSeek/GLM 仍只认 `max_tokens`。本项目统一
-/// 用 `max_tokens`（stream_chat 请求体），故 OpenAI 预设默认模型须选仍支持
-/// `max_tokens` 的 gpt-4o-mini（而非 gpt-4.1-mini），否则默认配置即报错。
-pub const PRESETS: &[(&str, &str, &str)] = &[
-    ("deepseek", "https://api.deepseek.com", "deepseek-chat"),
-    ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("glm", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
-];
-
 /// 从 settings 表的 ai_config JSON 解析出的有效配置。
 pub struct AiConfig {
     pub api_key: String,
@@ -52,64 +39,40 @@ pub struct AiConfig {
 }
 
 impl AiConfig {
-    /// 从原始 JSON 构建：key/model/base_url 全 trim；空 key 报 aiNotConfigured。
+    /// 只使用用户显式填写的端点、Key 和模型。既有 `preset` 仅作历史字段保留。
     pub fn from_json(raw: &str) -> AppResult<Self> {
+        Self::parse_with_fields(raw).map(|(cfg, _)| cfg)
+    }
+
+    /// 保留同次解析的字段，供命令从同一份 JSON 读取提示词。
+    pub(crate) fn parse_with_fields(raw: &str) -> AppResult<(Self, Value)> {
         let v: Value = serde_json::from_str(raw)
             .map_err(|_| AppError::new("aiNotConfigured", "AI 配置格式无效"))?;
-        let api_key = v["apiKey"]
-            .as_str()
-            .map(|k| k.trim())
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| AppError::new("aiNotConfigured", "未配置 API Key"))?
-            .to_string();
-        let preset = v["preset"].as_str().unwrap_or("").trim();
-        // TASK-076（P2-11，DEC-req104-p2-11-ai-validation-20260920）：未知 preset 不再
-        // 静默回落 deepseek-chat / api.deepseek.com。此前用户选了一个不存在的预设时，
-        // 请求会被打到其**并未选择**的厂商（DeepSeek）上，既可能计费错对象，也无任何
-        // 提示——属于「配置写错但看起来正常」。现在只有两种合法形态：
-        //   ① preset 命中 PRESETS 之一 → 用该预设的默认模型/地址；
-        //   ② 自定义（自定义预设存 base_url，preset 可为空或自定义名）→ 必须显式提供
-        //      非空 model 与 baseUrl。
-        // 两者都不满足 → 报错让用户看见，而不是替他选一家厂商。
-        let preset_entry = PRESETS.iter().find(|(p, _, _)| *p == preset);
-        let explicit_model = v["model"]
-            .as_str()
-            .map(|m| m.trim())
-            .filter(|m| !m.is_empty());
-        let explicit_base = v["baseUrl"]
-            .as_str()
-            .map(|u| u.trim().trim_end_matches('/'))
-            .filter(|u| !u.is_empty());
-
-        let model = match (preset_entry, explicit_model) {
-            (Some((_, _, m)), None) => (*m).to_string(),
-            (_, Some(m)) => m.to_string(),
-            (None, None) => {
+        if !v.is_object() {
+            return Err(AppError::new("aiNotConfigured", "AI 配置格式无效"));
+        }
+        let text = |key: &str| v[key].as_str().unwrap_or_default().trim();
+        let api_key = text("apiKey");
+        let base_url = text("baseUrl").trim_end_matches('/');
+        let model = text("model");
+        for (value, label) in [
+            (api_key, "API Key"),
+            (base_url, "Base URL"),
+            (model, "模型"),
+        ] {
+            if value.is_empty() {
                 return Err(AppError::new(
                     "aiNotConfigured",
-                    format!(
-                        "无法识别的 AI 预设「{preset}」：请选择受支持的预设，或自定义填写模型与 API 地址"
-                    ),
-                ))
+                    format!("请在 AI 设置中填写 {label}"),
+                ));
             }
+        }
+        let cfg = Self {
+            api_key: api_key.to_owned(),
+            model: model.to_owned(),
+            base_url: base_url.to_owned(),
         };
-        let base_url = match (preset_entry, explicit_base) {
-            (_, Some(u)) => u.to_string(),
-            (Some((_, u, _)), None) => (*u).to_string(),
-            (None, None) => {
-                return Err(AppError::new(
-                    "aiNotConfigured",
-                    format!(
-                        "无法识别的 AI 预设「{preset}」：请选择受支持的预设，或自定义填写模型与 API 地址"
-                    ),
-                ))
-            }
-        };
-        Ok(AiConfig {
-            api_key,
-            model,
-            base_url,
-        })
+        Ok((cfg, v))
     }
 
     /// 已解析的模型名（key 不外泄）。
@@ -704,11 +667,35 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_from_preset() {
-        // 只给 preset+key：base_url/model 取预设默认
-        let cfg = AiConfig::from_json(r#"{"preset":"openai","apiKey":"sk-2"}"#).unwrap();
-        assert_eq!(cfg.base_url, "https://api.openai.com/v1");
-        assert_eq!(cfg.model, "gpt-4o-mini");
+    fn config_does_not_fill_a_known_preset_endpoint() {
+        // D6 取代旧的 preset 缺省行为；即使模型已填，仍需要显式地址。
+        let err = AiConfig::from_json(
+            r#"{"preset":"openai","apiKey":"synthetic-key","model":"explicit"}"#,
+        )
+        .err()
+        .expect("已知 preset 也不能补填地址");
+        assert_eq!(err.code, "aiNotConfigured");
+        assert!(err.message.contains("Base URL"));
+    }
+
+    #[test]
+    fn empty_model_is_rejected_without_replacing_saved_endpoint_values() {
+        let raw = r#"{"preset":"deepseek","baseUrl":"https://custom.example/v1","apiKey":"synthetic-key","model":"","other":"kept"}"#;
+        let parsed: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed["baseUrl"], "https://custom.example/v1");
+        assert_eq!(parsed["apiKey"], "synthetic-key");
+        assert_eq!(parsed["model"], "");
+        assert_eq!(parsed["other"], "kept");
+
+        let err = match AiConfig::from_json(raw) {
+            Ok(_) => panic!("空模型不得从 preset 回填"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, "aiNotConfigured");
+        assert!(
+            err.message.contains("模型"),
+            "错误需指导用户补填模型: {err}"
+        );
     }
 
     #[test]
@@ -716,22 +703,14 @@ mod tests {
         assert!(AiConfig::from_json(r#"{"preset":"openai"}"#).is_err());
     }
 
-    /// TASK-076（P2-11）：未知 preset 必须显式报错，**不得**静默回落到
-    /// deepseek-chat / https://api.deepseek.com。
-    ///
-    /// 修前行为：`{"preset":"azure","apiKey":"sk-x"}` 会得到
-    /// model=deepseek-chat、base_url=https://api.deepseek.com —— 用户选了不存在的
-    /// 预设，请求却被悄悄打到 DeepSeek（可能计费错对象），且没有任何提示。
+    /// D6：旧 preset 名不再决定地址/模型；给出可操作的缺字段提示。
     #[test]
     fn unknown_preset_is_rejected_instead_of_silently_falling_back() {
-        let msg = match AiConfig::from_json(r#"{"preset":"azure","apiKey":"sk-x"}"#) {
-            Ok(_) => panic!("未知 preset 必须报错，而不是静默回落"),
-            Err(e) => format!("{e}"),
-        };
-        assert!(
-            msg.contains("azure"),
-            "报错应指明无法识别的 preset 名，实际: {msg}"
-        );
+        let err = AiConfig::from_json(r#"{"preset":"azure","apiKey":"sk-x"}"#)
+            .err()
+            .expect("缺字段的 preset 必须报错，而不是静默回落");
+        assert_eq!(err.code, "aiNotConfigured");
+        assert!(err.message.contains("Base URL"));
     }
 
     /// 未知 preset 但同时显式给了 model + baseUrl → 视为自定义配置，正常可用。

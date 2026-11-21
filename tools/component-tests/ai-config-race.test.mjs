@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { componentTest, mount, unmount, flush, waitFor, resetStore, dom, useAppStore } from './harness.mjs';
-import { installBackend, clearInvokeCalls, invokeCalls, setPlan, resetPlan, deferred } from './fixtures.mjs';
+import { installBackend, clearInvokeCalls, invokeCalls, invokeCount, setPlan, resetPlan, deferred } from './fixtures.mjs';
 
 async function edit(el, value) {
   assert.ok(el, '被编辑的真实控件存在');
@@ -43,6 +43,7 @@ componentTest('AiTab 测试在途保存提示词：端点与提示词均保留�
     await flush(2);
     await edit(entry.container.querySelector('[aria-label="API Base URL"]'), 'https://tested.example/v1');
     await edit(entry.container.querySelector('[aria-label="API Key"]'), 'fake-tested-key');
+    await edit(entry.container.querySelector('[aria-label="当前使用模型"]'), 'model-a'); // D6：模型必须显式填写。
     await act(async () => { button(entry, '测试连通性并保存').click(); });
     await waitFor(() => invokeCalls.some((c) => c.cmd === 'ai_list_models'));
     await edit(entry.container.querySelector('[aria-label="摘要提示词"]'), '并发编辑后的摘要提示词');
@@ -84,6 +85,7 @@ componentTest('AiTab 测试 A 期间改成 B：保存身份必须已测试，迟
     const key = entry.container.querySelector('[aria-label="API Key"]');
     await edit(base, 'https://tested-a.example/v1');
     await edit(key, 'fake-key-a');
+    await edit(field(entry, '当前使用模型'), 'model-from-a'); // D6：保持可达的在途测试。
     await act(async () => { button(entry, '测试连通性并保存').click(); });
     await waitFor(() => invokeCalls.some((c) => c.cmd === 'ai_list_models'));
     assert.deepEqual(invokeCalls.find((c) => c.cmd === 'ai_list_models').args,
@@ -151,6 +153,72 @@ const field = (entry, name) => entry.container.querySelector(`[aria-label="${nam
 const testFinished = (entry) => [...entry.container.querySelectorAll('button')]
   .some((el) => el.textContent.trim() === '测试连通性并保存' && !el.disabled);
 
+componentTest('AiTab keeps an empty saved model intact until explicit input, then tests and saves that model', { timeout: 20000 }, async () => {
+  installBackend(); resetPlan(); resetStore(); clearInvokeCalls();
+  const original = {
+    preset: 'legacy-preset', baseUrl: 'https://user.example/v1', apiKey: 'synthetic-key', model: '',
+    summaryPrompt: 'saved summary', translatePrompt: 'saved translation', extra: 'preserved',
+  };
+  let saved = original;
+  const writes = [];
+  setPlan({
+    get_ai_config: () => Promise.resolve(JSON.stringify(saved)),
+    ai_list_models: () => Promise.resolve(['endpoint-model']),
+    save_ai_config: (args) => { saved = JSON.parse(args.value); writes.push(saved); return Promise.resolve(null); },
+  });
+  const { createElement, act } = await import('react');
+  const { AiTab } = await import('../../src/components/settings/AiTab.tsx');
+  try {
+    const entry = await mount(createElement(AiTab));
+    await flush(2);
+    const model = field(entry, '当前使用模型');
+    assert.equal(model.value, '', '已保存空模型必须原样显示');
+
+    await act(async () => { button(entry, '测试连通性并保存').click(); });
+    assert.equal(invokeCount('ai_list_models'), 0, '未填写模型不得发出探测或生成前置请求');
+    assert.equal(invokeCount('save_ai_config'), 0, '未填写模型不得改写配置');
+    assert.ok(useAppStore.getState().toasts.some((toast) => toast.text.includes('模型')),
+      '错误需直接提示补填模型');
+
+    await edit(model, 'chosen-model');
+    await act(async () => { button(entry, '测试连通性并保存').click(); });
+    await waitFor(() => writes.length === 1);
+    assert.deepEqual(invokeCalls.find((call) => call.cmd === 'ai_list_models').args,
+      { baseUrl: 'https://user.example/v1', apiKey: 'synthetic-key' });
+    assert.equal(writes[0].baseUrl, 'https://user.example/v1');
+    assert.equal(writes[0].apiKey, 'synthetic-key');
+    assert.equal(writes[0].model, 'chosen-model');
+    assert.equal(writes[0].preset, 'legacy-preset', '旧配置字段保留');
+    assert.equal(writes[0].extra, 'preserved', '其它 JSON 字段保留');
+    assert.deepEqual(writes[0], { ...original, model: 'chosen-model' }, '只改用户补填的模型');
+    assert.equal(entry.container.querySelector('[role="combobox"][aria-label="当前使用模型"]')?.textContent.trim(),
+      'chosen-model', '选中的模型可见值与已保存及请求值一致');
+    await unmount(entry);
+    const reopened = await mount(createElement(AiTab));
+    await waitFor(() => field(reopened, '当前使用模型').value === 'chosen-model');
+    assert.equal(field(reopened, 'API Base URL').value, original.baseUrl);
+    assert.equal(field(reopened, 'API Key').value, original.apiKey);
+    assert.equal(writes.length, 1, '重挂只回显、不自动写入');
+  } finally { resetPlan(); }
+});
+
+componentTest('AiTab starts with no suggested endpoint or model', async () => {
+  installBackend(); resetPlan(); resetStore(); clearInvokeCalls();
+  setPlan({ get_ai_config: async () => null });
+  const { createElement, act } = await import('react');
+  const { AiTab } = await import('../../src/components/settings/AiTab.tsx');
+  try {
+    const entry = await mount(createElement(AiTab));
+    await flush(2);
+    assert.equal(field(entry, 'API Base URL').value, '', '没有存量配置时地址不可预填');
+    assert.equal(field(entry, 'API Key').value, '');
+    assert.equal(field(entry, '当前使用模型').value, '', '没有存量配置时模型不可预填');
+    await act(async () => { button(entry, '测试连通性并保存').click(); });
+    assert.equal(invokeCount('ai_list_models'), 0);
+    assert.equal(invokeCount('save_ai_config'), 0);
+  } finally { resetPlan(); }
+});
+
 // 覆盖所有 async 边界。旧“初始恢复改变端点→仅作废在途测试”允许成功后的旧回读
 // 覆盖表单；现在显式测试即接管端点，初始快照在这些阶段均无端点写权。
 for (const phase of ['测试在途', '保存前读取在途', '保存请求在途', '保存成功后', '测试失败后', '保存失败后']) {
@@ -171,7 +239,7 @@ for (const phase of ['测试在途', '保存前读取在途', '保存请求在�
         if (++reads === 1) return initial.promise;
         return phase === '保存前读取在途' && reads === 2 ? persistedRead.promise.then(() => snapshot) : Promise.resolve(snapshot);
       },
-      ai_list_models: () => ++modelRequests === 1 ? models.promise : Promise.resolve(['deepseek-chat']),
+      ai_list_models: () => ++modelRequests === 1 ? models.promise : Promise.resolve(['draft-model']),
       save_ai_config: (args) => {
         const value = JSON.parse(args.value);
         writes.push(value);
@@ -184,8 +252,11 @@ for (const phase of ['测试在途', '保存前读取在途', '保存请求在�
     try {
       const entry = await mount(createElement(AiTab));
       await waitFor(() => reads === 1);
+      // D6：地址和模型不再预填；用显式草稿进入同一测试/晚回读窗口。
+      await edit(field(entry, 'API Base URL'), 'https://draft.example/v1');
       await edit(field(entry, 'API Key'), 'draft-key');
-      const requested = { preset: 'deepseek', baseUrl: field(entry, 'API Base URL').value, apiKey: 'draft-key', model: field(entry, '当前使用模型').value };
+      await edit(field(entry, '当前使用模型'), 'draft-model');
+      const requested = { baseUrl: 'https://draft.example/v1', apiKey: 'draft-key', model: 'draft-model' };
       await act(async () => { button(entry, '测试连通性并保存').click(); });
       await waitFor(() => modelRequests === 1);
       assert.deepEqual(invokeCalls.find((call) => call.cmd === 'ai_list_models').args,
@@ -202,7 +273,7 @@ for (const phase of ['测试在途', '保存前读取在途', '保存请求在�
 
       await act(async () => { initial.resolve(JSON.stringify(INITIAL_CONFIG)); });
       await flush(2);
-      assert.equal(field(entry, 'API Base URL').value, requested.baseUrl, '测试已接管未敲过键的默认地址');
+      assert.equal(field(entry, 'API Base URL').value, requested.baseUrl, '显式测试的地址保留');
       assert.equal(field(entry, 'API Key').value, requested.apiKey, '已输入Key保留');
       assert.equal(field(entry, '摘要提示词').value, INITIAL_CONFIG.summaryPrompt, '测试没有接管提示词，仍可正常恢复');
       assert.equal(field(entry, '翻译提示词').value, INITIAL_CONFIG.translatePrompt, '另一提示词仍可正常恢复');
@@ -216,12 +287,13 @@ for (const phase of ['测试在途', '保存前读取在途', '保存请求在�
         await waitFor(() => modelRequests === 2 && testFinished(entry));
       }
       assert.deepEqual(Object.fromEntries(Object.keys(requested).map((key) => [key, saved[key]])), requested,
-        '最终持久化的四字段与实际成功测试的快照一致');
+        '最终持久化的端点三字段与实际成功测试的快照一致');
+      assert.equal(saved.preset, INITIAL_CONFIG.preset, 'D6：历史 preset 原样保留');
       assert.equal(saved.summaryPrompt, INITIAL_CONFIG.summaryPrompt, '端点保存不覆盖提示词');
       assert.equal(field(entry, 'API Base URL').value, saved.baseUrl, '旧initial返回后显示仍对应已保存身份');
       assert.ok(writes.every((value) => value.baseUrl === requested.baseUrl && value.apiKey === requested.apiKey));
     } finally {
-      await act(async () => { initial.resolve(JSON.stringify(INITIAL_CONFIG)); models.resolve(['deepseek-chat']); persistedRead.resolve(); save.resolve(); });
+      await act(async () => { initial.resolve(JSON.stringify(INITIAL_CONFIG)); models.resolve(['draft-model']); persistedRead.resolve(); save.resolve(); });
       await flush(2);
       resetPlan();
     }
@@ -374,8 +446,8 @@ for (const editNewDraft of [false, true]) {
       assert.equal(field(next, 'API Key').value, editNewDraft ? 'new-draft-key' : saved.apiKey);
       assert.equal(field(next, '摘要提示词').value, editNewDraft ? 'new-instance-summary' : INITIAL_CONFIG.summaryPrompt);
       assert.equal(useAppStore.getState().toasts.length, 0, '已卸载页面的迟到成功不冒充当前页面结果');
-      assert.equal(next.container.querySelectorAll('[role="combobox"]').length, 1,
-        '旧页完成不能给新页安装旧模型选择结果');
+      assert.equal(field(next, '当前使用模型').tagName, 'INPUT',
+        'D6 移除预设下拉；旧页完成不能给新页安装旧模型选择结果');
       if (editNewDraft) {
         await act(async () => { button(next, '测试连通性并保存').click(); });
         await waitFor(() => writes === 2 && testFinished(next));
@@ -448,7 +520,8 @@ componentTest('AiTab 切换模型后保存提示词：模型落库且端点、�
     const entry = await mount(createElement(AiTab));
     await flush(2);
     await act(async () => { button(entry, '测试连通性并保存').click(); });
-    await waitFor(() => entry.container.querySelectorAll('[role="combobox"]').length === 2);
+    // D6 removes the vendor preset control. Wait for the actual model control.
+    await waitFor(() => field(entry, '当前使用模型')?.getAttribute('role') === 'combobox');
     const modelControl = [...entry.container.querySelectorAll('[role="combobox"]')].find((el) => el.textContent.includes('model-a'));
     assert.ok(modelControl, '测试成功后模型选择器可用');
     await act(async () => { modelControl.click(); });
@@ -497,7 +570,7 @@ componentTest('AiTab 模型读取挂起期间保存提示词：迟到旧快照�
     const entry = await mount(createElement(AiTab));
     await flush(2);
     await act(async () => { button(entry, '测试连通性并保存').click(); });
-    await waitFor(() => entry.container.querySelectorAll('[role="combobox"]').length === 2
+    await waitFor(() => field(entry, '当前使用模型')?.getAttribute('role') === 'combobox'
       && !button(entry, '测试连通性并保存').disabled);
     const modelControl = [...entry.container.querySelectorAll('[role="combobox"]')].find((el) => el.textContent.includes('model-a'));
     assert.ok(modelControl, '已测试端点的模型选择器存在');

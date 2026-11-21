@@ -326,7 +326,7 @@ componentTest('OPT-013 B3：partial 显示「部分完成」+ 继续/清除真�
   const held = [];
   setPlan({
     ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } }),
-    ai_translate: (args) => new Promise((resolve) => { held.push({ cmd: 'ai_translate', args, resolve }); }),
+    ai_translate: (args) => new Promise((resolve, reject) => { held.push({ cmd: 'ai_translate', args, resolve, reject }); }),
   });
   try {
     const { createElement, act } = await import('react');
@@ -351,8 +351,7 @@ componentTest('OPT-013 B3：partial 显示「部分完成」+ 继续/清除真�
     await act(async () => {
       const h = held[0];
       h.args.onChannel?.onmessage?.({ type: 'delta', data: '<b>半截' });
-      h.args.onChannel?.onmessage?.({ type: 'error', data: '限流' });
-      h.resolve('');
+      h.reject({ code: 'aiStream', message: '限流' });
       await Promise.resolve();
     });
     await waitFor(() => entry.container.querySelector('.ai-partial-hint') !== null, { label: '失败后回到 partial（可继续）' });
@@ -587,7 +586,7 @@ for (const [layout, feedId, cardSelector, blockSelector] of [
     const held = [];
     setPlan({
       ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } }),
-      ai_translate: (args) => new Promise((resolve) => { held.push({ args, resolve }); }),
+      ai_translate: (args) => new Promise((resolve, reject) => { held.push({ args, resolve, reject }); }),
     });
     try {
       const { createElement, act } = await import('react');
@@ -609,8 +608,7 @@ for (const [layout, feedId, cardSelector, blockSelector] of [
       const fail = async (request) => {
         await act(async () => {
           request.args.onChannel.onmessage({ type: 'delta', data: '<b>半截' });
-          request.args.onChannel.onmessage({ type: 'error', data: '分段限流详情' });
-          request.resolve('');
+          request.reject({ code: 'aiStream', message: '分段限流详情' });
         });
         await waitFor(() => block.querySelector('.ai-error-text') !== null && block.querySelector('.ai-partial-hint') !== null,
           { label: `${layout} 失败详情和可续片段并存` });

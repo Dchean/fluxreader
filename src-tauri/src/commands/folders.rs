@@ -984,6 +984,88 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inherit_count, 1, "库内真值列确实写了 inherit");
+
+        let explicit = persist_new_feed(
+            &conn,
+            "https://explicit.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
+            false,
+        )
+        .unwrap();
+        let stored = db::list_feeds(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == explicit.id)
+            .unwrap();
+        assert_eq!(
+            (
+                stored.summary_mode.as_str(),
+                stored.translate_mode.as_str(),
+                stored.auto_summary,
+                stored.auto_translate
+            ),
+            ("on", "off", true, false),
+            "手动显式选择不被继承默认覆盖"
+        );
+    }
+
+    #[test]
+    fn manual_readd_of_retained_source_preserves_all_ai_mode_pairs() {
+        let mut failures = Vec::new();
+        for summary in ["inherit", "on", "off"] {
+            for translate in ["inherit", "on", "off"] {
+                let conn = test_conn();
+                let folder = db::create_folder(&conn, "手动重添", "article").unwrap();
+                let id = db::insert_feed_origin_modes(
+                    &conn,
+                    "https://manual-retained.example/rss",
+                    None,
+                    "原标题",
+                    None,
+                    folder,
+                    "inherit",
+                    db::FeedAiMode::parse(summary).unwrap(),
+                    db::FeedAiMode::parse(translate).unwrap(),
+                    "local",
+                )
+                .unwrap();
+                db::delete_feed(&conn, id).unwrap();
+
+                let restored = persist_new_feed(
+                    &conn,
+                    "https://manual-retained.example/rss",
+                    &minimal_parsed(),
+                    None,
+                    None,
+                    None,
+                    Some(folder),
+                    "inherit",
+                    db::FeedAiMode::Inherit,
+                    db::FeedAiMode::Inherit,
+                    false,
+                )
+                .unwrap();
+
+                assert_eq!(restored.id, id, "手动重添必须复活原源身份");
+                let actual = (restored.summary_mode, restored.translate_mode);
+                let expected = (summary.to_string(), translate.to_string());
+                if actual != expected {
+                    failures.push(format!("{summary}/{translate}: {actual:?} != {expected:?}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "手动重添 mode 组合失败: {}",
+            failures.join("; ")
+        );
     }
 
     /// P2：Fever 没有订阅写回端点——即使旧前端/恶意调用传 sync_to_backend=true，

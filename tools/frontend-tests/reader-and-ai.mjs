@@ -49,7 +49,7 @@ export async function run(ctx) {
     S.invokeCalls.filter((c) => c.cmd === 'ai_summarize').length === 0);
 
   store.setState({ toasts: [] });
-  S.aiSum = { deltas: [], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
+  S.aiSum = { deltas: [], reject: { code: 'aiStream', message: 'AI 限流' }, finish: false, holdIds: [] };
   store.getState().summarizeEntry('105');
   await nTick(5);
   const lErr = store.getState();
@@ -153,15 +153,17 @@ export async function run(ctx) {
 
   await entityFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
-  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  S.aiTr = { deltas: [], reject: null, finish: true, holdIds: [], deferIds: [201] };
   store.getState().translateEntry('201');
   await nTick(5);
   const heldN11Err = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
   heldN11Err.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
-  heldN11Err.ch.onmessage?.({ type: 'error', data: '限流' });
-  checkNew('(l2) 流错误路径：半截未消毒内容保留（重试语义）且标记保持（按纯文本渲染；TASK-122 真值源 bodyById）',
+  heldN11Err.reject({ code: 'aiStream', message: '限流' });
+  await nTick(5);
+  checkNew('(l2) IPC 拒绝：半截未消毒内容保留（重试语义）且标记保持（按纯文本渲染；TASK-122 真值源 bodyById）',
     bodyOf(store.getState(), '201').translatedContent === '<b>半截'
-    && store.getState().rawTranslatedIds['201'] === true);
+    && store.getState().rawTranslatedIds['201'] === true
+    && store.getState().translateErrors['201'] === '限流');
 
   /* 与上一条成对：失败时**无任何 delta**（未消毒产物为空）⇒ 标记必须清除。
      留着会让后续水合写回的 DB 消毒译文走纯文本分支（卡片字面显示 <p>…</p>，
@@ -198,7 +200,7 @@ export async function run(ctx) {
   /* ---------- D1a：摘要「先出半截文本再报错」后，重试必须真的重发 ---------- */
   await entityFixture();
   store.setState({ toasts: [] });
-  S.aiSum = { deltas: ['半截摘要'], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
+  S.aiSum = { deltas: ['半截摘要'], reject: { code: 'aiStream', message: 'AI 限流' }, finish: false, holdIds: [] };
   store.getState().summarizeEntry('105');
   await nTick(5);
   const d1a = store.getState();
@@ -215,7 +217,7 @@ export async function run(ctx) {
   /* ---------- D1b：卡片翻译「先出半截译文再报错」后，重试必须真的重发 ---------- */
   await entityFixture();
   store.setState({ toasts: [] });
-  S.aiTr = { deltas: ['半截译文'], error: '限流', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: ['半截译文'], reject: { code: 'aiStream', message: '限流' }, finish: false, holdIds: [] };
   store.getState().translateEntry('201');
   await nTick(5);
   const d1bPartial = bodyOf(store.getState(), '201').translatedContent;
@@ -244,7 +246,7 @@ export async function run(ctx) {
     entries: s.entries.map((a) => (a.id === '201' ? { ...a, content: '<p>详情</p>' } : a)),
   }));
   store.getState().selectArticle('201');
-  S.aiTr = { deltas: ['半截译文'], error: '限流', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: ['半截译文'], reject: { code: 'aiStream', message: '限流' }, finish: false, holdIds: [] };
   store.getState().toggleReaderTranslation();
   await nTick(5);
   const d1c = store.getState();
@@ -418,7 +420,7 @@ export async function run(ctx) {
     && store.getState().activeFeedFilter === '12');
 
   await entityFixture();
-  S.aiTr = { deltas: [], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: 'AI 限流' }, finish: false, holdIds: [] };
   store.setState({
     activeArticleId: '101',
     isShowingTranslatedProse: false,
@@ -442,7 +444,7 @@ export async function run(ctx) {
   checkNew('(OPT-020 translation) 旧重试不把当前文章 104 切进译文展示态',
     store.getState().activeArticleId === '104' && store.getState().isShowingTranslatedProse === false);
 
-  S.aiTr = { deltas: [], error: 'A 当前视图外失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: 'A 当前视图外失败' }, finish: false, holdIds: [] };
   store.setState({ activeArticleId: '101', isShowingTranslatedProse: false, toasts: [], errors: [] });
   store.getState().toggleReaderTranslation();
   await nTick(20);
@@ -466,17 +468,17 @@ export async function run(ctx) {
   /* 连续重试必须脱离当前 entries：首次重试失败后的新入口仍可直接重发。 */
   await entityFixture();
   store.setState({ toasts: [], errors: [], activeArticleId: null });
-  S.aiSum = { deltas: [], error: '摘要首次失败', reject: null, finish: true, holdIds: [] };
+  S.aiSum = { deltas: [], reject: { code: 'aiStream', message: '摘要首次失败' }, finish: false, holdIds: [] };
   store.getState().summarizeEntry('105');
   await nTick(20);
   const opt020SummaryError1 = store.getState().errors.find((e) => e.key === 'ai:summary:105');
   store.setState((s) => ({ entries: s.entries.filter((e) => e.id !== '105') }));
   S.invokeCalls.length = 0;
-  S.aiSum = { deltas: [], error: '摘要二次失败', reject: null, finish: true, holdIds: [] };
+  S.aiSum = { deltas: [], reject: { code: 'aiStream', message: '摘要二次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020SummaryError1?.id);
   await nTick(20);
   const opt020SummaryError2 = store.getState().errors.find((e) => e.key === 'ai:summary:105');
-  S.aiSum = { deltas: [], error: '摘要三次失败', reject: null, finish: true, holdIds: [] };
+  S.aiSum = { deltas: [], reject: { code: 'aiStream', message: '摘要三次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020SummaryError2?.id);
   await nTick(20);
   checkNew('(OPT-020 summary retry) 文章不在当前 entries 时连续重试仍发两次 IPC，并保留最新入口',
@@ -485,17 +487,17 @@ export async function run(ctx) {
 
   await entityFixture();
   store.setState({ toasts: [], errors: [], activeArticleId: null });
-  S.aiTr = { deltas: [], error: '卡片翻译首次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '卡片翻译首次失败' }, finish: false, holdIds: [] };
   store.getState().translateEntry('105');
   await nTick(20);
   const opt020CardError1 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
   store.setState((s) => ({ entries: s.entries.filter((e) => e.id !== '105') }));
   S.invokeCalls.length = 0;
-  S.aiTr = { deltas: [], error: '卡片翻译二次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '卡片翻译二次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020CardError1?.id);
   await nTick(20);
   const opt020CardError2 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
-  S.aiTr = { deltas: [], error: '卡片翻译三次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '卡片翻译三次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020CardError2?.id);
   await nTick(20);
   checkNew('(OPT-020 card translation retry) 文章不在当前 entries 时连续重试仍发两次 IPC，并保留最新入口',
@@ -509,7 +511,7 @@ export async function run(ctx) {
     activeArticleId: '105',
     isShowingTranslatedProse: false,
   });
-  S.aiTr = { deltas: [], error: 'Reader 翻译首次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: 'Reader 翻译首次失败' }, finish: false, holdIds: [] };
   store.getState().toggleReaderTranslation();
   await nTick(20);
   const opt020ReaderError1 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
@@ -518,11 +520,11 @@ export async function run(ctx) {
     entries: s.entries.filter((e) => e.id !== '105'),
   }));
   S.invokeCalls.length = 0;
-  S.aiTr = { deltas: [], error: 'Reader 翻译二次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: 'Reader 翻译二次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020ReaderError1?.id);
   await nTick(20);
   const opt020ReaderError2 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
-  S.aiTr = { deltas: [], error: 'Reader 翻译三次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: 'Reader 翻译三次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020ReaderError2?.id);
   await nTick(20);
   checkNew('(OPT-020 reader translation retry) Reader 失败后切文且 entries 无 A，二次失败入口仍连续发 IPC',
@@ -542,14 +544,14 @@ export async function run(ctx) {
     activeArticleId: '105',
     isShowingTranslatedProse: false,
   });
-  S.aiTr = { deltas: [], error: '当前文章首次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '当前文章首次失败' }, finish: false, holdIds: [] };
   store.getState().toggleReaderTranslation();
   await nTick(20);
   const opt020ReaderCurrentError1 = store.getState().errors.find(
     (e) => e.key === 'ai:translate:105',
   );
   S.invokeCalls.length = 0;
-  S.aiTr = { deltas: [], error: '当前文章二次失败', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '当前文章二次失败' }, finish: false, holdIds: [] };
   store.getState().retryError?.(opt020ReaderCurrentError1?.id);
   await nTick(20);
   const opt020ReaderCurrentError2 = store.getState().errors.find(
@@ -586,8 +588,7 @@ export async function run(ctx) {
     && store.getState().activeArticleId === '104'
     && store.getState().translating === true
     && store.getState().isShowingTranslatedProse === true);
-  opt020ReaderAStream.ch.onmessage?.({ type: 'error', data: 'A 迟到流失败' });
-  opt020ReaderAStream.resolve('');
+  opt020ReaderAStream.reject({ code: 'aiStream', message: 'A 迟到流失败' });
   await nTick(5);
   checkNew('(OPT-020 reader translation A/B) A 迟到流失败：全局布尔终态复位（不随 ownsView 门控），B 的按 id 在途态与译文展示不受影响',
     store.getState().activeArticleId === '104'
@@ -604,7 +605,7 @@ export async function run(ctx) {
     && store.getState().isShowingTranslatedProse === true
     && bodyOf(store.getState(), '104').translatedContent === '<p>B 并发译文</p>');
 
-  /* A 的迟到 transport reject 与流错误同口径。 */
+  /* A 的迟到无码 transport reject 与上一个携业务码的拒绝同样保护 B。 */
   await entityFixture();
   S.detailImpl = (id) => mkRow({
     id,

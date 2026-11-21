@@ -107,7 +107,7 @@ export async function run(ctx) {
     checkNew('(f7) 生成正对照：真实生成已开始', !!generation && visible() === 'generating');
     preGeneration.resolve(status(true, 3)); await nTick(3);
     checkNew('(f7) 生成前旧校验不能在新生成阶段落地', store.getState().aiStatusById['101'] === undefined);
-    generation.ch.onmessage({ type: 'error', data: 'provider interrupted' }); generation.resolve(''); await nTick(4);
+    generation.reject({ code: 'aiStream', message: 'provider interrupted' }); await nTick(4);
     checkNew('(f7) 新生成终态刷新得到当前 partial', visible() === 'partial'
       && store.getState().aiStatusById['101'].translationSegments.completed === 1);
     hint.resolve(status(false, 3)); await nTick(3);

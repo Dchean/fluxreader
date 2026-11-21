@@ -35,8 +35,8 @@ function setup(layout = 'article', rows) {
   useAppStore.setState({ categories, feedIndex: buildFeedIndex(categories), sourceIndex: buildSourceIndex(categories) });
   useAppStore.setState((s) => ({ settings: { ...s.settings, ...enabled } }));
   setPlan({ ai_cache_check: () => Promise.resolve(MISS),
-    ai_summarize: async (args) => { args.onChannel.onmessage({ type: 'error', data: '测试失败' }); return ''; },
-    ai_translate: async (args) => { args.onChannel.onmessage({ type: 'error', data: '测试失败' }); return ''; },
+    ai_summarize: async () => { throw { code: 'aiStream', message: '测试失败' }; },
+    ai_translate: async () => { throw { code: 'aiStream', message: '测试失败' }; },
   });
   return rows;
 }

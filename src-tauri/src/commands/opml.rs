@@ -98,7 +98,7 @@ fn import_feeds(
                 id
             }
         };
-        let feed_id = db::insert_feed(
+        let feed_id = db::insert_feed_origin_modes(
             &tx,
             &f.feed_url,
             None,
@@ -106,8 +106,9 @@ fn import_feeds(
             None,
             folder_id,
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::Inherit,
+            db::FeedAiMode::Inherit,
+            "local",
         )?;
         // 空标题与 URL 兜底不是用户改名；只有真实标题才进入 title_custom。
         if let Some(title) = db::explicit_feed_title(&f.title, &f.feed_url) {
@@ -300,6 +301,81 @@ mod tests {
         .unwrap();
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped, 1);
+    }
+
+    #[test]
+    fn imported_sources_start_with_inherited_ai_modes() {
+        let conn = conn();
+        let report =
+            import_feeds(&conn, &[feed("https://inherit.example/rss", "A", None)]).unwrap();
+        assert_eq!(report.imported, 1);
+        let modes: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT summary_mode, translate_mode, auto_summary, auto_translate
+                 FROM feeds WHERE feed_url = 'https://inherit.example/rss'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(modes, ("inherit".into(), "inherit".into(), 0, 0));
+    }
+
+    #[test]
+    fn reimporting_retained_source_preserves_all_ai_mode_pairs() {
+        let mut failures = Vec::new();
+        for summary in ["inherit", "on", "off"] {
+            for translate in ["inherit", "on", "off"] {
+                let conn = conn();
+                let folder = db::create_folder(&conn, "已存分类", "article").unwrap();
+                let id = db::insert_feed_origin_modes(
+                    &conn,
+                    "https://retained.example/rss",
+                    None,
+                    "原标题",
+                    None,
+                    folder,
+                    "inherit",
+                    db::FeedAiMode::parse(summary).unwrap(),
+                    db::FeedAiMode::parse(translate).unwrap(),
+                    "local",
+                )
+                .unwrap();
+                db::delete_feed(&conn, id).unwrap();
+
+                let report = import_feeds(
+                    &conn,
+                    &[feed(
+                        "https://retained.example/rss",
+                        "导入标题",
+                        Some("已存分类"),
+                    )],
+                )
+                .unwrap();
+                assert_eq!(report.imported, 1);
+                let actual: (String, String, i64, i64) = conn
+                    .query_row(
+                        "SELECT summary_mode, translate_mode, auto_summary, auto_translate
+                         FROM feeds WHERE id = ?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .unwrap();
+                let expected = (
+                    summary.to_string(),
+                    translate.to_string(),
+                    (summary == "on") as i64,
+                    (translate == "on") as i64,
+                );
+                if actual != expected {
+                    failures.push(format!("{summary}/{translate}: {actual:?} != {expected:?}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "OPML 复活 mode 组合失败: {}",
+            failures.join("; ")
+        );
     }
 
     /// N4：重新导入清墓碑——先删源留墓碑，再导入同 URL，墓碑必须消失

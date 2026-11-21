@@ -1438,15 +1438,24 @@ fn insert_remote_feed_bound(
     remote_id: i64,
 ) -> AppResult<Option<(i64, String, i64)>> {
     let tx = crate::db::write_transaction(conn)?;
-    // insert_feed_origin can reactivate a retained row. Establish creation from
+    // insert_feed_origin_modes can reactivate a retained row. Establish creation from
     // the actual pre-insert row, not from lifecycle_version==0 alone.
     let existed: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url=?1)",
         [url],
         |row| row.get(0),
     )?;
-    let feed_id = db::insert_feed_origin(
-        &tx, url, site_url, title, None, folder_id, "inherit", false, false, "remote",
+    let feed_id = db::insert_feed_origin_modes(
+        &tx,
+        url,
+        site_url,
+        title,
+        None,
+        folder_id,
+        "inherit",
+        db::FeedAiMode::Inherit,
+        db::FeedAiMode::Inherit,
+        "remote",
     )?;
     db::set_feed_remote_id(&tx, feed_id, remote_id)?;
     let (source_id, lifecycle): (String, i64) = tx.query_row(

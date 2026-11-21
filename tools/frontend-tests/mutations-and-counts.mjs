@@ -789,7 +789,7 @@ export async function run(ctx) {
 
   /* F3 阅读器翻译失败：rawTranslatedIds 按「无半截未消毒产物即清」规则处理（成对） */
   await entityFixture();
-  S.aiTr = { deltas: [], error: '限流', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '限流' }, finish: false, holdIds: [] };
   store.setState({ toasts: [] });
   store.getState().selectArticle('201');
   await nTick(10);
@@ -801,7 +801,7 @@ export async function run(ctx) {
     && store.getState().isShowingTranslatedProse === false);
 
   await entityFixture();
-  S.aiTr = { deltas: ['<b>半截'], error: '限流', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: ['<b>半截'], reject: { code: 'aiStream', message: '限流' }, finish: false, holdIds: [] };
   store.setState((s) => ({
     toasts: [],
     entries: s.entries.map((a) => (a.id === '201' ? { ...a, content: '<p>详情</p>' } : a)),
@@ -825,10 +825,9 @@ export async function run(ctx) {
     store.getState().rawTranslatedIds['201'] === undefined
     && store.getState().translateErrors['201'] === 'AI 服务未配置或不可达');
 
-  /* M6（审查：onError 路径不清标记在修后回归网下全绿）：卡片翻译流内错误且
-     无半截 → 标记清除（既有 (l2) 只盖 .catch 路径与「有半截保留」侧）。 */
+  /* M6：卡片翻译携业务码拒绝且无半截时清除 raw；与有半截时保留的断言成对。 */
   await entityFixture();
-  S.aiTr = { deltas: [], error: '限流', reject: null, finish: true, holdIds: [] };
+  S.aiTr = { deltas: [], reject: { code: 'aiStream', message: '限流' }, finish: false, holdIds: [] };
   store.setState({ toasts: [] });
   store.getState().translateEntry('201');
   await nTick(20);
@@ -837,16 +836,17 @@ export async function run(ctx) {
     && store.getState().translateErrors['201'] === '限流');
 
   await entityFixture();
-  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  S.aiTr = { deltas: [], reject: null, finish: true, holdIds: [], deferIds: [201] };
   store.getState().translateEntry('201');
   store.getState().translateEntry('202');
   await nTick(5);
   checkNew('(l) 按 id 隔离：A 仍在生成时 B 已收尾，两个 id 状态互不串台',
     store.getState().translatingIds['201'] === true && store.getState().translatingIds['202'] === undefined);
   const heldTr = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
-  heldTr.ch.onmessage?.({ type: 'error', data: '限流' });
+  heldTr.reject({ code: 'aiStream', message: '限流' });
+  await nTick(5);
   const lTrErr = store.getState();
-  checkNew('(l) 翻译流内 error：记录 translateErrors[id] + 清生成态 + toast 带重试',
+  checkNew('(l) 翻译 IPC 拒绝：记录 translateErrors[id] + 清生成态 + toast 带重试',
     lTrErr.translateErrors['201'] === '限流' && lTrErr.translatingIds['201'] === undefined
     && lTrErr.toasts[lTrErr.toasts.length - 1]?.text === '翻译失败：限流'
     && lTrErr.toasts[lTrErr.toasts.length - 1]?.action?.label === '重试');

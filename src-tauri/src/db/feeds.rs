@@ -329,7 +329,7 @@ pub fn insert_feed_origin(
     )
 }
 
-/// 三态入口：新调用方（add_feed 命令 / 配置导入）以 mode 为真值插入。
+/// 三态入口：新订阅以传入的 mode 为真值插入，复活时保留原选择。
 /// bool 兼容列由 mode 纯函数镜像（见 FeedAiMode::mirrors_legacy_bool）。
 #[allow(clippy::too_many_arguments)]
 pub fn insert_feed_origin_modes(
@@ -388,14 +388,8 @@ pub fn insert_feed_origin_modes(
                 .optional()?),
         );
         patch.insert("layout".into(), serde_json::json!(layout));
-        patch.insert(
-            "summary_mode".into(),
-            serde_json::json!(summary_mode.as_str()),
-        );
-        patch.insert(
-            "translate_mode".into(),
-            serde_json::json!(translate_mode.as_str()),
-        );
+        // 复活保留原订阅的三态和兼容列。
+        // Note: .agents/notes/implemented/architecture/2026-11-09-三层AI策略与阅读触发.md
         patch.insert("title".into(), serde_json::json!(title));
         if let Some(url) = site_url {
             patch.insert("site_url".into(), serde_json::json!(url));
@@ -403,18 +397,9 @@ pub fn insert_feed_origin_modes(
         let explicit = crate::local_sync::logical::capture_entity_edit(conn, "s", id, &patch)?;
         conn.execute(
             "UPDATE feeds SET active = 1, lifecycle_version = lifecycle_version + 1,
-            folder_id = ?1, layout = ?2, summary_mode = ?3, translate_mode = ?4,
-            title = ?5, site_url = COALESCE(?6,site_url), origin = ?7 WHERE id = ?8",
-            params![
-                folder_id,
-                layout,
-                summary_mode.as_str(),
-                translate_mode.as_str(),
-                title,
-                site_url,
-                origin,
-                id
-            ],
+            folder_id = ?1, layout = ?2,
+            title = ?3, site_url = COALESCE(?4,site_url), origin = ?5 WHERE id = ?6",
+            params![folder_id, layout, title, site_url, origin, id],
         )?;
         crate::local_sync::logical::finish_explicit(conn, explicit)?;
         remove_feed_tombstone(conn, feed_url)?;
@@ -1284,6 +1269,63 @@ mod ai_mode_tests {
             modes(&conn, id),
             ("inherit".to_string(), "on".to_string(), 0, 1),
             "inherit 原样保留（bool 镜像 0），显式 on 镜像 1"
+        );
+    }
+
+    #[test]
+    fn retained_reactivation_preserves_all_ai_mode_pairs() {
+        let mode_values = ["inherit", "on", "off"];
+        let mut failures = Vec::new();
+        for summary in mode_values {
+            for translate in mode_values {
+                let conn = test_conn();
+                let folder = super::super::create_folder(&conn, "原分类", "article").unwrap();
+                let id = insert_feed_origin_modes(
+                    &conn,
+                    "https://retained.example/rss",
+                    None,
+                    "原标题",
+                    None,
+                    folder,
+                    "inherit",
+                    FeedAiMode::parse(summary).unwrap(),
+                    FeedAiMode::parse(translate).unwrap(),
+                    "local",
+                )
+                .unwrap();
+                super::super::delete_feed(&conn, id).unwrap();
+
+                let restored = insert_feed_origin_modes(
+                    &conn,
+                    "https://retained.example/rss",
+                    None,
+                    "恢复标题",
+                    None,
+                    folder,
+                    "inherit",
+                    FeedAiMode::Inherit,
+                    FeedAiMode::Inherit,
+                    "local",
+                )
+                .unwrap();
+
+                assert_eq!(restored, id, "复活必须保留原源身份");
+                let actual = modes(&conn, id);
+                let expected = (
+                    summary.to_string(),
+                    translate.to_string(),
+                    (summary == "on") as i64,
+                    (translate == "on") as i64,
+                );
+                if actual != expected {
+                    failures.push(format!("{summary}/{translate}: {actual:?} != {expected:?}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "复活 mode 组合失败: {}",
+            failures.join("; ")
         );
     }
 

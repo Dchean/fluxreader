@@ -242,6 +242,13 @@ async fn remote_reappearing_subscription_reactivates_its_stable_source() {
         .unwrap();
     let old_id = old.id;
     let old_sync_id = old.sync_id.clone();
+    db::set_feed_ai_modes(
+        &*database.lock().await,
+        old_id,
+        Some(db::FeedAiMode::On),
+        Some(db::FeedAiMode::Inherit),
+    )
+    .unwrap();
     let old_lifecycle: i64 = database
         .lock()
         .await
@@ -274,6 +281,14 @@ async fn remote_reappearing_subscription_reactivates_its_stable_source() {
         .find(|f| f.id == old_id)
         .expect("a source reappearing at the authoritative server must become active again");
     assert_eq!(restored.sync_id, old_sync_id);
+    assert_eq!(
+        (
+            restored.summary_mode.as_str(),
+            restored.translate_mode.as_str()
+        ),
+        ("on", "inherit"),
+        "同远端 ID 复活也保留旧选择"
+    );
     let lifecycle: i64 = database
         .lock()
         .await
@@ -287,6 +302,126 @@ async fn remote_reappearing_subscription_reactivates_its_stable_source() {
         lifecycle,
         old_lifecycle + 2,
         "remote removal and reappearance each advance the same source lifecycle"
+    );
+}
+
+const REMOTE_ONLY_URL: &str = "http://example.com/remote-only.xml";
+
+struct DiscoveredRemoteFeed {
+    database: Arc<Mutex<rusqlite::Connection>>,
+    server: Arc<MockGReader>,
+    http: reqwest::Client,
+    original: db::FeedRow,
+    _guard: common::TempDbGuard,
+}
+
+async fn discover_remote_only_feed(test: &str) -> DiscoveredRemoteFeed {
+    let (guard, conn) = open(test);
+    let server = MockGReader::start().await.unwrap();
+    configure(&conn, &server);
+    let database = Arc::new(Mutex::new(conn));
+    let http = ingestion::build_client(5);
+    let first = sync::feeds_phase(&database, &http).await.unwrap();
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    let original = db::list_feeds(&*database.lock().await)
+        .unwrap()
+        .into_iter()
+        .find(|feed| feed.feed_url == REMOTE_ONLY_URL)
+        .expect("initial remote-only feed was imported");
+    DiscoveredRemoteFeed {
+        _guard: guard,
+        database,
+        server,
+        http,
+        original,
+    }
+}
+
+#[tokio::test]
+async fn remote_first_subscription_starts_with_inherited_ai_modes() {
+    let fixture = discover_remote_only_feed("remote_first_ai_modes").await;
+    let original = &fixture.original;
+    assert_eq!(
+        (
+            original.summary_mode.as_str(),
+            original.translate_mode.as_str()
+        ),
+        ("inherit", "inherit"),
+        "首次发现的远端订阅应继承上级 AI 规则"
+    );
+}
+
+#[tokio::test]
+async fn remote_new_id_resubscribe_preserves_all_ai_mode_pairs() {
+    let DiscoveredRemoteFeed {
+        _guard,
+        database,
+        server,
+        http,
+        original,
+    } = discover_remote_only_feed("remote_new_id_ai_modes").await;
+    let values = ["inherit", "on", "off"];
+    let mut remote_id = 11_i64;
+    let mut next_id = 100_i64;
+    let mut failures = Vec::new();
+    for summary in values {
+        for translate in values {
+            {
+                let conn = database.lock().await;
+                db::set_feed_ai_modes(
+                    &conn,
+                    original.id,
+                    Some(db::FeedAiMode::parse(summary).unwrap()),
+                    Some(db::FeedAiMode::parse(translate).unwrap()),
+                )
+                .unwrap();
+            }
+            server.remove_remote_subscription(&format!("feed/{remote_id}"));
+            let removed = sync::feeds_phase(&database, &http).await.unwrap();
+            assert!(removed.errors.is_empty(), "{:?}", removed.errors);
+            assert!(
+                db::list_feeds(&*database.lock().await)
+                    .unwrap()
+                    .iter()
+                    .all(|feed| feed.id != original.id),
+                "远端退订后原来源应已退场"
+            );
+
+            server
+                .subscriptions
+                .lock()
+                .unwrap()
+                .push(mock_greader::MockSubscription {
+                    id: format!("feed/{next_id}"),
+                    title: "Remote Only Feed restored".into(),
+                    url: REMOTE_ONLY_URL.into(),
+                    html_url: None,
+                    categories: vec![("Remote Cat".into(), "folder".into())],
+                });
+            let restored = sync::feeds_phase(&database, &http).await.unwrap();
+            assert!(restored.errors.is_empty(), "{:?}", restored.errors);
+            let row = db::list_feeds(&*database.lock().await)
+                .unwrap()
+                .into_iter()
+                .find(|feed| feed.feed_url == REMOTE_ONLY_URL)
+                .expect("new remote ID must reactivate the retained URL");
+            assert_eq!(
+                row.id, original.id,
+                "new remote ID preserves local source identity"
+            );
+            let actual = (row.summary_mode, row.translate_mode);
+            let expected = (summary.to_string(), translate.to_string());
+            if actual != expected {
+                failures.push(format!("{summary}/{translate}: {actual:?} != {expected:?}"));
+            }
+            remote_id = next_id;
+            next_id += 1;
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "新远端 ID 复订 mode 组合失败: {}",
+        failures.join("; ")
     );
 }
 

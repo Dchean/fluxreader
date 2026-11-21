@@ -3,12 +3,12 @@ import { enqueueAiConfigWrite, useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { Icons } from '../icons';
 import { FluxDropdown, SettingCard } from '../primitives';
-import { AI_PRESETS, DEFAULT_PROMPTS, type AiConfigState } from './shared';
+import { DEFAULT_PROMPTS, type AiConfigState } from './shared';
 import { mergeConfigFields, mergePromptsOnly } from './aiConfig';
 
 /* ---------- TAB 5: AI服务 ---------- */
 
-const ENDPOINT_FIELDS = ['preset', 'baseUrl', 'apiKey', 'model'] as const;
+const ENDPOINT_FIELDS = ['baseUrl', 'apiKey', 'model'] as const;
 const PROMPT_FIELDS = ['summaryPrompt', 'translatePrompt'] as const;
 
 function parseSavedConfig(raw: string | null): Partial<AiConfigState> {
@@ -25,10 +25,9 @@ function parseSavedConfig(raw: string | null): Partial<AiConfigState> {
 export function AiTab() {
   const showToast = useAppStore((s) => s.showToast);
   const [cfg, setCfg] = useState<AiConfigState>({
-    preset: 'deepseek',
-    baseUrl: AI_PRESETS.deepseek.url,
+    baseUrl: '',
     apiKey: '',
-    model: AI_PRESETS.deepseek.model,
+    model: '',
     summaryPrompt: DEFAULT_PROMPTS.summary,
     translatePrompt: DEFAULT_PROMPTS.translate,
   });
@@ -57,7 +56,7 @@ export function AiTab() {
   const changeDraft = (patch: Partial<AiConfigState>) => {
     claimFields(Object.keys(patch) as (keyof AiConfigState)[]);
     if (ENDPOINT_FIELDS.some((key) => key in patch)) endpointRevision.current++;
-    if (['preset', 'baseUrl', 'apiKey'].some((key) => key in patch)) setModels([]);
+    if ('baseUrl' in patch || 'apiKey' in patch) setModels([]);
     cfgRef.current = { ...cfgRef.current, ...patch };
     setCfg(cfgRef.current);
   };
@@ -87,23 +86,13 @@ export function AiTab() {
     return () => { active = false; };
   }, [loadAttempt]);
 
-  const applyPreset = (p: string) => {
-    const preset = AI_PRESETS[p];
-    changeDraft({
-      preset: p,
-      baseUrl: p === 'custom' ? cfgRef.current.baseUrl : preset.url,
-      model: p === 'custom' ? cfgRef.current.model : preset.model,
-    });
-  };
-
   /** 测试连通性（/models）→ 拉模型列表 → 保存配置 */
   const testAndSave = async () => {
     if (!cfg.baseUrl.trim()) { showFeedback('请填写 Base URL'); return; }
     if (!cfg.apiKey.trim()) { showFeedback('请填写 API Key'); return; }
+    if (!cfg.model.trim()) { showFeedback('请填写模型名'); return; }
     claimFields(ENDPOINT_FIELDS);
-    const tested = {
-      preset: cfg.preset, baseUrl: cfg.baseUrl.trim(), apiKey: cfg.apiKey.trim(), model: cfg.model,
-    };
+    const tested = { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model };
     const revision = endpointRevision.current;
     const unchanged = () => endpointRevision.current === revision;
     const changedMessage = '配置已更改，请重新测试并保存';
@@ -111,11 +100,10 @@ export function AiTab() {
     try {
       /* 整个入口（含连通性测试）入队：串行化判据是「点击顺序」。若只把落库段
          入队，后点先测完的写入会先执行，仍会乱序覆盖。
-         落库只重放端点四字段（不再整包快照 stringify）——测试+保存不应
-         顺手覆盖并发中的提示词/模型写入；写时重读库内最新配置合并。 */
+         落库只重放当前测试的字段。写时重读库内最新配置，保留提示词、旧 preset 和扩展字段。 */
       await enqueueAiConfigWrite(async () => {
         if (!unchanged()) { showFeedback(changedMessage); return; }
-        const list = await api.aiListModels(tested.baseUrl, tested.apiKey);
+        const list = await api.aiListModels(tested.baseUrl.trim(), tested.apiKey.trim());
         if (!list) { showFeedback('演示模式无法测试'); return; }
         if (!unchanged()) { showFeedback(changedMessage); return; }
         const persisted = await api.getAiConfig();
@@ -124,7 +112,7 @@ export function AiTab() {
         await api.saveAiConfig(mergeConfigFields(persisted, tested));
         if (!mounted.current) return;
         if (!unchanged()) { showFeedback('已保存测试配置；当前更改尚未保存'); return; }
-        setModels(list);
+        setModels(list.filter((model) => model.trim()));
         showFeedback(`连通成功：${list.length} 个可用模型`);
       });
     } catch (e) {
@@ -157,7 +145,8 @@ export function AiTab() {
     }
   };
 
-  const modelOptions = (models.length > 0 ? models : [cfg.model || '（先测试连通性）'])
+  // 端点列表可能没列出当前模型。继续回显已填写/保存的模型，不替用户选第一项。
+  const modelOptions = (models.includes(cfg.model) ? models : [cfg.model, ...models])
     .map((m) => ({ value: m, label: m }));
 
   /** 切换模型即落库（P2-4 前半）：只在连通性测试成功后模型下拉才出现，此时库里
@@ -187,35 +176,29 @@ export function AiTab() {
         </div>
       )}
       <div className="settings-group-title">API 端点</div>
-      <SettingCard title="服务商预设" desc="官方端点一键填入；newapi 中转选自定义">
-        <FluxDropdown
-          width={200}
-          value={cfg.preset}
-          onChange={applyPreset}
-          options={Object.entries(AI_PRESETS).map(([k, v]) => ({ value: k, label: v.label }))}
-        />
+      <SettingCard title="服务协议">
+        <span>OpenAI 兼容</span>
       </SettingCard>
-      <SettingCard title="API Base URL" desc={cfg.preset === 'custom' ? '任意 OpenAI 兼容地址（newapi 等）' : '预设自动填入，可覆盖'}>
+      <SettingCard title="API Base URL">
         <input
           type="text"
           aria-label="API Base URL"
           className="setting-input"
-          placeholder="https://your-newapi.example.com/v1"
+          placeholder="服务地址"
           value={cfg.baseUrl}
           onChange={(e) => changeDraft({ baseUrl: e.target.value })}
         />
       </SettingCard>
-      <SettingCard title="API Key" desc="密钥仅存本地 SQLite">
+      <SettingCard title="API Key">
         <input
           type="password"
           aria-label="API Key"
           className="setting-input"
-          placeholder="sk-…"
           value={cfg.apiKey}
           onChange={(e) => changeDraft({ apiKey: e.target.value })}
         />
       </SettingCard>
-      <SettingCard title="当前使用模型" desc={models.length > 0 ? `端点返回 ${models.length} 个模型` : '测试连通性后自动拉取'}>
+      <SettingCard title="当前使用模型" desc={models.length > 0 ? `端点返回 ${models.length} 个模型` : undefined}>
         {models.length > 0 ? (
           <FluxDropdown
             width={200}
@@ -228,7 +211,7 @@ export function AiTab() {
             type="text"
             aria-label="当前使用模型"
             className="setting-input"
-            placeholder="模型名（测试后可选）"
+            placeholder="请填写模型名"
             value={cfg.model}
             onChange={(e) => changeDraft({ model: e.target.value })}
           />

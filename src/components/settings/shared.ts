@@ -44,16 +44,7 @@ export interface PendingDelete {
   feedName?: string;
 }
 
-/** 预设 → 默认 base_url + 默认模型（custom = newapi 等任意 OpenAI 兼容中转） */
-export const AI_PRESETS: Record<string, { url: string; model: string; label: string }> = {
-  deepseek: { url: 'https://api.deepseek.com', model: 'deepseek-chat', label: 'DeepSeek 官方 API' },
-  openai: { url: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', label: 'OpenAI 官方 API' },
-  glm: { url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', label: '智谱 BigModel (GLM)' },
-  custom: { url: '', model: '', label: '自定义 / newapi 中转' },
-};
-
 export interface AiConfigState {
-  preset: string;
   baseUrl: string;
   apiKey: string;
   model: string;

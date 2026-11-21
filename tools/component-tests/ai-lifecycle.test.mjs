@@ -7,7 +7,7 @@ const { createElement, act } = await import('react');
 const { Reader } = await import('../../src/components/Reader.tsx');
 const { buildFeedIndex, buildSourceIndex } = await import('../../dist-test/store/internals.js');
 const { markBodyLoading, applyBodyRow, invalidateContentRevision, dropBodyEntry } = await import('../../dist-test/store/bodyCache.js');
-const { selectAiProductState } = await import('../../dist-test/store/slices/ai.js');
+const { selectAiProductState, invalidateAiRequestsForLibraryRestore } = await import('../../dist-test/store/slices/ai.js');
 
 const MISS = { summaryVerified: false, translationVerified: false, translationSegments: { total: 1, completed: 0, discarded: 0 } };
 const HIT = { ...MISS, summaryVerified: true, translationVerified: true };
@@ -222,15 +222,20 @@ lifecycleTest('AI lifecycle ownership: old read and error must not clear a newer
     get_article: () => { const gate = deferred(); reads.push(gate); return gate.promise; } });
   await act(async () => { useAppStore.setState({ activeArticleId: '101' }); useAppStore.getState().toggleReaderTranslation(); });
   await waitFor(() => runs.length === 1);
-  await act(async () => { runs[0].channel.onmessage({ type: 'delta', data: 'first raw' }); runs[0].channel.onmessage({ type: 'done' }); runs[0].resolve(''); });
+  await act(async () => { runs[0].channel.onmessage({ type: 'delta', data: 'first raw' }); runs[0].channel.onmessage({ type: 'done' }); });
   await settle();
   assert.equal(reads.length, 1);
-  await act(async () => { useAppStore.setState(s => ({ aiStatusRevision: s.aiStatusRevision + 1 })); useAppStore.getState().toggleReaderTranslation({ force: true }); });
+  await act(async () => {
+    // Restoring the library is what allows another invoke while the old one is still pending.
+    invalidateAiRequestsForLibraryRestore();
+    useAppStore.setState(s => ({ aiStatusRevision: s.aiStatusRevision + 1 }));
+    useAppStore.getState().toggleReaderTranslation({ force: true });
+  });
   await waitFor(() => runs.length === 2);
   await act(async () => {
     runs[1].channel.onmessage({ type: 'delta', data: 'new raw' });
     reads[0].resolve({ ...row, translated_content: '<h1>old safe result</h1>', translated_sig: 'old' });
-    runs[0].channel.onmessage({ type: 'error', data: 'late old error' });
+    runs[0].reject(new Error('late old IPC rejection'));
   });
   await settle();
   assert.equal(getBodyEntry('101').translatedContent, 'new raw');
@@ -278,6 +283,8 @@ for (const path of ['summary', 'card', 'reader']) lifecycleTest(`AI-A2 ${path}: 
   setPlan({ [cmd]: async () => { throw new Error('first failure'); } });
   await act(async () => { if (path === 'reader') useAppStore.setState({ activeArticleId: '101' }); invoke(); });
   await waitFor(() => !!(kind === 'summary' ? useAppStore.getState().summaryErrors['101'] : useAppStore.getState().translateErrors['101']));
+  const failure = kind === 'summary' ? useAppStore.getState().summaryErrors['101'] : useAppStore.getState().translateErrors['101'];
+  assert.equal(failure, 'AI 服务未配置或不可达', '无码 IPC 拒绝显示通用文案');
   await settle();
   assert.equal(invokeCount(cmd), 1);
   await act(async () => {
@@ -356,7 +363,7 @@ lifecycleTest('AI 同输入真实失败保留partial/raw，明确手动继续完
   setPlan({ ai_cache_check: () => Promise.resolve(plan), ai_translate: args => { channel = args.onChannel; return first.promise; } });
   await act(async () => useAppStore.getState().translateEntry('101'));
   await waitFor(() => !!channel);
-  await act(async () => { channel.onmessage({ type: 'delta', data: '<p>partial' }); channel.onmessage({ type: 'error', data: 'interrupted' }); first.resolve(''); });
+  await act(async () => { channel.onmessage({ type: 'delta', data: '<p>partial' }); first.reject({ code: 'aiStream', message: 'interrupted' }); });
   await settle();
   assert.equal(getBodyEntry('101').translatedContent, '<p>partial');
   assert.equal(useAppStore.getState().rawTranslatedIds['101'], true);
@@ -398,7 +405,7 @@ lifecycleTest('AI fallback owner：未水合行raw随NULL产物水合进入缓�
   assert.equal(mounted.container.querySelector('.article-prose h2'), null);
   assert.equal(mounted.container.querySelector('.article-prose script'), null);
   assert.ok(mounted.container.querySelector('.article-prose').textContent.includes('<h2>raw fallback</h2>'));
-  await act(async () => { channel.onmessage({ type: 'error', data: 'partial' }); request.resolve(''); }); await settle();
+  await act(async () => { request.reject({ code: 'aiStream', message: 'partial' }); }); await settle();
   assert.equal(useAppStore.getState().rawTranslatedIds['101'], true, '真实失败保未消毒残段');
   const safe = { ...row, translated_content: '<h2>safe finish</h2>', translated_sig: 'safe' };
   await act(async () => {
@@ -431,6 +438,6 @@ lifecycleTest('AI fallback safe transfer：安全水合接管行草稿后缓存�
   assert.equal(useAppStore.getState().entries[0].translatedContent, html);
   assert.equal(useAppStore.getState().entries[0].translationDraftOwner, undefined, '安全水合接管后旧行草稿owner已解除');
   assert.equal(useAppStore.getState().rawTranslatedIds['101'], undefined, '缓存释放不能复活旧raw');
-  await act(async () => { channel.onmessage({ type: 'error', data: 'terminal' }); request.resolve(''); });
+  await act(async () => { request.reject({ code: 'aiStream', message: 'terminal' }); });
   await settle();
 });
