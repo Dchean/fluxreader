@@ -89,6 +89,8 @@ WebDAV 与活动 RSS 账号互斥。本地源按创建归属/原本地历史进�
 
 清单和状态/正文对象不可变，写后读取确认精确字节，不能当作全球 winner。接收缺块/错误不是空库，状态/正文分别重试；未读或收藏正文未补齐显示 pending。远端物理 DELETE 当前关闭（边界见 [roadmap](roadmap.md#sync-correctness)）：替换对象精确 ACK 和已知 actor 覆盖仍不能证明未知/离线读取者已无保护义务。未确认正文继续保留，不能以新设备缺正文作为允许回收的理由；远端空间治理仍待完成。正文对象超限以 `localSyncFormat` 拒绝、不做截断，大小上限见[契约单点](contracts.md)的「同步正文对象大小上限」；它与 GR/Fever 传输的 16 MiB 不是同一常量。
 
+WebDAV 单个列举目录最多返回 256 个不同对象；各 actor 的 `state/manifests/`、`body/manifests/`、`intents/` 分开计数。PROPFIND 响应 XML 的字节读取上限为 256 KiB，之后还分别受 XML 节点、深度、事件、属性及文本解析预算约束；字节超限提示会区分 Content-Length 与流式接收并标明目录位置。actor 目录发现上限为 64 个，已知 actor 身份集合也最多 64 个；数量超限与身份格式错误分别报告。容量失败保留本机资料，可继续本机使用；重试或重连不会改变远端容量，可行时再另存便携备份也不代表能缩小远端对象集合。对象预算的权威定义见[契约单点](contracts.md)的「同步对象与响应预算」。
+
 候选正文目录分页、内容唯一分块，便携 v4 从同一内容身份导出流式包。新库恢复新 actor 和主键高水位，断开凭据与旧队列。详细协议职责、真实备选和存储边界见[资料库决定](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)，独立 WAL 连接的事务前提见[写预留决定](../.agents/notes/implemented/architecture/2026-11-09-多连接SQLite写预留与原子设置.md)。
 
 早期真实 WsgiDAV 生产入口测试仅覆盖当时版本，不能背书之后的正文目录/原子设置/WAL 改动。完整规模、HTTP SLO 和原生窗口尚未验收；当前版本结果与剩余条件见 [roadmap](roadmap.md)。
