@@ -1,6 +1,6 @@
 # 当前架构
 
-本页描述当前代码的事实边界，不记录历史演进。决定理由见 `.agents/notes/`，未关闭项见 [roadmap](roadmap.md)。
+本页描述当前代码的事实边界，不记录历史演进。决定理由见 `.agents/archive/legacy-workflow/notes/`，未关闭项见 [roadmap](roadmap.md)。
 
 ## 进程与依赖方向
 
@@ -59,7 +59,7 @@ RSS 服务同步（`sync/`）与纯本地 WebDAV 同步（`local_sync/`）互斥
 
 - `src/store.ts` 用 Zustand 的 `create` 组装 store，只做组合；按领域的 slice 在 `src/store/slices/`，每个 slice 是 `StateCreator<AppState, [], [], XxxSlice>` 且键集两两不相交。
 - `ReadingSession`（`src/store/readingSession.ts`）拥有一次查询的完整有序 ID、已加载进度与定位输入；前端经 `list_article_member_ids` 捕获成员，再按 ID 用 `get_article_updates` 回读属性和加载后续页。当前会话不以时间游标续筛，后台同步不插入新成员或重排列表；搜索可注入会话外的 Reader 文章而不推进列表窗口。
-- 查询与分页契约集中在 `.agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md`；返回位置锚与像素偏移在 `src/lib/readingPosition.ts`，该存档自持容量与命中语义（`RETURN_ANCHOR_ARCHIVE_MAX`）。
+- 查询与分页契约集中在 `.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-05-查询与分页契约.md`；返回位置锚与像素偏移在 `src/lib/readingPosition.ts`，该存档自持容量与命中语义（`RETURN_ANCHOR_ARCHIVE_MAX`）。
 - 全仓通用淘汰循环是 `src/lib/lru.ts` 的 `evictOldestEntries`；正文缓存与返回锚各自保留容量、命中刷新和状态语义，视图条目缓存的 `LRUMap` 仍在 `src/store/internals.ts`（`viewEntriesCache`）。
 - 乐观读藏在 `src/store/internals.ts` 按条目×字段维护版本、写前沿与失败投影；真实回执、读取序号与计数快照收敛，详见“乐观写入”Note。
 - 布局（文章/社交/画廊/播客/通知）共享同一时间流虚拟化；键盘焦点、模态焦点陷阱、返回位置和社交折叠各有单点实现。

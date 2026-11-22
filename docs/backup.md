@@ -45,7 +45,7 @@ WebDAV 单个列举目录最多返回 256 个不同对象；PROPFIND 响应 XML 
 
 设置 → 关于 → **本机故障恢复（高级）** 中保留“创建数据库备份”。它生成当前数据库的完整 SQLite 快照，包含正文、同步队列、AI 缓存和 DPAPI 密文凭据，只适合当前 Windows 用户的本机故障恢复，不作为换机入口。
 
-快照使用 `VACUUM INTO` 读取 WAL 中已提交数据，生成自包含文件，校验后交付。位置为 `%APPDATA%\com.fluxreader.app\backups\`；手动快照不自动清理。历史迁移/配置镜像文件按其原规则保留，新数据空间不再执行旧升级和镜像配置流程。决定与历史证据见[数据库快照决定](../.agents/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md)。
+快照使用 `VACUUM INTO` 读取 WAL 中已提交数据，生成自包含文件，校验后交付。位置为 `%APPDATA%\com.fluxreader.app\backups\`；手动快照不自动清理。历史迁移/配置镜像文件按其原规则保留，新数据空间不再执行旧升级和镜像配置流程。决定与历史证据见[数据库快照决定](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md)。
 
 本机快照的恢复仍在应用外进行：完全退出 FluxReader 和托盘，保留当前现场后将选定自包含快照复制为 `fluxreader-v2.db`，并移除同目录当前 `fluxreader-v2.db-wal` / `fluxreader-v2.db-shm` 旁文件，再启动验证。跨 Windows 用户/机器不能复用 DPAPI 凭据；便携换机请使用上面的 `.flxb` 流程。
 

@@ -1,6 +1,6 @@
 # 同步协议与服务端兼容矩阵
 
-本页分开记录外部协议/服务端能力、客户端实际政策与验证覆盖。政策单点为 `src-tauri/src/sync/conflict_policy.rs`；改变政策必须同步实现、本文和锁定测试。选择理由见[冲突政策决定](../.agents/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)。
+本页分开记录外部协议/服务端能力、客户端实际政策与验证覆盖。政策单点为 `src-tauri/src/sync/conflict_policy.rs`；改变政策必须同步实现、本文和锁定测试。选择理由见[冲突政策决定](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)。
 
 外部参照固定为 [Miniflux faecfa2](https://github.com/miniflux/v2/tree/faecfa2fac61a91f4f69550bb1afd506c4b51749) 与 [FreshRSS 4e8a258](https://github.com/FreshRSS/FreshRSS/tree/4e8a258b011aad190597d7953b7122fc43f4658f)。夹具模拟这些形态，不等于某个真实部署版本已经验收。
 
@@ -34,7 +34,7 @@
 | 无 GUID 直连 | URL/title+date 仅是候选；非空持久键采用规范 URL/无 URL 域与内容/标题/附件载荷，排除日期及原候选形式，有字节时复核。空正文使用规范 URL/标题/原始选定源日期 UTC 与附件的完整观察；弱空→非空不转移旧状态，真实 GUID/remote ID 仍原行补全 |
 | 订阅身份 | 远端 feed ID 优先，仅未绑定本地行参与 URL 兜底。远端来源的同 ID 改 URL 保留本地 ID、文章、布局、分类与自定义标题；本地来源的已绑定源保留本地 URL。多重绑定、规范 URL 多候选或唯一 URL 冲突明确报错并保留原值。首次发现继承上级 AI 设置；远端源重新出现恢复原稳定身份与已存 AI 三态；本地退订墓碑仍阻止复活 |
 
-有已证明远端身份的本地意图进入推送；缺身份或缺来源证明的条目按所属源区分 local_only 与 bindable_retry，不计作可推 waiting。超过 30 天转 expired_unconfirmed，保留队项和本地读藏。显式恢复用摘要 account_generation 复核当前账号、按文章当前目标建立新操作 ID；缺文章仍过期。断开/换号放弃旧状态队列，本地直连读藏保留但不会自动迁入新账号。详见[队列生命周期](../.agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md)。
+有已证明远端身份的本地意图进入推送；缺身份或缺来源证明的条目按所属源区分 local_only 与 bindable_retry，不计作可推 waiting。超过 30 天转 expired_unconfirmed，保留队项和本地读藏。显式恢复用摘要 account_generation 复核当前账号、按文章当前目标建立新操作 ID；缺文章仍过期。断开/换号放弃旧状态队列，本地直连读藏保留但不会自动迁入新账号。详见[队列生命周期](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md)。
 
 冷绑定由 Content 每轮最多 2000 条轮转补证，已有证明的状态变化不新增 origin 请求。GR 已有未读消失候选仍通过 contents 确认目标存在，该请求在 State 许可内。未完成订阅绑定或墓碑判断未知时，两通道都不发条目/权威集合请求。Fever 仍要求 unread/saved 成对成功，失败时已绑定 flags 连正文页也不得改写。
 
@@ -66,7 +66,7 @@ GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 
 - **订阅修改**：固定 Miniflux [Update Feed API](https://miniflux.app/docs/api.html#endpoint-update-feed) 与 [storage/feed.go](https://github.com/miniflux/v2/blob/faecfa2fac61a91f4f69550bb1afd506c4b51749/internal/storage/feed.go) 允许同 ID 更改 feed_url，并按原 URL 精确去重；客户端不能用折叠 HTTP/HTTPS 的 URL 覆盖两个已知 ID。
 - **Bazqux**：不支持；其他 RSS 服务与多账号不在范围，见 [roadmap](roadmap.md#accepted-tradeoffs)。
 
-固定 Fever 集合端点没有 continuation 或已验证的状态增量参数，当前只能整段重拉。GR long-poll/ContinueWhatNewStream、Fever last_id_on_sync、订阅清单 ETag/304 在历史核对中缺少可采纳的固定版本依据，未实现为通用优化。选择理由见[会话复用与有界并发](../.agents/notes/implemented/architecture/2026-11-01-同步会话复用与有界并发与聚焦同步.md)。
+固定 Fever 集合端点没有 continuation 或已验证的状态增量参数，当前只能整段重拉。GR long-poll/ContinueWhatNewStream、Fever last_id_on_sync、订阅清单 ETag/304 在历史核对中缺少可采纳的固定版本依据，未实现为通用优化。选择理由见[会话复用与有界并发](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-01-同步会话复用与有界并发与聚焦同步.md)。
 
 ## 鉴权、分类与订阅写回
 
@@ -81,7 +81,7 @@ GR/Fever 会话的每次实际读取/写请求前复核账号代次；GR 惰性 
 | 订阅能力 | GR 支持客户端订阅/分类写回；Fever 相应操作仅本地。客户端当前分类改名/删除仍按成员操作表达，不宣称远端空分类已改 |
 | 退订例外 | 既有 400/404 容忍可能把真实删除失败当目标不存在并清队；墓碑仍由 pull 确认回收，本机不复活但远端可残留。此上限与状态 ACK 读回是不同机制 |
 
-能力声明由生产能力矩阵和持久订阅回执承担，详见[能力矩阵与持久回执](../.agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md)、[订阅执行器](../.agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)。Gist、GitHub 同步授权与手动配置快照前后端已退役；GitHub Releases 更新检查保留。
+能力声明由生产能力矩阵和持久订阅回执承担，详见[能力矩阵与持久回执](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md)、[订阅执行器](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)。Gist、GitHub 同步授权与手动配置快照前后端已退役；GitHub Releases 更新检查保留。
 
 ## 纯本地 WebDAV
 
@@ -91,7 +91,7 @@ WebDAV 与活动 RSS 账号互斥。本地源按创建归属/原本地历史进�
 
 WebDAV 单个列举目录最多返回 256 个不同对象；各 actor 的 `state/manifests/`、`body/manifests/`、`intents/` 分开计数。PROPFIND 响应 XML 的字节读取上限为 256 KiB，之后还分别受 XML 节点、深度、事件、属性及文本解析预算约束；字节超限提示会区分 Content-Length 与流式接收并标明目录位置。actor 目录发现上限为 64 个，已知 actor 身份集合也最多 64 个；数量超限与身份格式错误分别报告。容量失败保留本机资料，可继续本机使用；重试或重连不会改变远端容量，可行时再另存便携备份也不代表能缩小远端对象集合。对象预算的权威定义见[契约单点](contracts.md)的「同步对象与响应预算」。
 
-候选正文目录分页、内容唯一分块，便携 v4 从同一内容身份导出流式包。新库恢复新 actor 和主键高水位，断开凭据与旧队列。详细协议职责、真实备选和存储边界见[资料库决定](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)，独立 WAL 连接的事务前提见[写预留决定](../.agents/notes/implemented/architecture/2026-11-09-多连接SQLite写预留与原子设置.md)。
+候选正文目录分页、内容唯一分块，便携 v4 从同一内容身份导出流式包。新库恢复新 actor 和主键高水位，断开凭据与旧队列。详细协议职责、真实备选和存储边界见[资料库决定](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)，独立 WAL 连接的事务前提见[写预留决定](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-09-多连接SQLite写预留与原子设置.md)。
 
 早期真实 WsgiDAV 生产入口测试仅覆盖当时版本，不能背书之后的正文目录/原子设置/WAL 改动。完整规模、HTTP SLO 和原生窗口尚未验收；当前版本结果与剩余条件见 [roadmap](roadmap.md)。
 

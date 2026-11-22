@@ -1,6 +1,6 @@
 # 文档索引与阅读路由
 
-本目录保存需随产品长期维护的事实。**不要通读**：先按任务在下表找 1–3 篇，需要时再顺着"代码锚点"进代码。决定理由与取舍归 `.agents/notes/`；开放缺口集中在 [当前缺口](roadmap.md)；维护规则见 [维护与文档纪律](maintenance.md)。
+本目录保存需随产品长期维护的事实。**不要通读**：先按任务在下表找 1–3 篇，需要时再顺着"代码锚点"进代码。决定理由与取舍归 `.agents/archive/legacy-workflow/notes/`；开放缺口集中在 [当前缺口](roadmap.md)；维护规则见 [维护与文档纪律](maintenance.md)。
 
 ## 任务 → 必读
 
@@ -16,8 +16,7 @@
 | 定位"这个功能在哪、改了会影响谁" | [契约单点](contracts.md) | [架构](architecture.md) 的模块与依赖方向 |
 | 查已知缺口或什么没验证 | [当前缺口](roadmap.md) | 对应主题篇的"验证边界" |
 | 改前端组件、类名或令牌 | [前端结构台账](frontend.md) | [架构](architecture.md) 的前端结构与数据流、[契约单点](contracts.md) |
-| 查历史决定为什么这么做 | [.agents/notes/](../.agents/notes/) | 该 Note 的 Alternatives 与 Consequences |
-| 启用三层编排或交接总控 | [三层编排](../AGENTS.md#三层编排) | [审计与证伪](maintenance.md#2-审计与证伪) 的登记分工 |
+| 查历史决定为什么这么做 | [.agents/archive/legacy-workflow/notes/](../.agents/archive/legacy-workflow/notes/) | 该 Note 的 Alternatives 与 Consequences |
 | 接手审计或修复基线 | [审计记录](audits.md) | 该轮的审计报告与证据位置 |
 
 ## 文档清单
@@ -40,31 +39,31 @@
 
 ## 决定记录
 
-`.agents/notes/` 只保留仍约束当前代码的契约、流程与测试纪律；普通局部修复不新增笔记；缺陷原因与防重边界已并入架构主题篇。每篇按 lifecycle/class 路径保存，结构见 [AGENTS.md](../AGENTS.md)。
+`.agents/archive/legacy-workflow/notes/` 只保留仍约束当前代码的契约、流程与测试纪律；普通局部修复不新增笔记；缺陷原因与防重边界已并入架构主题篇。每篇按 lifecycle/class 路径保存，结构见 [AGENTS.md](../AGENTS.md)。
 
-- [架构与跨模块契约](../.agents/notes/implemented/architecture/)
-- [功能取舍](../.agents/notes/implemented/feature/)
-- [简化理由](../.agents/notes/implemented/simplification/)
-- [测试策略与证据边界](../.agents/notes/implemented/testing/)
-- [流程选择](../.agents/notes/implemented/process/)
+- [架构与跨模块契约](../.agents/archive/legacy-workflow/notes/implemented/architecture/)
+- [功能取舍](../.agents/archive/legacy-workflow/notes/implemented/feature/)
+- [简化理由](../.agents/archive/legacy-workflow/notes/implemented/simplification/)
+- [测试策略与证据边界](../.agents/archive/legacy-workflow/notes/implemented/testing/)
+- [流程选择](../.agents/archive/legacy-workflow/notes/implemented/process/)
 
 按主题查高频活跃篇（其余按上面的分类目录进）：
 
 | 主题 | 决定记录 |
 | --- | --- |
-| 同步冲突政策与写回状态 | [同步冲突政策单点](../.agents/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)、[同步写回与状态一致性](../.agents/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md) |
-| 同步队列生命周期与本地意图 | [同步队列生命周期与本地意图](../.agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md) |
-| 订阅写回 outbox 与能力矩阵 | [订阅写回 outbox 执行器](../.agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)、[订阅写回能力矩阵与持久回执](../.agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md) |
-| 查询与分页 | [查询与分页契约](../.agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md) |
-| 乐观写入 | [乐观写入的版本守卫](../.agents/notes/implemented/architecture/2026-10-05-乐观写入的版本守卫.md) |
-| 正文与 AI 产物缓存、验签 | [正文与 AI 产物的实体缓存](../.agents/notes/implemented/architecture/2026-10-06-正文与-AI-产物的实体缓存.md)、[AI 完成信号与缓存提交](../.agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md) |
-| 可渲染正文安全边界 | [可渲染正文安全边界](../.agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md) |
-| 凭据与账号边界 | [凭据失败关闭与受控更新检查](../.agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md)、[账号会话与配置应用边界](../.agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md) |
-| WebDAV 便携恢复与本地同步 | [纯本地资料库同步与便携恢复](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)、[本地同步与便携恢复界面边界](../.agents/notes/implemented/architecture/2026-11-09-本地同步与便携恢复界面边界.md) |
-| 数据库快照与恢复 | [数据库快照与恢复边界](../.agents/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md) |
-| 前端布局、焦点与交互契约 | [全布局键盘焦点与响应式阅读列](../.agents/notes/implemented/architecture/2026-11-04-全布局键盘焦点与响应式阅读列.md)、[前端交互契约](../.agents/notes/implemented/feature/2026-11-13-前端交互契约.md) |
-| 测试门禁与证据纪律 | [测试门禁与断言纪律](../.agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md)、[验证方法与复核纪律](../.agents/notes/implemented/testing/2026-09-22-验证方法与复核纪律.md)、[修复波次的分批、证伪审计与证据门槛](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md) |
-| 维护与文档纪律 | [维护与文档纪律](../.agents/notes/implemented/process/2026-11-14-维护与文档纪律.md) |
+| 同步冲突政策与写回状态 | [同步冲突政策单点](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md)、[同步写回与状态一致性](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-13-同步写回与状态一致性.md) |
+| 同步队列生命周期与本地意图 | [同步队列生命周期与本地意图](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md) |
+| 订阅写回 outbox 与能力矩阵 | [订阅写回 outbox 执行器](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)、[订阅写回能力矩阵与持久回执](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md) |
+| 查询与分页 | [查询与分页契约](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-05-查询与分页契约.md) |
+| 乐观写入 | [乐观写入的版本守卫](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-05-乐观写入的版本守卫.md) |
+| 正文与 AI 产物缓存、验签 | [正文与 AI 产物的实体缓存](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-06-正文与-AI-产物的实体缓存.md)、[AI 完成信号与缓存提交](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md) |
+| 可渲染正文安全边界 | [可渲染正文安全边界](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md) |
+| 凭据与账号边界 | [凭据失败关闭与受控更新检查](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md)、[账号会话与配置应用边界](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md) |
+| WebDAV 便携恢复与本地同步 | [纯本地资料库同步与便携恢复](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)、[本地同步与便携恢复界面边界](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-09-本地同步与便携恢复界面边界.md) |
+| 数据库快照与恢复 | [数据库快照与恢复边界](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md) |
+| 前端布局、焦点与交互契约 | [全布局键盘焦点与响应式阅读列](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-04-全布局键盘焦点与响应式阅读列.md)、[前端交互契约](../.agents/archive/legacy-workflow/notes/implemented/feature/2026-11-13-前端交互契约.md) |
+| 测试门禁与证据纪律 | [测试门禁与断言纪律](../.agents/archive/legacy-workflow/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md)、[验证方法与复核纪律](../.agents/archive/legacy-workflow/notes/implemented/testing/2026-09-22-验证方法与复核纪律.md)、[修复波次的分批、证伪审计与证据门槛](../.agents/archive/legacy-workflow/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md) |
+| 维护与文档纪律 | [维护与文档纪律](../.agents/archive/legacy-workflow/notes/implemented/process/2026-11-14-维护与文档纪律.md) |
 
 ## 一次性材料
 

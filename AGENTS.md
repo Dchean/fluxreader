@@ -1,83 +1,63 @@
 # 执行规则（FluxReader）
 
-## 三层编排
+Tauri 2 + React 19 + TS + Zustand + SQLite 的 Windows RSS 阅读器。本文件只放**每次都要遵守**的东西；模块地图看 `.agents/map.md`，拍板过的死规矩看 `.agents/decisions.md`，坑看 `.agents/LESSONS.md`，当前停点看 `.agents/state.md`。
 
-本项目按用户已确认的以下三层编排执行。
+## 常用命令
 
-- **分工**：顶层总控管路线、授权与终审核验，为每个阶段新建独立对话派阶段总控。阶段总控负责拆批、派发、管理写权和共享资源、核对原件。同一文件同一时段只派一位写者，共享资源串行使用。调查、实施、修复、自测以及 QA 脚本的编写与运行等实际执行，必须交末端子代理，阶段总控不得代做。独审须另派未参与实现的末端子代理，在全新只读上下文中进行。末端不再派发。两级总控常态只读，写入限于任务明确分配的登记与必要收口。三层任务若明确指定非审计者登记，登记者可与正文写者分开，且该分工覆盖维护规则中的默认实现者登记。审计者始终只读。其余登记口径见[审计与证伪](docs/maintenance.md#2-审计与证伪)。
-- **模型与推理强度**：各层以顶层本轮实用的模型与推理强度为准。新建总控对话显式传入这两项同值；末端子代理继承同一模型并使用同一推理强度。各层核对宿主可查的元数据（如 `turn_context`），不以提示词或派发参数代替生效证据；无法核实或保持一致时如实报告，不静默降档或自行换模型。
-- **风险边界**：聚焦当前真实流程与有据风险，守住数据安全、既有契约与门禁。无实证的极端假设只作提示，不为其增加兼容层、开关或检查流程，也不据此阻断。
-- **收敛**：同类方法连续失败两次，带证据换方法；局部问题由原实现者修正、原审计者复审。源码、输入和环境未变时复用有效检查；按既定标准闭环后进入已获授权的下一阶段，不反复换人试错、无故扩审或增设批准环节。
-- **交接**：顶层和阶段总控主动评估上下文是否可靠、余量能否承接后续工作，尤其在转段或长期停顿后恢复时。按任务范围核对资料，不逐轮重读全仓。单次普通错误不单独触发换人。任一层出现反复重读、混淆新旧要求、遗漏裁决、工具错误明显增多或推理失序等退化迹象，或余量不足以承接剩余工作跨度时，在原子步骤的安全点冻结版本与工作树状态。交接包简记当前目标与授权、裁决、版本与改动、有效证据、后台任务、未闭环项及可承接的下一步，由全新独立上下文中的只读审计者核对原件。任一级总控触发交接时，须由新开的独立对话接替。独审核对完成且后继签收后才移交唯一调度权，移交时旧任停止调度，前后任不得同时调度。末端由阶段总控更换。
-- **授权**：编排不扩大推送、合并、打标签或发布权限。未决事项按当轮路线记录，须用户裁决的在对应阶段开始前确认，不因转段或换人视为已决。
+- 前端：`npm run dev` / `npm run build`（tsc + vite）/ `npm run lint`（oxlint）
+- 前端回归：`npm run test:frontend`、`npm run test:components`、`npm run test:ui-layout`（Windows Edge headless）
+- 文档门禁：`npm run docs:check`（索引覆盖、相对链接与锚点、docs/ 内禁止行号）
+- Rust：在 `src-tauri/` 下 `cargo fmt --all -- --check`；全量 `cargo clippy --all-targets -- -D warnings`、`cargo check --all-targets`、`cargo test --no-fail-fast`（本地可用隔离环境 `tmp/rust-env/`，CI 由 windows-latest 承担）
+- 发布脚本回归：`node --test tools/release/release.test.mjs`
 
-## AI 接入边界
+## 日志与数据隔离
 
-AI 接入仅限项目支持的协议。Base URL、Key 和模型由用户配置。不得预填默认模型、假定官方 API 端点或静默覆盖已有用户配置。
+- **日志真实通道**：本项目**没有** `.dev-logs/`。debug 构建由 `tauri-plugin-log` 输出 stdout + 应用日志目录；同步诊断是自建环形日志，写在 `%APPDATA%\com.fluxreader.app\diagnostics\`（每片 256 KiB × 3）。前端日志只有 console。
+- **数据落盘**：SQLite 在 `%APPDATA%\com.fluxreader.app\fluxreader-v2.db`（旧 `fluxreader.db` 不迁移）；备份在 `backups\`。**没有** `.dev-data/` 目录约定——开发要用隔离数据时，用环境变量把测试根指到仓库外，别写用户真实目录。
+- `tmp/`、`*.log`、`*.db`、`.dev-logs/`、`.dev-data/`、`.env*`（除 `.env.example`）、`.agents/tmp/`、`.pre-v6-backup/`、`*.local.md`、`*.local.json` 一律不入库。
 
-## 分支流向
+## 全局红线（≤10 条）
 
-- `main`：主分支。版本 bump 与发布 tag 都在这里。
-- `dev`：开发分支。一切调整先在 `dev` 提交、推送并验证，通过后合并进 `main`。
-- 两个分支的项目内容保持一致（代码、文档、`.agents/notes/`）；合并就是常规合并，没有需要剔除的目录。
+1. **不得为变绿删测试、加 `#[ignore]` 或放宽断言。** 改门禁标准要先有依据、经确认与独立审计。
+2. **可渲染 HTML 只走 `sanitize()` 一个口径**，写入口与读边界共用；不把属性串拼成标签。
+3. **凭据失败关闭**：DPAPI 加解密失败一律 Err，绝不回退明文；读取错误 ≠ 未配置。
+4. **AI 接入只用项目支持的协议**：Base URL / Key / 模型由用户配置，不预填默认模型、不假定官方端点、不静默覆盖已有配置。
+5. **写事务只走 `db::write_transaction`**；锁序固定 业务锁 → writer，不反向获取。
+6. **同步冲突方向只在 `sync/conflict_policy.rs` 定义**；"失败"不许折成"空集合"。
+7. **外链只经 `openExternalWithFeedback`，仅 HTTP/HTTPS**；主页面只放行应用 origin。
+8. **不为未验证的极端假设加兼容层、开关或检查流程**；只记录为提示。
+9. **一次性探针与完整调研输出不进主线**，证据放忽略的 `tmp/`。
+10. **不扩大推送 / 合并 / 打标签 / 发布权限**；每次合并与发布单独确认。
 
-```text
-# 在 dev 上完成改动并推送，等 CI 绿
-git merge --no-ff dev          # 在 main 上执行
-git push origin main
-```
+## 动作触发式路由表
 
-发布序列、tag 附注结构与存量版本说明见 [docs/release.md](docs/release.md)。
-
-本段只规定流向，**不授予推送、合并或发布权限**；每次合并与发布按上位规则单独确认。
-
-## 提交信息
-
-`<type>(<scope>): <中文主题>`，type 取 `feat` / `fix` / `docs` / `style` / `refactor` / `perf` / `test` / `build` / `ci` / `chore`。主题一行说清改了什么，细节与动机写正文；破坏性变更以 `BREAKING CHANGE:` 开头说明。
-
-## 文档约定
-
-| 信息 | 归属 |
+| 你要做的事 | 先读 |
 | --- | --- |
-| 难以从代码/测试恢复、未来仍需重访的重要理由与取舍 | [`.agents/notes/`](.agents/notes/)，一篇一个决定；普通局部修复不自动新增 |
-| 需随产品长期维护的事实、协议矩阵、性能基线与发布操作 | [`docs/`](docs/README.md) |
-| 仍存在的缺口、接受的边界和未完成验证 | [docs/roadmap.md](docs/roadmap.md) |
-| 契约单点、改动影响面与同步面 | [docs/contracts.md](docs/contracts.md) |
-| 维护流程、证据标准与文档写作规则 | [docs/maintenance.md](docs/maintenance.md) |
-| 当轮范围、计数、提交与检查状态 | 既有交接/验收入口或当次交付，不复制进每篇主题 Note |
+| 定位"改这个会影响谁" | `docs/contracts.md`（契约单点与影响面） |
+| 找模块、公共组件、收口点 | `.agents/map.md` |
+| 确认某条规矩是不是用户拍板的 | `.agents/decisions.md`（**优先于任何半成品代码**） |
+| 排查"这坑以前踩过没" | `.agents/LESSONS.md` |
+| 接手正在做的切片 | `.agents/state.md` + `.agents/specs/` |
+| 改数据库结构 / 迁移 / 查询分页 | `docs/architecture.md`、`docs/performance.md` |
+| 改同步协议 / 冲突政策 | `docs/sync-compat-matrix.md` |
+| 改备份 / 便携 / WebDAV | `docs/backup.md` |
+| 改前端组件 / 类名 / 令牌 | `docs/frontend.md` |
+| 改门禁 / 测试 / 工具链 | `docs/development.md` |
+| 做发布 | `docs/release.md` |
+| 查已知缺口与未验证范围 | `docs/roadmap.md` |
+| 查历史决定原由 | `.agents/decisions.md` 的对应条目 → 必要时才读归档 |
 
-沿用现有路径 `{lifecycle}/{class}/yyyy-mm-dd-topic.md`；lifecycle 为 proposed / implemented / rejected / archived，class 为 feature / bug-fix / simplification / architecture / process / testing。日期是首次记录决定的日期，不随整理更新。活跃篇前三行是 `# Agent Note: <标题>`、空行、`Status: <状态>`，正文从 `## Problem` 开始，含 `## Alternatives considered`。implemented 保留 Decision 与 Consequences；备选只记真实考虑过的方案，无真实备选可明确写无，不凑数。
+**日常严禁读取 `.agents/archive/`。** 那里是换轨前的旧工作流长文与过期交接快照，只用于事后追溯；读到的任何内容都**不是当前事实**，引用时必须注明"来自归档"。
 
-决定理由未变时更新归属篇事实；重要决定变化须保留原由和后继关系。部分取代明确各自仍有效的范围，不能把旧决定重写成从未作过的反面。`implemented` 不代表测试、审计或发布通过；历史验证需附日期/基线/范围，未验证如实保留。更新应通读相关收益、代价和验证边界，不只在顶部追加补丁。
+## 分支与提交
 
-仅当独特有效约束已由活跃记录承接或确已不适用，才归档。归档第 3 行保留 `Status: implemented`、第 4 行 `Archived: YYYY-MM-DD`，其余原正文保全；新封印只追加，旧正文和 manifest 条目冻结。旧 WCAG 档案的历史头块例外及首次封印原因见[现有记录](.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)。不以重算哈希掩盖历史改写。
+- `main` 主分支（版本 bump 与发布 tag）；`dev` 开发分支（改动先在这里提交、推送、验证，通过后 `git merge --no-ff dev` 进 `main`）。两分支项目内容保持一致。
+- 提交信息：`<type>(<scope>): <中文主题>`，type 取 feat / fix / docs / style / refactor / perf / test / build / ci / chore；细节与动机写正文，破坏性变更以 `BREAKING CHANGE:` 开头。
 
-关键实现点保留能回到决定的反向注释，链接变化时同步必要注释，不为整理改产品逻辑：
+## 证据与文档纪律
 
-```ts
-// Note: 分页谓词必须与 ORDER BY 同构 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
-```
-
-清理旧执行材料须先保全独特理由、当前约束及引用入口。已清出的历史审计/任务卡通过固定 Git 提交恢复，定位见 [docs/README.md](docs/README.md)；不能称作已存入一个实际没有这些文件的归档分支。记录技能不承担审批、调度或提交，执行仍遵守当前适用的协作规范与授权。
-
-## 维护与文档纪律
-
-- 定位先查 [docs/contracts.md](docs/contracts.md)（契约单点与影响面），再按 [docs/README.md](docs/README.md) 的"任务 → 必读"挑篇目；不要通读 `docs/`。
-- **文档处置分三种**：①代码改动使文档过时 → 同批直接更新，不请批；②文档与代码不一致且无法判断哪边对 → 报告差异与影响，由用户决定改代码还是改文档；③错字、格式、失效链接 → 直接修。**不许把②静默当成①**，否则会把真 bug 洗成`文档笔误`。暂不更新的登记到 [docs/roadmap.md](docs/roadmap.md) 的「文档待办」，写明下次触碰该模块时必须处理。
-- 代码、测试、契约表、文档、索引在**同一批**完成；做不到就当场登记到 [docs/roadmap.md](docs/roadmap.md)，不许口头欠账。
-- 文档只写稳定事实与边界：**不写行号**（用"文件 + 符号名"或 `<a id>` 锚），能由类型或测试表达的不重复写进文档。
-- 独立审计、证伪及登记按[审计与证伪](docs/maintenance.md#2-审计与证伪)执行。
-- 证据要可复现：基线 SHA、命令、输入、结果、性质（运行 / 静态 / 未验证）五样齐，细则见 [docs/maintenance.md](docs/maintenance.md)。
-- `npm run docs:check` 检查索引覆盖、相对链接与锚点、行号禁令；本地与 CI 都必须跑。
-
-## 门禁
-
-本地必跑 `npm run lint`、`npm run build`、`npm run test:frontend`、`npm run test:components`、`npm run test:ui-layout`（Windows Edge headless）、`npm run docs:check` 与 `cargo fmt --all -- --check`（在 `src-tauri/` 下执行）。Rust 全量 `cargo clippy --all-targets -- -D warnings`、`cargo check --all-targets`、`cargo test --no-fail-fast` 由 CI 的 windows-latest job 承担，本地可用 `tmp/rust-env/` 隔离环境执行。
-
-每一项检查都必须有承担者，不能出现“本地不跑、CI 也不跑”。`#[ignore]` 的真实服务端与容量测试需在具体任务里单独约定读写边界后执行，不作为统一门禁；不得为变绿删测试、加跳过或放宽断言。命令、脚本与 CI job 的对应、测试分层、证据纪律与常见故障见 [docs/development.md](docs/development.md)。
-
-## 仓库卫生
-
-- 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` 中；`.zcodeignore` 为工具自生成的本机可选配置，不入库）。
-- 一次性探针与完整调研输出不进主线；既有材料位于存档分支 `archive/tooling-and-reports`，本机新审计证据保留在忽略的 `tmp/`。历史审计/任务卡另按固定提交追溯，见下方索引。
-- 历史材料的定位（含 2026-09-16 历史重写前后的提交号对照）见 [docs/README.md](docs/README.md) 的「历史材料」节。
+- 证据五要素：基线 SHA、命令、输入、结果、性质（运行 / 静态 / 未验证）。缺一只是线索。
+- 独立审计者只读、只交报告；被推翻的结论留档。
+- 文档只写稳定事实与边界，**不写行号**（用"文件 + 符号名"或 `<a id>` 锚）。
+- 代码、测试、契约表、文档、索引同一批完成；做不到就登记到 `docs/roadmap.md` 的「文档待办」，不许口头欠账。
+- 文档与代码不一致且分不清哪边对时：报告差异与影响，由用户裁决，不许静默当成"文档笔误"。

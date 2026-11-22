@@ -36,3 +36,17 @@ __pycache__/
 
 # ---- agent 工具的本机配置（由工具自行生成/同步，内容随机器而异）----
 .zcodeignore
+# ---- 本地开发日志、隔离数据与密钥文件（机器本地，不入库）----
+.dev-logs/
+.dev-data/
+.env
+.env.*
+!.env.example
+.agents/tmp/
+
+# ---- 换轨前的本地备份目录 ----
+.pre-v6-backup/
+
+# ---- 个人本地覆盖配置（*.local.* 形式的机器特定覆盖，不入库）----
+*.local.md
+*.local.json

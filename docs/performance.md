@@ -15,7 +15,7 @@
 ## 当前本地同步基线（2026-11-12，组合候选实测）
 
 - **前提。** 全部数字来自 debug 构建的 `cargo test`（opt-level=0、无内联、无优化）与隔离 Windows Rust 窗口的合成语料；发布给用户的是 release 构建，同一路径通常快一个数量级，不能用这些耗时推算用户换机恢复或首同步体验。
-- **规模判定标准。** 10k distinct 4KiB 正文的全流程（4KiB 正文、全部相位、全部断言、2 秒前台门槛、仍为 ignored 容量测试）是当前规模验证标准；50k distinct-body 是开放边界，**未验证**。裁定理由见[资料库决定](../.agents/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)；逐相位明细属一次性材料，位置见本页「证据位置」。
+- **规模判定标准。** 10k distinct 4KiB 正文的全流程（4KiB 正文、全部相位、全部断言、2 秒前台门槛、仍为 ignored 容量测试）是当前规模验证标准；50k distinct-body 是开放边界，**未验证**。裁定理由见[资料库决定](../.agents/archive/legacy-workflow/notes/implemented/architecture/2026-11-09-纯本地资料库同步与便携恢复.md)；逐相位明细属一次性材料，位置见本页「证据位置」。
 - **10k 结果。** 同一最终源码（审计修复后）自然 exit 0：墙钟 1,442,330 ms；9 个源的前台阶段单次最大 358,782 µs，全部低于 2 秒门槛。
 - **50k 结果。** state-only exact（小 delta，非整库 apply）同一源码自然 exit 0，墙钟 65,019 ms；50k distinct-body 在 accept 后的整库 apply（物化 + retention）未在 60 分钟硬上限内完成，因此 **50k distinct-body 容量未验证**。
 - **WAL。** 便携导出期间源库 `.db` 与 `-wal` 大小恒定，WAL 不随导出时长增长；**“回落为 0”发生在连接正常关闭时，而不是导出结束**；被外部终止的运行保留 WAL 文件、不归零。

@@ -2,7 +2,7 @@
 
 ## 分支与发布
 
-`dev` 承接调整，提交推送并验证后常规合并进 `main`；版本 bump 与发布 tag 在 `main`。两个分支项目内容同源，不能为发布剔除 `.agents/notes/`。安装包为 Windows x64 `setup.exe` 与 `.msi`，发布在 [Releases](https://github.com/Dchean/fluxreader/releases)。
+`dev` 承接调整，提交推送并验证后常规合并进 `main`；版本 bump 与发布 tag 在 `main`。两个分支项目内容同源，不能为发布剔除 `.agents/archive/legacy-workflow/notes/`。安装包为 Windows x64 `setup.exe` 与 `.msi`，发布在 [Releases](https://github.com/Dchean/fluxreader/releases)。
 
 发布顺序：
 
@@ -61,6 +61,6 @@ FluxReader vX.Y.Z
 
 不重写历史提交哈希或重打历史 tag。这样会破坏既有 SHA 引用，并可能触发旧 Release 重构建、覆盖既有资产；旧提交也未必通过当前门禁。
 
-2026-11-02 曾对 `v0.8.0`–`v0.18.7` 的 28 个 Release web 正文作面向用户的规范化，历史 tag 附注未动。因此这些版本允许 web 正文与旧附注不同；“来源单点”约束后续新发布，不能倒称旧文本一直相同。该历史决定见[文案与提交史边界](../.agents/notes/implemented/process/2026-11-02-历史文案规范化与提交史边界.md)。本次文档整理没有重新编辑这些外部 Release。
+2026-11-02 曾对 `v0.8.0`–`v0.18.7` 的 28 个 Release web 正文作面向用户的规范化，历史 tag 附注未动。因此这些版本允许 web 正文与旧附注不同；“来源单点”约束后续新发布，不能倒称旧文本一直相同。该历史决定见[文案与提交史边界](../.agents/archive/legacy-workflow/notes/implemented/process/2026-11-02-历史文案规范化与提交史边界.md)。本次文档整理没有重新编辑这些外部 Release。
 
-需要明确授权修正某个旧版 web 正文时使用 `gh release edit vX.Y.Z --notes-file <正文文件>`，不重打 tag。原由见[发布说明来源决定](../.agents/notes/implemented/process/2026-09-29-发布说明取自-tag-附注.md)。
+需要明确授权修正某个旧版 web 正文时使用 `gh release edit vX.Y.Z --notes-file <正文文件>`，不重打 tag。原由见[发布说明来源决定](../.agents/archive/legacy-workflow/notes/implemented/process/2026-09-29-发布说明取自-tag-附注.md)。
