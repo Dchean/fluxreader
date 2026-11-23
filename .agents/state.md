@@ -22,8 +22,8 @@
 | # | 切片 | 能演示什么 | 验收口径（草案） |
 | --- | --- | --- | --- |
 | 1 | 收口 D8/X25 在飞改动 | 传输层不再有旧 probe/lease/MOVE 生产路径，错误归属正确 | 定向 `cargo check/clippy/test` 绿 + 旧 ignored WsgiDAV 测试按约定跑通 + 全新只读独审 |
-| 2 | 退订收藏界面闭环 | 退订后仍能读收藏、计数正确、新设备恢复可见 | 真实界面列出/阅读/计数 + 恢复组合（见 roadmap 未验项） |
-| 3 | 正文保留控件真实 Edge 验证 | 默认永久/1–3650 天、原子保存、失败回滚在真实宿主可用 | `npm run test:ui-layout` + 真实 Edge 键盘用例 |
+| 2 | 退订收藏界面闭环 | 退订后仍能读收藏、计数正确、新设备恢复可见 | headless 部分**已覆盖并通过**（`tools/component-tests/reading-session.test.mjs` 的「退订收藏」用例：不进 `feedIndex`、`sourceIndex` 解析、计数含退订源、Reader 渲染原源标题与正文）。剩余只有真实 WebView2 与换机恢复组合，需原生宿主 |
+| 3 | 正文保留控件真实 Edge 验证 | 默认永久/1–3650 天、原子保存、失败回滚在真实宿主可用 | **当前环境不可达**：`SyncTab` 在 `dataMode !== 'tauri'` 时 early-return 演示模式卡片，控件在浏览器/演示模式下根本不渲染；`npm run test:ui-layout` 的「TEMP 必须在仓库外」守卫在工作区外不可写的会话里过不去。需真实 Tauri 宿主 |
 | 4 | 列表宽度口径统一 | 校验区间与 UI 夹取一致，不再"能存但显示被夹" | 二选一拍板（放宽 UI 到 560 或收紧校验到 420）后补回归 |
 
 ## 三、仍有效的未完成需求（来自 roadmap）
