@@ -606,6 +606,84 @@ async fn b3_failed_get_retains_the_listed_name_until_retry_succeeds() {
 }
 
 #[tokio::test]
+async fn s4b_d7_actor_directory_count_and_invalid_identity_have_separate_messages() {
+    for invalid_identity in [false, true] {
+        let mut server = Server::start(0, 0, Delays::default());
+        let database = database_for(&server);
+        let runtime = LocalRuntime::default();
+        let session = session(&*database.lock().await).unwrap().unwrap();
+        {
+            let mut objects = server.shared.objects.lock().unwrap();
+            for index in 0..63 {
+                objects.insert(
+                    format!("/{ROOT}actors/{:032x}/state/placeholder", index + 128),
+                    Vec::new(),
+                );
+            }
+            objects.insert(
+                format!("/{ROOT}actors/{}/state/placeholder", session.actor),
+                Vec::new(),
+            );
+        }
+        let peers = actors_due(&database, &runtime, &session, &mut Budget::limited(1), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            peers.len(),
+            63,
+            "64 directories including self remain accepted"
+        );
+        {
+            let mut objects = server.shared.objects.lock().unwrap();
+            if invalid_identity {
+                objects.remove(&format!("/{ROOT}actors/{:032x}/state/placeholder", 128));
+                objects.insert(
+                    format!("/{ROOT}actors/not-an-actor/state/placeholder"),
+                    Vec::new(),
+                );
+            } else {
+                objects.insert(
+                    format!("/{ROOT}actors/{:032x}/state/placeholder", 191),
+                    Vec::new(),
+                );
+            }
+        }
+        // Run the production discovery with no cached peers so its original
+        // format error is observable, rather than the normal cached-peer fallback.
+        let second_runtime = LocalRuntime::default();
+        let empty_conn = database.lock().await;
+        empty_conn
+            .execute(
+                "DELETE FROM local_sync_known_actors WHERE actor<>?1",
+                [&session.actor],
+            )
+            .unwrap();
+        drop(empty_conn);
+        let error = actors_due(
+            &database,
+            &second_runtime,
+            &session,
+            &mut Budget::limited(1),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "localSyncFormat");
+        if invalid_identity {
+            assert!(error.message.contains("身份无效"), "{}", error.message);
+            assert!(error.message.contains("格式错误"), "{}", error.message);
+            assert!(!error.message.contains("数量"), "{}", error.message);
+            assert!(!error.message.contains("64"), "{}", error.message);
+        } else {
+            assert!(error.message.contains("64个上限"), "{}", error.message);
+            assert!(error.message.contains("目录数量"), "{}", error.message);
+            assert!(!error.message.contains("身份无效"), "{}", error.message);
+        }
+        server.finish();
+    }
+}
+
+#[tokio::test]
 async fn b3_late_receive_responses_reject_stop_and_generation_changes() {
     for kind in [
         RequestKind::Marker,

@@ -633,7 +633,7 @@ pub(super) async fn transport_guard(
 ) -> crate::webdav_transport::Result<()> {
     ensure_session(database, session).await.map_err(|error| {
         crate::webdav_transport::TransportError {
-            kind: crate::webdav_transport::ErrorKind::LeaseExpired,
+            kind: crate::webdav_transport::ErrorKind::SessionCheckFailed,
             message: error.to_string(),
         }
     })
@@ -774,8 +774,14 @@ async fn actors_due(
     let result = session.transport.library_list(&actor_path).await;
     ensure_session(database, session).await?;
     let result = result.map_err(transport_error).and_then(|actors| {
-        if actors.len() > 64 || actors.iter().any(|actor| !valid_hex(actor, 32)) {
-            Err(invalid("设备目录数量或身份无效"))
+        if actors.len() > 64 {
+            Err(invalid(
+                "WebDAV设备目录数量超过64个上限；本机数据已保留，可继续本机使用",
+            ))
+        } else if actors.iter().any(|actor| !valid_hex(actor, 32)) {
+            Err(invalid(
+                "WebDAV设备目录中的设备身份无效（标识格式错误）；本机数据已保留，可继续本机使用",
+            ))
         } else {
             Ok(actors)
         }
@@ -1814,6 +1820,10 @@ fn spawn_workers(app: tauri::AppHandle) {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod segment2_schedule_tests {

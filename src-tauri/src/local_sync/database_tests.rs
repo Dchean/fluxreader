@@ -4,6 +4,49 @@ use crate::db;
 use rusqlite::{params, Connection};
 use serde_json::json;
 const LIB: &str = "11111111111111111111111111111111";
+
+#[test]
+fn s4b_d7_known_actor_capacity_preserves_64_existing_ids_and_distinguishes_bad_identity() {
+    let c = conn();
+    database::initialize(&c, LIB).unwrap();
+    let local = database::actor(&c).unwrap();
+    for index in 0..63 {
+        super::logical::register_actor(&c, &format!("{index:032x}")).unwrap();
+    }
+    assert_eq!(
+        c.query_row("SELECT COUNT(*) FROM local_sync_known_actors", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        64
+    );
+    super::logical::register_actor(&c, &local).unwrap();
+    super::logical::register_actor(&c, &format!("{:032x}", 0)).unwrap();
+    let capacity = super::logical::register_actor(&c, &format!("{:032x}", 64)).unwrap_err();
+    assert_eq!(capacity.code, "localSyncFormat");
+    assert!(
+        capacity.message.contains("64个上限"),
+        "{}",
+        capacity.message
+    );
+    assert!(
+        capacity.message.contains("已知设备身份数量"),
+        "{}",
+        capacity.message
+    );
+    assert!(!capacity.message.contains("身份无效"));
+    let identity = super::logical::register_actor(&c, "invalid").unwrap_err();
+    assert_eq!(identity.code, "localSyncFormat");
+    assert!(identity.message.contains("身份无效"));
+    assert!(identity.message.contains("格式错误"));
+    assert!(!identity.message.contains("64"));
+    assert_eq!(
+        c.query_row("SELECT COUNT(*) FROM local_sync_known_actors", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        64
+    );
+}
+
 fn conn() -> Connection {
     let mut c = Connection::open_in_memory().unwrap();
     db::MIGRATIONS.to_latest(&mut c).unwrap();

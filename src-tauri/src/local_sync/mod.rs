@@ -22,7 +22,8 @@ pub(crate) fn transport_error(error: TransportError) -> AppError {
         ErrorKind::Conflict => "localSyncConflict",
         ErrorKind::InvalidXml | ErrorKind::InvalidState => "localSyncFormat",
         ErrorKind::InvalidInput => "validate",
-        ErrorKind::LeaseExpired => "localSyncLease",
+        // Keep the existing IPC code; this failure belongs to the local session check.
+        ErrorKind::SessionCheckFailed => "localSyncLease",
         ErrorKind::Http(404) => "localSyncNotFound",
         ErrorKind::Http(_) => "localSyncHttp",
     };

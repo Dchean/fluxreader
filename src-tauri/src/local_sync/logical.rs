@@ -324,7 +324,7 @@ fn merge_frontier(current: &mut Frontier, incoming: &Frontier) {
 pub fn register_actor(conn: &Connection, actor: &str) -> AppResult<()> {
     let _writer = db::writer_guard(conn)?;
     if !valid_hex(actor, 32) {
-        return Err(invalid("设备身份无效"));
+        return Err(invalid("设备身份无效（标识格式错误）"));
     }
     let known: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_sync_known_actors WHERE actor=?1)",
@@ -337,7 +337,9 @@ pub fn register_actor(conn: &Connection, actor: &str) -> AppResult<()> {
                 r.get(0)
             })?;
         if count >= 64 {
-            return Err(invalid("设备身份超过格式容量"));
+            return Err(invalid(
+                "已知设备身份数量超过64个上限；本机数据已保留，可继续本机使用",
+            ));
         }
         conn.execute(
             "INSERT INTO local_sync_known_actors(actor) VALUES(?1)",

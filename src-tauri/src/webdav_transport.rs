@@ -1,28 +1,20 @@
 //! Small, independently testable WebDAV transport. No application DB or sync policy.
 //!
-//! Immutable field-intent batches may coexist. LOCK never establishes a global
-//! order. Stored receipts prove exact bytes, while pure per-field merging decides
-//! current values using stamps fixed when local intents were created.
+//! Immutable library objects coexist. Exact readback proves storage of bytes,
+//! while per-field merging uses stamps fixed when local intents were created.
+//! The reference replica is retained only for model and production-SQL tests.
 
 use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 use reqwest::{header, Client, Method, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    fmt,
-    time::{Duration, Instant},
-};
+use std::{fmt, time::Duration};
 use url::Url;
 
 const XML_LIMIT: usize = 256 * 1024;
-const STATE_LIMIT: usize = 2 * 1024 * 1024;
 const XML_NODES: usize = 4096;
 const XML_DEPTH: usize = 32;
 const DAV: &str = "DAV:";
-const LOCK_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
-const PROPFIND_BODY: &str =
-    "<D:propfind xmlns:D=\"DAV:\"><D:prop><D:resourcetype/><D:getetag/></D:prop></D:propfind>";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidInput,
@@ -32,7 +24,7 @@ pub enum ErrorKind {
     InvalidXml,
     InvalidState,
     Conflict,
-    LeaseExpired,
+    SessionCheckFailed,
     OutcomeUnknown,
 }
 
@@ -59,11 +51,6 @@ fn error(kind: ErrorKind, message: &str) -> TransportError {
     }
 }
 
-/// Supplied by the caller from 128 bits of fresh randomness. Transport does not
-/// invent a clock-based identifier or open a database to obtain randomness.
-#[derive(Clone, Copy)]
-pub struct ProbeId(pub [u8; 16]);
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -89,37 +76,7 @@ pub struct Transport {
     credentials: Option<Credentials>,
 }
 
-/// Only returned after this transport created a fresh, dedicated collection.
-/// Cleanup is restricted to that exact collection, never the configured root.
-#[derive(Debug, Clone)]
-pub struct ProbeCollection {
-    url: Url,
-    base: Url,
-}
-
-impl ProbeCollection {
-    pub fn url(&self) -> &Url {
-        &self.url
-    }
-}
-
-/// Token is private and deliberately excluded from Debug/serialization.
-pub struct Lease {
-    collection: ProbeCollection,
-    token: String,
-    expires_at: Instant,
-    duration: Duration,
-}
-
-impl Lease {
-    pub fn duration(&self) -> Duration {
-        self.duration
-    }
-    pub fn remaining(&self) -> Duration {
-        self.expires_at.saturating_duration_since(Instant::now())
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct Dot {
@@ -251,7 +208,6 @@ impl Batch {
 
 #[derive(Debug, Clone)]
 pub struct PreparedBatch {
-    batch: Batch,
     bytes: Vec<u8>,
     id: String,
 }
@@ -265,10 +221,7 @@ impl PreparedBatch {
             return Err(error(ErrorKind::TooLarge, "batch budget exceeded"));
         }
         let id = hex(&Sha256::digest(&bytes));
-        Ok(Self { batch, bytes, id })
-    }
-    pub fn batch(&self) -> &Batch {
-        &self.batch
+        Ok(Self { bytes, id })
     }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -276,41 +229,6 @@ impl PreparedBatch {
     pub fn id(&self) -> &str {
         &self.id
     }
-    pub fn file_name(&self, attempt: ProbeId) -> String {
-        immutable_name("batch", &self.id, attempt)
-    }
-}
-
-/// Stored is transport durability evidence for these exact bytes, NOT a global
-/// winning value or a unique server commit order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredReceipt {
-    pub batch_id: String,
-    pub actor: String,
-    pub first_seq: u64,
-    pub last_seq: u64,
-}
-
-impl PreparedBatch {
-    fn receipt(&self) -> StoredReceipt {
-        StoredReceipt {
-            batch_id: self.id.clone(),
-            actor: self.batch.actor.clone(),
-            first_seq: self.batch.intents[0].seq,
-            last_seq: self
-                .batch
-                .intents
-                .last()
-                .expect("validated nonempty batch")
-                .seq,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoreResolution {
-    Stored(StoredReceipt),
-    Pending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -426,11 +344,13 @@ impl Checkpoint {
         joined.validate()?;
         Ok(joined)
     }
+    #[cfg(test)]
     pub fn covers(&self, dot: &Dot) -> bool {
         dot.seq <= frontier_seq(&self.covered, &dot.actor)
     }
     /// Field tombstones participate, so a removed setting cannot reappear from
     /// an older checkpoint. A frontier alone is not state domination evidence.
+    #[cfg(test)]
     pub fn dominates(&self, other: &Self) -> Result<bool> {
         self.validate()?;
         other.validate()?;
@@ -482,18 +402,21 @@ fn join_register(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct Replica {
     base: Checkpoint,
     active: std::collections::BTreeMap<Dot, Intent>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Projection {
     pub checkpoint: Checkpoint,
     pub pending: Vec<Dot>,
 }
 
+#[cfg(test)]
 impl Replica {
     pub fn new(library_id: &str) -> Result<Self> {
         Ok(Self {
@@ -730,123 +653,6 @@ impl Replica {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PreparedCheckpoint {
-    checkpoint: Checkpoint,
-    bytes: Vec<u8>,
-    id: String,
-}
-
-impl PreparedCheckpoint {
-    pub fn new(checkpoint: Checkpoint) -> Result<Self> {
-        checkpoint.validate()?;
-        let bytes = serde_json::to_vec(&checkpoint)
-            .map_err(|_| error(ErrorKind::InvalidState, "checkpoint serialization failed"))?;
-        if bytes.len() > STATE_LIMIT {
-            return Err(error(ErrorKind::TooLarge, "checkpoint budget exceeded"));
-        }
-        let id = hex(&Sha256::digest(&bytes));
-        Ok(Self {
-            checkpoint,
-            bytes,
-            id,
-        })
-    }
-    pub fn checkpoint(&self) -> &Checkpoint {
-        &self.checkpoint
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub fn file_name(&self, attempt: ProbeId) -> String {
-        immutable_name("checkpoint", &self.id, attempt)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StoredCheckpoint {
-    id: String,
-    file_name: String,
-    collection_url: Url,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingObject {
-    pub file_name: String,
-    pub reason: ErrorKind,
-}
-
-#[derive(Debug, Clone)]
-struct SeenBatch {
-    file_name: String,
-    prepared: PreparedBatch,
-}
-
-#[derive(Debug, Clone)]
-pub struct Scan {
-    pub replica: Replica,
-    pub pending_objects: Vec<PendingObject>,
-    batches: Vec<SeenBatch>,
-    collection_url: Url,
-}
-
-/// Plans only exact batch URIs from a completed scan whose effects are covered
-/// by the stored checkpoint. No generation/age-based deletion, no checkpoint GC.
-pub fn covered_batch_names(
-    checkpoint: &PreparedCheckpoint,
-    stored: &StoredCheckpoint,
-    scan: &Scan,
-) -> Result<Vec<String>> {
-    if stored.id != checkpoint.id
-        || stored.collection_url != scan.collection_url
-        || !checkpoint
-            .checkpoint
-            .dominates(&scan.replica.checkpoint()?)?
-    {
-        return Err(error(
-            ErrorKind::Conflict,
-            "checkpoint does not cover the observed merged state",
-        ));
-    }
-    Ok(scan
-        .batches
-        .iter()
-        .filter(|seen| {
-            seen.prepared.batch.intents.iter().all(|intent| {
-                checkpoint.checkpoint.covers(&Dot {
-                    actor: seen.prepared.batch.actor.clone(),
-                    seq: intent.seq,
-                })
-            })
-        })
-        .map(|seen| seen.file_name.clone())
-        .collect())
-}
-
-fn immutable_name(kind: &str, id: &str, attempt: ProbeId) -> String {
-    format!("{kind}-{id}-{}.json", hex(&attempt.0))
-}
-
-fn object_id(name: &str, kind: &str) -> Option<String> {
-    let rest = name
-        .strip_prefix(kind)?
-        .strip_prefix('-')?
-        .strip_suffix(".json")?;
-    let (id, attempt) = rest.split_once('-')?;
-    if id.len() != 64
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        || !valid_id(attempt)
-    {
-        return None;
-    }
-    Some(id.to_owned())
-}
-
 impl Transport {
     /// Persistent library resources are confined to a reserved child namespace.
     /// These primitives never follow redirects and never recursively delete it.
@@ -987,37 +793,49 @@ impl Transport {
             .await
             .map_err(|_| error(ErrorKind::Network, "library PROPFIND failed"))?;
         require_status(response.status(), &[StatusCode::MULTI_STATUS])?;
-        parse_listing_with_limit(&read_bounded(response, XML_LIMIT).await?, &url, 256, true)
-    }
-
-    /// Only exact files in the reserved library. No root/directory DELETE API.
-    pub async fn library_remove(&self, path: &str) -> Result<()> {
-        if path.ends_with('/')
-            || !path
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| name.ends_with(".json") || name.ends_with(".bin"))
-        {
-            return Err(error(
-                ErrorKind::InvalidInput,
-                "library removal requires an exact object",
-            ));
-        }
-        let response = self
-            .request("DELETE", self.library_resource(path, false)?)?
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::OutcomeUnknown, "library DELETE result unknown"))?;
-        require_status(
-            response.status(),
-            &[
-                StatusCode::OK,
-                StatusCode::NO_CONTENT,
-                StatusCode::NOT_FOUND,
-            ],
-        )?;
-        read_bounded(response, XML_LIMIT).await?;
-        Ok(())
+        let bytes = read_bounded(response, XML_LIMIT).await.map_err(|err| {
+            if err.kind != ErrorKind::TooLarge {
+                return err;
+            }
+            let trigger = if err.message.contains("Content-Length") {
+                "Content-Length 声明超限"
+            } else {
+                "流式接收超限"
+            };
+            error(
+                ErrorKind::TooLarge,
+                &format!(
+                    "WebDAV 目录 XML 响应超过 256 KiB 字节上限（{trigger}）。本机资料已保留，可继续本机使用；重试或重连不会改变远端容量。目录：{url}"
+                ),
+            )
+        })?;
+        parse_listing_with_limit(&bytes, &url, 256, true).map_err(|err| {
+            if err.kind == ErrorKind::TooLarge && err.message == "listing resource budget exceeded" {
+                return error(
+                    ErrorKind::TooLarge,
+                    &format!(
+                        "WebDAV 单目录对象数超过 256 项上限；单目录最多 256 项。本机资料已保留，可断开 WebDAV 后继续本机使用；重试或重连不会减少远端对象数。目录：{url}"
+                    ),
+                );
+            }
+            if err.kind != ErrorKind::TooLarge {
+                return err;
+            }
+            let detail = match err.message.as_str() {
+                "XML event budget exceeded" => "事件数量超过解析预算",
+                "XML structure budget exceeded" => "节点数或嵌套深度超过解析预算",
+                "XML attribute budget exceeded" => "属性数量或长度超过解析预算",
+                "XML text budget exceeded" => "文本长度超过解析预算",
+                "XML exceeds byte budget" => "字节量超过 256 KiB 预算",
+                _ => return err,
+            };
+            error(
+                ErrorKind::TooLarge,
+                &format!(
+                    "WebDAV 目录 XML {detail}。本机资料已保留，可继续本机使用。目录：{url}"
+                ),
+            )
+        })
     }
 
     pub fn new(base: &str, credentials: Option<Credentials>, timeout: Duration) -> Result<Self> {
@@ -1067,522 +885,6 @@ impl Transport {
         }
         Ok(request)
     }
-
-    fn owns(&self, collection: &ProbeCollection) -> Result<()> {
-        if collection.base != self.base {
-            return Err(error(
-                ErrorKind::InvalidInput,
-                "collection belongs to another endpoint",
-            ));
-        }
-        Ok(())
-    }
-
-    fn resource(&self, collection: &ProbeCollection, name: &str) -> Result<Url> {
-        self.owns(collection)?;
-        if name.is_empty()
-            || name.len() > 180
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-            || name == "."
-            || name == ".."
-        {
-            return Err(error(ErrorKind::InvalidInput, "invalid resource name"));
-        }
-        collection
-            .url
-            .join(name)
-            .map_err(|_| error(ErrorKind::InvalidInput, "invalid resource URL"))
-    }
-
-    pub async fn create_probe_collection(&self, id: ProbeId) -> Result<ProbeCollection> {
-        let url = self
-            .base
-            .join(&format!(".fluxreader-probe-{}/", hex(&id.0)))
-            .map_err(|_| error(ErrorKind::InvalidInput, "invalid probe URL"))?;
-        let response = self
-            .request("MKCOL", url.clone())?
-            .send()
-            .await
-            .map_err(|_| {
-                error(
-                    ErrorKind::OutcomeUnknown,
-                    "collection creation outcome unknown; do not claim existing data",
-                )
-            })?;
-        require_status(response.status(), &[StatusCode::CREATED])?;
-        read_bounded(response, XML_LIMIT).await?;
-        Ok(ProbeCollection {
-            url,
-            base: self.base.clone(),
-        })
-    }
-
-    pub async fn cleanup_probe(&self, collection: &ProbeCollection) -> Result<()> {
-        self.owns(collection)?;
-        let response = self
-            .request("DELETE", collection.url.clone())?
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::OutcomeUnknown, "probe cleanup outcome unknown"))?;
-        require_status(
-            response.status(),
-            &[
-                StatusCode::NO_CONTENT,
-                StatusCode::OK,
-                StatusCode::NOT_FOUND,
-            ],
-        )?;
-        read_bounded(response, XML_LIMIT).await?;
-        Ok(())
-    }
-
-    pub async fn acquire_lock(&self, collection: &ProbeCollection, seconds: u32) -> Result<Lease> {
-        self.owns(collection)?;
-        if !(1..=120).contains(&seconds) {
-            return Err(error(
-                ErrorKind::InvalidInput,
-                "lock duration outside probe budget",
-            ));
-        }
-        let started = Instant::now();
-        let response = self
-            .request("LOCK", collection.url.clone())?
-            .header("Depth", "infinity")
-            .header("Timeout", format!("Second-{seconds}"))
-            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(LOCK_BODY)
-            .send()
-            .await
-            .map_err(|_| {
-                error(
-                    ErrorKind::OutcomeUnknown,
-                    "LOCK outcome unknown; wait for lease expiration",
-                )
-            })?;
-        require_status(response.status(), &[StatusCode::OK, StatusCode::CREATED])?;
-        let token = response
-            .headers()
-            .get("Lock-Token")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| error(ErrorKind::InvalidXml, "missing Lock-Token"))?
-            .to_owned();
-        let token = parse_token(&token)?;
-        let body = read_bounded(response, XML_LIMIT).await?;
-        let duration = parse_lock(&body, &token, &collection.url)?;
-        let expires_at = started
-            .checked_add(duration)
-            .ok_or_else(|| error(ErrorKind::InvalidXml, "invalid lease duration"))?;
-        if expires_at <= Instant::now() {
-            return Err(error(
-                ErrorKind::LeaseExpired,
-                "lease expired before response arrived",
-            ));
-        }
-        Ok(Lease {
-            collection: collection.clone(),
-            token,
-            duration,
-            expires_at,
-        })
-    }
-
-    pub async fn renew_lock(&self, lease: &mut Lease, seconds: u32) -> Result<()> {
-        self.check_lease(lease)?;
-        if !(1..=120).contains(&seconds) {
-            return Err(error(
-                ErrorKind::InvalidInput,
-                "lock duration outside probe budget",
-            ));
-        }
-        let started = Instant::now();
-        let response = self
-            .request("LOCK", lease.collection.url.clone())?
-            .header("If", lease_condition(lease))
-            .header("Timeout", format!("Second-{seconds}"))
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::OutcomeUnknown, "lock renewal outcome unknown"))?;
-        require_status(response.status(), &[StatusCode::OK])?;
-        let duration = parse_lock(
-            &read_bounded(response, XML_LIMIT).await?,
-            &lease.token,
-            &lease.collection.url,
-        )?;
-        lease.duration = duration;
-        lease.expires_at = started
-            .checked_add(duration)
-            .ok_or_else(|| error(ErrorKind::InvalidXml, "invalid lease duration"))?;
-        self.check_lease(lease)
-    }
-
-    pub async fn release_lock(&self, lease: &Lease) -> Result<()> {
-        self.owns(&lease.collection)?;
-        let response = self
-            .request("UNLOCK", lease.collection.url.clone())?
-            .header("Lock-Token", format!("<{}>", lease.token))
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::OutcomeUnknown, "unlock outcome unknown"))?;
-        require_status(response.status(), &[StatusCode::NO_CONTENT, StatusCode::OK])?;
-        read_bounded(response, XML_LIMIT).await?;
-        Ok(())
-    }
-
-    fn check_lease(&self, lease: &Lease) -> Result<()> {
-        self.owns(&lease.collection)?;
-        if lease.remaining().is_zero() {
-            return Err(error(
-                ErrorKind::LeaseExpired,
-                "lease expired; acquire and re-read before writing",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Probe-only write. `Some(lease)` deliberately sends even an expired token
-    /// so capability tests can verify the SERVER rejects it. Normal publication
-    /// always calls check_lease first. Only the dedicated probe collection is writable.
-    pub async fn probe_write(
-        &self,
-        collection: &ProbeCollection,
-        name: &str,
-        bytes: &[u8],
-        lease: Option<&Lease>,
-    ) -> Result<()> {
-        if bytes.len() > STATE_LIMIT {
-            return Err(error(ErrorKind::TooLarge, "probe write exceeds budget"));
-        }
-        let mut request = self
-            .request("PUT", self.resource(collection, name)?)?
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .body(bytes.to_owned());
-        if let Some(lease) = lease {
-            if lease.collection.url != collection.url {
-                return Err(error(
-                    ErrorKind::InvalidInput,
-                    "lock belongs to another collection",
-                ));
-            }
-            request = request.header("If", lease_condition(lease));
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::OutcomeUnknown, "probe PUT outcome unknown"))?;
-        require_status(
-            response.status(),
-            &[StatusCode::OK, StatusCode::CREATED, StatusCode::NO_CONTENT],
-        )?;
-        read_bounded(response, XML_LIMIT).await?;
-        Ok(())
-    }
-
-    async fn get(&self, collection: &ProbeCollection, name: &str) -> Result<Option<Vec<u8>>> {
-        let response = self
-            .request("GET", self.resource(collection, name)?)?
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::Network, "GET failed"))?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        require_status(response.status(), &[StatusCode::OK])?;
-        Ok(Some(read_bounded(response, STATE_LIMIT).await?))
-    }
-
-    async fn names(&self, collection: &ProbeCollection) -> Result<Vec<String>> {
-        self.owns(collection)?;
-        let response = self
-            .request("PROPFIND", collection.url.clone())?
-            .header("Depth", "1")
-            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(PROPFIND_BODY)
-            .send()
-            .await
-            .map_err(|_| error(ErrorKind::Network, "PROPFIND failed"))?;
-        require_status(response.status(), &[StatusCode::MULTI_STATUS])?;
-        parse_listing(&read_bounded(response, XML_LIMIT).await?, &collection.url)
-    }
-
-    /// Finds exact immutable bytes, never infers that their field values won.
-    pub async fn resolve_batch(
-        &self,
-        collection: &ProbeCollection,
-        batch: &PreparedBatch,
-    ) -> Result<StoreResolution> {
-        for name in self.names(collection).await? {
-            if object_id(&name, "batch").as_deref() != Some(batch.id()) {
-                continue;
-            }
-            if self.get(collection, &name).await?.as_deref() == Some(batch.bytes()) {
-                return Ok(StoreResolution::Stored(batch.receipt()));
-            }
-        }
-        Ok(StoreResolution::Pending)
-    }
-
-    /// LOCK is optional contention reduction, never the correctness boundary.
-    /// Every attempt has its own name. A delayed previous attempt may also finish;
-    /// both encode the same dots and are idempotent inputs, not competing heads.
-    pub async fn store_batch(
-        &self,
-        collection: &ProbeCollection,
-        batch: &PreparedBatch,
-        attempt: ProbeId,
-        lease: Option<&Lease>,
-    ) -> Result<StoredReceipt> {
-        if let StoreResolution::Stored(receipt) = self.resolve_batch(collection, batch).await? {
-            return Ok(receipt);
-        }
-        self.store_object(
-            collection,
-            "batch",
-            batch.id(),
-            batch.bytes(),
-            attempt,
-            lease,
-        )
-        .await?;
-        Ok(batch.receipt())
-    }
-
-    pub async fn store_checkpoint(
-        &self,
-        collection: &ProbeCollection,
-        checkpoint: &PreparedCheckpoint,
-        attempt: ProbeId,
-        lease: Option<&Lease>,
-    ) -> Result<StoredCheckpoint> {
-        let file_name = self
-            .store_object(
-                collection,
-                "checkpoint",
-                checkpoint.id(),
-                checkpoint.bytes(),
-                attempt,
-                lease,
-            )
-            .await?;
-        Ok(StoredCheckpoint {
-            id: checkpoint.id.clone(),
-            file_name,
-            collection_url: collection.url.clone(),
-        })
-    }
-
-    async fn store_object(
-        &self,
-        collection: &ProbeCollection,
-        kind: &str,
-        id: &str,
-        bytes: &[u8],
-        attempt: ProbeId,
-        lease: Option<&Lease>,
-    ) -> Result<String> {
-        self.owns(collection)?;
-        if let Some(lease) = lease {
-            self.check_lease(lease)?;
-            if lease.collection.url != collection.url {
-                return Err(error(
-                    ErrorKind::InvalidInput,
-                    "lease belongs to another collection",
-                ));
-            }
-        }
-        let file_name = immutable_name(kind, id, attempt);
-        if let Some(existing) = self.get(collection, &file_name).await? {
-            if existing == bytes {
-                return Ok(file_name);
-            }
-            return Err(error(
-                ErrorKind::Conflict,
-                "attempt name already exists; use a new attempt without overwriting",
-            ));
-        }
-        let stage_name = format!("stage-{kind}-{id}-{}", hex(&attempt.0));
-        let stage = self.resource(collection, &stage_name)?;
-        let mut request = self
-            .request("PUT", stage.clone())?
-            .header(header::IF_NONE_MATCH, "*")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes.to_owned());
-        if let Some(lease) = lease {
-            request = request.header("If", lease_condition(lease));
-        }
-        let response = request.send().await.map_err(|_| {
-            error(
-                ErrorKind::OutcomeUnknown,
-                "staging PUT outcome unknown; retain sealed batch",
-            )
-        })?;
-        require_status(response.status(), &[StatusCode::CREATED])?;
-        read_bounded(response, XML_LIMIT).await?;
-        if self.get(collection, &stage_name).await?.as_deref() != Some(bytes) {
-            return Err(error(
-                ErrorKind::InvalidState,
-                "staging readback did not match",
-            ));
-        }
-        if let Some(lease) = lease {
-            self.check_lease(lease)?;
-        }
-        let destination = self.resource(collection, &file_name)?;
-        let mut request = self
-            .request("MOVE", stage)?
-            .header("Destination", destination.as_str())
-            .header("Overwrite", "F");
-        if let Some(lease) = lease {
-            request = request.header("If", lease_condition(lease));
-        }
-        let response = request.send().await.map_err(|_| {
-            error(
-                ErrorKind::OutcomeUnknown,
-                "MOVE outcome unknown; query batch hash without assigning a new operation",
-            )
-        })?;
-        require_status(response.status(), &[StatusCode::CREATED])?;
-        read_bounded(response, XML_LIMIT)
-            .await
-            .map_err(|_| error(ErrorKind::OutcomeUnknown, "MOVE response incomplete"))?;
-        match self.get(collection, &file_name).await {
-            Ok(Some(readback)) if readback == bytes => Ok(file_name),
-            _ => Err(error(
-                ErrorKind::OutcomeUnknown,
-                "immutable bytes not yet confirmed",
-            )),
-        }
-    }
-
-    /// Reuses known local state: a missing listing entry never rolls it backward.
-    /// Concurrent branches are ordinary inputs. Incomplete objects are pending,
-    /// never applied or counted as an acknowledged sequence.
-    pub async fn scan(&self, collection: &ProbeCollection, known: &Replica) -> Result<Scan> {
-        let names = self.names(collection).await?;
-        let mut replica = known.clone();
-        let mut pending_objects = Vec::new();
-        let mut checkpoints = Vec::new();
-        let mut batches = Vec::new();
-        for name in names {
-            let (kind, id) = if let Some(id) = object_id(&name, "checkpoint") {
-                ("checkpoint", id)
-            } else if let Some(id) = object_id(&name, "batch") {
-                ("batch", id)
-            } else if name.starts_with("stage-") {
-                continue;
-            } else if name.starts_with("batch-") || name.starts_with("checkpoint-") {
-                return Err(error(
-                    ErrorKind::InvalidState,
-                    "invalid immutable object name",
-                ));
-            } else {
-                continue;
-            };
-            let bytes = match self.get(collection, &name).await? {
-                Some(bytes) => bytes,
-                None => {
-                    pending_objects.push(PendingObject {
-                        file_name: name,
-                        reason: ErrorKind::Network,
-                    });
-                    continue;
-                }
-            };
-            if hex(&Sha256::digest(&bytes)) != id {
-                pending_objects.push(PendingObject {
-                    file_name: name,
-                    reason: ErrorKind::InvalidState,
-                });
-                continue;
-            }
-            if kind == "checkpoint" {
-                let checkpoint: Checkpoint = serde_json::from_slice(&bytes)
-                    .map_err(|_| error(ErrorKind::InvalidState, "invalid complete checkpoint"))?;
-                checkpoint.validate()?;
-                checkpoints.push(checkpoint);
-            } else {
-                let batch: Batch = serde_json::from_slice(&bytes)
-                    .map_err(|_| error(ErrorKind::InvalidState, "invalid complete batch"))?;
-                let prepared = PreparedBatch::new(batch)?;
-                if prepared.bytes != bytes {
-                    return Err(error(
-                        ErrorKind::InvalidState,
-                        "batch encoding is not canonical",
-                    ));
-                }
-                batches.push(SeenBatch {
-                    file_name: name,
-                    prepared,
-                });
-            }
-        }
-        // Covered old seq is ignored by contract, independent of listing order.
-        for checkpoint in checkpoints {
-            replica.ingest_checkpoint(&checkpoint)?;
-        }
-        for seen in &batches {
-            replica.ingest_batch(seen.prepared.batch())?;
-        }
-        Ok(Scan {
-            replica,
-            pending_objects,
-            batches,
-            collection_url: collection.url.clone(),
-        })
-    }
-
-    /// Narrow GC: only exact, fully validated batches proven covered by a stored
-    /// checkpoint. This phase deliberately does not delete checkpoints/archives.
-    pub async fn remove_covered_batches(
-        &self,
-        collection: &ProbeCollection,
-        checkpoint: &PreparedCheckpoint,
-        stored: &StoredCheckpoint,
-        scan: &Scan,
-    ) -> Result<usize> {
-        if stored.collection_url != collection.url || scan.collection_url != collection.url {
-            return Err(error(
-                ErrorKind::InvalidInput,
-                "cleanup proof belongs to another collection",
-            ));
-        }
-        if self.get(collection, &stored.file_name).await?.as_deref() != Some(checkpoint.bytes()) {
-            return Err(error(
-                ErrorKind::Conflict,
-                "covering checkpoint is not readable; retain batches",
-            ));
-        }
-        let names = covered_batch_names(checkpoint, stored, scan)?;
-        let mut removed = 0;
-        for name in names {
-            let response = self
-                .request("DELETE", self.resource(collection, &name)?)?
-                .send()
-                .await
-                .map_err(|_| {
-                    error(
-                        ErrorKind::OutcomeUnknown,
-                        "covered batch cleanup outcome unknown",
-                    )
-                })?;
-            require_status(
-                response.status(),
-                &[
-                    StatusCode::NO_CONTENT,
-                    StatusCode::OK,
-                    StatusCode::NOT_FOUND,
-                ],
-            )?;
-            read_bounded(response, XML_LIMIT).await?;
-            removed += 1;
-        }
-        Ok(removed)
-    }
-}
-
-fn lease_condition(lease: &Lease) -> String {
-    format!("(<{}>)", lease.token)
 }
 
 fn require_status(actual: StatusCode, allowed: &[StatusCode]) -> Result<()> {
@@ -1618,24 +920,6 @@ async fn read_bounded(mut response: Response, limit: usize) -> Result<Vec<u8>> {
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
-}
-
-fn parse_token(raw: &str) -> Result<String> {
-    let token = raw
-        .strip_prefix('<')
-        .and_then(|value| value.strip_suffix('>'))
-        .ok_or_else(|| error(ErrorKind::InvalidXml, "invalid lock token header"))?;
-    if token.is_empty()
-        || token.len() > 512
-        || !token.is_ascii()
-        || token
-            .bytes()
-            .any(|b| b <= 0x20 || matches!(b, b'<' | b'>' | b'(' | b')' | b'"'))
-        || Url::parse(token).is_err()
-    {
-        return Err(error(ErrorKind::InvalidXml, "invalid lock token value"));
-    }
-    Ok(token.to_owned())
 }
 
 #[derive(Debug)]
@@ -1845,48 +1129,6 @@ fn append_xml_text(nodes: &mut [XmlNode], stack: &[usize], value: &str) -> Resul
     Ok(())
 }
 
-fn parse_lock(bytes: &[u8], token: &str, collection: &Url) -> Result<Duration> {
-    let doc = parse_xml(bytes)?;
-    let root = doc.root("prop")?;
-    let discovery = doc.child(root, "lockdiscovery")?;
-    let active = doc.child(discovery, "activelock")?;
-    let scope = doc.child(active, "lockscope")?;
-    doc.child(scope, "exclusive")?;
-    let kind = doc.child(active, "locktype")?;
-    doc.child(kind, "write")?;
-    if doc.text(doc.child(active, "depth")?)? != "infinity"
-        || doc.text(doc.child(doc.child(active, "locktoken")?, "href")?)? != token
-    {
-        return Err(error(ErrorKind::InvalidXml, "lock scope/token mismatch"));
-    }
-    let root_href = doc.text(doc.child(doc.child(active, "lockroot")?, "href")?)?;
-    let lock_root = collection
-        .join(root_href)
-        .map_err(|_| error(ErrorKind::InvalidXml, "invalid lock root"))?;
-    if &lock_root != collection {
-        return Err(error(ErrorKind::InvalidXml, "lock root mismatch"));
-    }
-    let timeout = doc.text(doc.child(active, "timeout")?)?;
-    let seconds = timeout
-        .strip_prefix("Second-")
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|&seconds| seconds <= 3600)
-        .ok_or_else(|| error(ErrorKind::InvalidXml, "finite lock timeout required"))?;
-    // WebDAV servers may floor their remaining lease to Second-0. This is a
-    // valid, unusable lease response, not malformed XML; never publish with it.
-    if seconds == 0 {
-        return Err(error(
-            ErrorKind::LeaseExpired,
-            "server returned an expired lock; acquire and re-read before publishing",
-        ));
-    }
-    Ok(Duration::from_secs(seconds))
-}
-
-fn parse_listing(bytes: &[u8], collection: &Url) -> Result<Vec<String>> {
-    parse_listing_with_limit(bytes, collection, 128, false)
-}
-
 fn parse_listing_with_limit(
     bytes: &[u8],
     collection: &Url,
@@ -2011,18 +1253,6 @@ fn parse_listing_with_limit(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-
-    #[test]
-    fn legitimate_zero_remaining_lock_is_expired_not_invalid_xml() {
-        let collection = Url::parse("http://127.0.0.1/sample-7/").unwrap();
-        let xml=b"<D:prop xmlns:D='DAV:'><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope><D:depth>infinity</D:depth><D:timeout>Second-0</D:timeout><D:locktoken><D:href>opaquelocktoken:test</D:href></D:locktoken><D:lockroot><D:href>/sample-7/</D:href></D:lockroot></D:activelock></D:lockdiscovery></D:prop>";
-        assert_eq!(
-            parse_lock(xml, "opaquelocktoken:test", &collection)
-                .unwrap_err()
-                .kind,
-            ErrorKind::LeaseExpired
-        );
-    }
 
     #[test]
     fn library_listing_accepts_split_property_status_but_rejects_duplicate_required_property() {
@@ -2305,16 +1535,15 @@ mod tests {
         assert_eq!(replica.checkpoint().unwrap().fields.len(), 1);
         assert_eq!(replica.checkpoint().unwrap().covered.len(), 1);
         assert!(
-            PreparedCheckpoint::new(replica.checkpoint().unwrap())
+            serde_json::to_vec(&replica.checkpoint().unwrap())
                 .unwrap()
-                .bytes()
                 .len()
                 < 512
         );
     }
 
     #[test]
-    fn checkpoint_same_stamp_conflict_and_uncovered_cleanup_are_rejected() {
+    fn checkpoint_same_stamp_conflict_is_rejected_atomically() {
         let a = batch(
             1,
             1,
@@ -2323,47 +1552,14 @@ mod tests {
         );
         let mut replica = Replica::new(&actor(9)).unwrap();
         replica.ingest_batch(&a).unwrap();
-        let checkpoint = PreparedCheckpoint::new(replica.checkpoint().unwrap()).unwrap();
-        let mut conflict = checkpoint.checkpoint().clone();
+        let checkpoint = replica.checkpoint().unwrap();
+        let mut conflict = checkpoint.clone();
         conflict.fields.get_mut("read").unwrap().value = FieldValue::Set(serde_json::json!(false));
         assert_eq!(
             replica.ingest_checkpoint(&conflict).unwrap_err().kind,
             ErrorKind::Conflict
         );
-        let url = Url::parse("http://127.0.0.1/probe/").unwrap();
-        let stored = StoredCheckpoint {
-            id: checkpoint.id().to_owned(),
-            file_name: checkpoint.file_name(ProbeId([1; 16])),
-            collection_url: url.clone(),
-        };
-        let prepared = PreparedBatch::new(a).unwrap();
-        let first_name = prepared.file_name(ProbeId([2; 16]));
-        let mut scan = Scan {
-            replica,
-            pending_objects: Vec::new(),
-            batches: vec![SeenBatch {
-                file_name: first_name.clone(),
-                prepared,
-            }],
-            collection_url: url,
-        };
-        assert_eq!(
-            covered_batch_names(&checkpoint, &stored, &scan).unwrap(),
-            [first_name]
-        );
-        let b = batch(
-            2,
-            1,
-            1,
-            patch("star", FieldValue::Set(serde_json::json!(true))),
-        );
-        scan.replica.ingest_batch(&b).unwrap();
-        assert_eq!(
-            covered_batch_names(&checkpoint, &stored, &scan)
-                .unwrap_err()
-                .kind,
-            ErrorKind::Conflict
-        );
+        assert_eq!(replica.checkpoint().unwrap(), checkpoint);
     }
 
     #[test]
@@ -2665,12 +1861,11 @@ mod tests {
         .collect();
         let original = batch(1, 1, 1, values);
         let checkpoint = merged(&[original]);
-        let prepared = PreparedCheckpoint::new(checkpoint.clone()).unwrap();
-        let decoded: Checkpoint = serde_json::from_slice(prepared.bytes()).unwrap();
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        let decoded: Checkpoint = serde_json::from_slice(&bytes).unwrap();
+        decoded.validate().unwrap();
         assert_eq!(decoded, checkpoint);
-        let prepared_again = PreparedCheckpoint::new(decoded.clone()).unwrap();
-        assert_eq!(prepared_again.bytes(), prepared.bytes());
-        assert_eq!(prepared_again.id(), prepared.id());
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
         let restored = Replica::from_checkpoint(decoded).unwrap();
         assert_eq!(
             restored.checkpoint().unwrap().fields["nullable"].value,

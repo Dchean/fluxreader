@@ -11,6 +11,15 @@ use std::{
 };
 
 fn response(status: &str, body: Vec<u8>, content_length: bool) -> (String, thread::JoinHandle<()>) {
+    response_with_request(status, body, content_length, None)
+}
+
+fn response_with_request(
+    status: &str,
+    body: Vec<u8>,
+    content_length: bool,
+    expected_request: Option<String>,
+) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let status = status.to_string();
@@ -28,12 +37,50 @@ fn response(status: &str, body: Vec<u8>, content_length: bool) -> (String, threa
             }
             request.extend_from_slice(&buffer[..n]);
         }
+        if let Some(expected) = &expected_request {
+            let header_end = request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let request_line = String::from_utf8_lossy(
+                request
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .expect("request line"),
+            );
+            assert_eq!(request_line.trim_end(), expected);
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Depth: 1")));
+            let request_body = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + request_body {
+                let mut buffer = [0; 4096];
+                let size = stream.read(&mut buffer).unwrap();
+                assert_ne!(size, 0, "PROPFIND request body truncated");
+                request.extend_from_slice(&buffer[..size]);
+            }
+        }
         let length = if content_length {
             format!("Content-Length: {}\r\n", body.len())
         } else {
             String::new()
         };
-        let header = format!("HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\n{length}Connection: close\r\n\r\n");
+        let content_type = if expected_request.is_some() {
+            "application/xml; charset=utf-8"
+        } else {
+            "application/json; charset=utf-8"
+        };
+        let header = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{length}Connection: close\r\n\r\n");
         if stream.write_all(header.as_bytes()).is_ok() {
             for chunk in body.chunks(16 * 1024) {
                 if stream.write_all(chunk).is_err() {
@@ -43,6 +90,19 @@ fn response(status: &str, body: Vec<u8>, content_length: bool) -> (String, threa
         }
     });
     (base, handle)
+}
+
+fn listing_response(
+    path: &str,
+    body: Vec<u8>,
+    content_length: bool,
+) -> (String, thread::JoinHandle<()>) {
+    response_with_request(
+        "207 Multi-Status",
+        body,
+        content_length,
+        Some(format!("PROPFIND /{path} HTTP/1.1")),
+    )
 }
 
 fn client() -> reqwest::Client {
@@ -97,6 +157,127 @@ async fn webdav_body_cap_rejects_length_and_eof_oversize_and_accepts_normal_json
         LIMIT
     );
     server.join().unwrap();
+}
+
+fn listing(count: usize) -> Vec<u8> {
+    let mut xml = "<D:multistatus xmlns:D='DAV:'>".to_owned();
+    for index in 0..count {
+        xml.push_str(&format!("<D:response><D:href>{index}.json</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"));
+    }
+    xml.push_str("</D:multistatus>");
+    xml.into_bytes()
+}
+
+#[tokio::test]
+async fn s4b_d7_directory_capacity_identifies_each_directory_and_256_limit() {
+    for directory in ["state/manifests/", "body/manifests/", "intents/"] {
+        let path = format!(".fluxreader-v3/actors/{}/{directory}", "1".repeat(32));
+        for count in [0, 256, 257] {
+            let xml = listing(count);
+            assert!(
+                xml.len() < 256 * 1024,
+                "count={count}, path={path}: byte cap"
+            );
+            let (base, server) = listing_response(&path, xml, true);
+            let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
+            let result = transport.library_list(&path).await;
+            server.join().unwrap();
+            if count <= 256 {
+                assert_eq!(result.unwrap().len(), count, "count={count}, path={path}");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.kind,
+                    ErrorKind::TooLarge,
+                    "count={count}, path={path}"
+                );
+                assert!(
+                    error.message.contains("256 项上限"),
+                    "count={count}, path={path}, error={}",
+                    error.message
+                );
+                assert!(
+                    error.message.contains("单目录最多 256 项"),
+                    "count={count}, path={path}, error={}",
+                    error.message
+                );
+                assert!(
+                    error.message.contains(&path),
+                    "count={count}, path={path}, error={}",
+                    error.message
+                );
+                assert!(
+                    !error.message.contains("XML"),
+                    "count={count}, path={path}, error={}",
+                    error.message
+                );
+                assert!(
+                    error.message.contains("不会减少远端对象数"),
+                    "count={count}, path={path}, error={}",
+                    error.message
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn s4b_d7_xml_256kib_length_and_eof_are_distinct_from_directory_count() {
+    const XML_LIMIT: usize = 256 * 1024;
+    let path = ".fluxreader-v3/actors/";
+    for content_length in [true, false] {
+        let mut xml = listing(0);
+        xml.resize(XML_LIMIT + 1, b' ');
+        let (base, server) = listing_response(path, xml, content_length);
+        let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
+        let error = transport.library_list(path).await.unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, ErrorKind::TooLarge);
+        assert!(
+            error.message.contains(if content_length {
+                "Content-Length"
+            } else {
+                "流式接收"
+            }),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("XML"), "{}", error.message);
+        assert!(error.message.contains("256 KiB"), "{}", error.message);
+        assert!(error.message.contains(path), "{}", error.message);
+        assert!(
+            !error.message.contains("256 个"),
+            "byte budget is not a file count"
+        );
+
+        let mut exact = listing(0);
+        exact.resize(XML_LIMIT, b' ');
+        let (base, server) = listing_response(path, exact, content_length);
+        let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
+        assert!(transport.library_list(path).await.unwrap().is_empty());
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn s4b_d7_xml_256kib_eof_error_identifies_byte_budget() {
+    const XML_LIMIT: usize = 256 * 1024;
+    let path = ".fluxreader-v3/actors/";
+    let mut xml = listing(0);
+    xml.resize(XML_LIMIT + 1, b' ');
+    let (base, server) = listing_response(path, xml, false);
+    let transport = Transport::new(&base, None, Duration::from_secs(10)).unwrap();
+    let error = transport.library_list(path).await.unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.kind, ErrorKind::TooLarge);
+    assert!(error.message.contains("流式接收"), "{}", error.message);
+    assert!(error.message.contains("XML"), "{}", error.message);
+    assert!(error.message.contains("256 KiB"), "{}", error.message);
+    assert!(error.message.contains(path), "{}", error.message);
+    assert!(
+        !error.message.contains("257 个"),
+        "byte budget is not a file count"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
