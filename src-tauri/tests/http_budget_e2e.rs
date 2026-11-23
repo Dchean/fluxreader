@@ -275,8 +275,14 @@ async fn s4b_d7_xml_256kib_eof_error_identifies_byte_budget() {
     assert!(error.message.contains("256 KiB"), "{}", error.message);
     assert!(error.message.contains(path), "{}", error.message);
     assert!(
-        !error.message.contains("257 个"),
-        "byte budget is not a file count"
+        error.message.contains("字节上限"),
+        "byte budget must name the byte limit: {}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("对象数") && !error.message.contains("项上限"),
+        "a 256 KiB byte overrun must not borrow the directory object-count wording: {}",
+        error.message
     );
 }
 

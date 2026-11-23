@@ -131,6 +131,10 @@ struct FaultServer {
 
 impl FaultServer {
     fn start() -> Self {
+        Self::start_with(false)
+    }
+
+    fn start_with(corrupt_readback: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -151,7 +155,13 @@ impl FaultServer {
                 let request = read_request(&mut stream);
                 match request.method.as_str() {
                     "GET" => match stored.lock().unwrap().get(&request.path) {
-                        Some(body) => respond(&mut stream, "200 OK", body),
+                        Some(body) => {
+                            let mut reply = body.clone();
+                            if corrupt_readback && !reply.is_empty() {
+                                reply.pop();
+                            }
+                            respond(&mut stream, "200 OK", &reply);
+                        }
                         None => respond(&mut stream, "404 Not Found", b""),
                     },
                     "PUT" => {
@@ -167,10 +177,10 @@ impl FaultServer {
                         );
                         files.insert(request.path, request.body);
                         drop(files);
-                        if count != 0 {
+                        if count != 0 || corrupt_readback {
                             respond(&mut stream, "201 Created", b"");
                         }
-                        // First PUT persists bytes but loses its response.
+                        // Lost-response mode persists the bytes but drops the first reply.
                     }
                     method => panic!("unexpected method: {method}"),
                 }
@@ -238,4 +248,27 @@ async fn active_library_list_keeps_256_kib_xml_content_length_budget() {
 #[tokio::test]
 async fn active_library_list_keeps_256_kib_xml_eof_budget() {
     check_library_list_xml_budget(false).await;
+}
+
+#[tokio::test]
+async fn exact_readback_mismatch_is_outcome_unknown_and_keeps_sealed_bytes() {
+    let server = FaultServer::start_with(true);
+    let transport = Transport::new(&server.url, None, Duration::from_secs(3)).unwrap();
+    let path = ".fluxreader-v3/state/intent-readback.json";
+    let remote_path = format!("/{path}");
+    let sealed = br#"{"format":2,"fields":{"nullable":{"op":"set","value":null}}}"#;
+
+    let error = transport.library_store(path, sealed).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::OutcomeUnknown);
+    assert!(
+        error.message.contains("readback"),
+        "a mismatched readback must not claim success: {}",
+        error.message
+    );
+    assert_eq!(server.puts.load(Ordering::Acquire), 1);
+    assert_eq!(
+        server.bytes.lock().unwrap().get(&remote_path).unwrap(),
+        sealed,
+        "the accepted PUT bytes stay sealed even when the readback disagrees"
+    );
 }
