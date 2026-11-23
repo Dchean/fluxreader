@@ -8,7 +8,8 @@
 
 - 已完成：`webdav_transport.rs` 删除旧 probe / LOCK / checkpoint / MOVE 路径（约 −933 行）；新增 `src-tauri/src/local_sync/session_tests.rs` 与 `src-tauri/tests/webdav_library_e2e.rs`；`webdav_transport_e2e.rs` 中被承接的两个 mock 及独占 helper 已删除。
 - **已完成（本机门禁）**：`cargo fmt --all -- --check`、`cargo check --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo test --no-fail-fast` 全部 exit 0（基线 `04df1a1`，2026-11-23 本机运行）。`session_tests` 8 项 `x25_*` 与 `webdav_library_e2e` 3 项均实际执行通过。
-- **仍未完成**：**独立只读审计未做**；CI 未运行（仓库 Actions 因额度用尽被手动禁用，`gh run list` 无该提交运行）；真实 WsgiDAV 实机用例未跑（旧 MOVE 用例已随协议退役，缺口见 `docs/roadmap.md` 的「WebDAV 旧协议实机用例随清退退役」）；真实服务端 / 容量 / 原生 WebView2 全未验证。
+- **已完成（独立只读审计）**：2026-11-23 全新只读上下文核 `04df1a1` 原件，判定「可以收口」，阻断 0 / 重要 0 / 次要 3（非阻塞）；原件 `tmp/audit-2026-11-23/s4b-d8-x25-review.md`，摘要登记在 `docs/audits.md`。
+- **仍未完成**：CI 未运行（Actions 因额度用尽被手动禁用）；真实 WsgiDAV 实机用例未跑（旧 MOVE 用例已随协议退役，缺口见 `docs/roadmap.md`）；真实服务端 / 容量 / 原生 WebView2 全未验证。
 - 本地跑 Rust 门禁时 `TEMP`/`TMP` 必须指到**工作区内可写目录**（如 `tmp/rctest`）：指到 `C:\WINDOWS\TEMP` 或会话 scratch 时，`llvm-rc` 与 `clang-cl` 会因无法创建临时文件而失败。门禁命令本身不改，属环境前置。
 - 原始证据与授权边界：`.agents/archive/legacy-workflow/handoffs/2026-11-22-top-handoff.md`（归档，仅追溯用）。
 

@@ -52,7 +52,7 @@
 - **本地门禁环境**：非提权会话里由 Rust 构建的进程可能无法创建真实文件符号链接（`CreateSymbolicLinkW` errno 1314），retention 测试用目录 junction 作等价 reparse-point 夹具；真实 symlink 路径的唯一测试 `writer_windows_symlink_alias_resolves_actual_file_identity` 带 `#[ignore]`，CI 的 `cargo test --no-fail-fast` 不运行 ignored 用例——本地与 CI 均未覆盖，只在具体任务约定读写边界后单独执行。
 - **性能与资源**：10k 容量与 50k 状态 exact 自然 exit 0；50k distinct-body 未验证。长会话、真实规模滚动 p95、图片 native 预算与完整前台 SLO 未验收；真实持久存储 I/O 损坏/WAL 故障注入仍无安全手段。
 - **待观察崩溃**：旧浏览器 NotifCard 曾见 React #185，后续反例阴性；ErrorBoundary 已捕获 `error + componentStack`，复发时保留现场与复现输入，不按旧观察声称当前必崩。
-- **WebDAV 旧协议实机用例随清退退役**：`webdav_transport_e2e.rs` 的 ignored WsgiDAV 用例（旧的过期 MOVE 分支收敛）随 probe/LOCK/MOVE 生产路径一并删除，未按新协议补等价实机断言。「真实 WsgiDAV 下 stop/generation 变化的分支收敛」因此未验；现有替代是 `local_sync/session_tests.rs`（会话检查归类，受控夹具）与 `tests/webdav_library_e2e.rs`（丢响应重试、异字节冲突、XML 预算，本地 mock），`tests/local_sync_e2e.rs` 仍是保留的 WsgiDAV 实机入口。需要在真实服务端结论时按任务约定单独运行。
+- **WebDAV 旧协议实机用例随清退退役**：`webdav_transport_e2e.rs` 的 ignored WsgiDAV 用例随 probe/LOCK/MOVE 生产路径一并删除，未按新协议补等价实机断言。该用例原本断言的是 LOCK 过期分支、MOVE 收敛与远端对象 GC，因此「真实 WsgiDAV 下的锁过期、MOVE 收敛与远端回收」整体未验；替代覆盖是 `local_sync/session_tests.rs`（会话检查归类，受控夹具）与 `tests/webdav_library_e2e.rs`（丢响应重试、异字节冲突、XML 预算，本地 mock），`tests/local_sync_e2e.rs` 仍是保留的 WsgiDAV 实机入口。需要在真实服务端结论时按任务约定单独运行。
 - **审计与发布**：本版已发布不等于所有主题均通过独立审计；各篇 Note 的验证时点与上限仍以原文为准。
 
 <a id="accepted-tradeoffs"></a>
