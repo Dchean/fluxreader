@@ -7,10 +7,12 @@
 正在进行的是 **S4b 子批 D8/N2/X11 + X25**（WebDAV 传输层旧协议清退与内部错误归属）：
 
 - 已完成：`webdav_transport.rs` 删除旧 probe / LOCK / checkpoint / MOVE 路径（约 −933 行）；新增 `src-tauri/src/local_sync/session_tests.rs` 与 `src-tauri/tests/webdav_library_e2e.rs`；`webdav_transport_e2e.rs` 中被承接的两个 mock 及独占 helper 已删除。
-- **未完成**：整批**未提交、未通过阶段独审、未推 CI**；旧 ignored WsgiDAV 测试未跑；真实服务端 / 容量 / 原生 WebView2 全未验证。
+- **已完成（本机门禁）**：`cargo fmt --all -- --check`、`cargo check --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo test --no-fail-fast` 全部 exit 0（基线 `04df1a1`，2026-11-23 本机运行）。`session_tests` 8 项 `x25_*` 与 `webdav_library_e2e` 3 项均实际执行通过。
+- **仍未完成**：**独立只读审计未做**；CI 未运行（仓库 Actions 因额度用尽被手动禁用，`gh run list` 无该提交运行）；真实 WsgiDAV 实机用例未跑（旧 MOVE 用例已随协议退役，缺口见 `docs/roadmap.md` 的「WebDAV 旧协议实机用例随清退退役」）；真实服务端 / 容量 / 原生 WebView2 全未验证。
+- 本地跑 Rust 门禁时 `TEMP`/`TMP` 必须指到**工作区内可写目录**（如 `tmp/rctest`）：指到 `C:\WINDOWS\TEMP` 或会话 scratch 时，`llvm-rc` 与 `clang-cl` 会因无法创建临时文件而失败。门禁命令本身不改，属环境前置。
 - 原始证据与授权边界：`.agents/archive/legacy-workflow/handoffs/2026-11-22-top-handoff.md`（归档，仅追溯用）。
 
-未提交清单（`git status`）：`src-tauri/src/local_sync/{database_tests,fast_network_tests,logical,mod,runtime}.rs`、`src-tauri/src/webdav_transport.rs`、`src-tauri/tests/http_budget_e2e.rs`（改）；`src-tauri/tests/webdav_transport_e2e.rs`（删）；`session_tests.rs`、`webdav_library_e2e.rs`（新）。
+本批已提交并推送：`04df1a1`（业务改动，10 文件 +785/−1367）与 `387cc51`（roadmap 缺口登记）。
 
 ## 二、剩余工作拆为垂直切片
 

@@ -36,3 +36,8 @@
 - **规则**：上下文出现反复重读、混淆新旧要求、工具错误增多时，在安全点冻结版本并交接。
 - **错因**：曾压缩/resume 冒充换任，前后任同时调度，写集互相覆盖。
 - **Done right**：新开独立对话、独审核包、后继签收后才移交唯一调度权。→ 见 `AGENTS.md` 交接节
+
+## 8. Rust 门禁的 TEMP 必须落在工作区内可写目录 — Seen 1×
+- **规则**：跑 `cargo check/clippy/test` 前，把 `TEMP`/`TMP` 指到工作区内的可写目录（如 `tmp/rctest`），并让 `RC` 指向 `tmp/rust-env` 里的 `llvm-rc.exe`。
+- **错因**：`C:\WINDOWS\TEMP` 对非提权会话不可写、会话级 scratch 对子进程不可写，`llvm-rc`/`clang-cl` 会报 `Unable to create temp file: Permission denied`，表现为 `tauri-winres` 构建脚本 panic（`RC.EXE failed to compile specified resource file`）——看起来像代码挂了，其实是环境前置。
+- **Done right**：`$env:TEMP=$env:TMP="<repo>\tmp\rctest"`，`$env:RC="<repo>\tmp\rust-env\tools\llvm-mingw-*\bin\llvm-rc.exe"`，再跑门禁。`embed_resource` 只认 `rc.exe` 或 `$RC`，光把 llvm 目录加进 PATH 不够。
