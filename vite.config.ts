@@ -19,7 +19,10 @@ export default defineConfig({
     watch: {
       // Windows + Tauri：cargo target 目录含数万构建产物且 .exe 文件被锁，
       // Vite watcher 会以 EBUSY 崩溃，必须整体忽略
-      ignored: ['**/src-tauri/target/**'],
+      // 另外 tmp/ 同时承载本机审计证据、隔离数据根与 WebView2 profile：其中的
+      // SQLite -wal 与 Edge profile 的 Cookies 会在运行期被独占持有，watcher
+      // 撞上同样以 EBUSY 崩溃。整目录忽略（不参与应用依赖图）。
+      ignored: ['**/src-tauri/target/**', '**/tmp/**'],
     },
   },
   // Tauri 窗口内固定使用系统字体渲染，无需浏览器兼容性降级

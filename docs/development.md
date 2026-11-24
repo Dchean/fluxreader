@@ -11,6 +11,7 @@
 - Rust 使用工作区隔离环境 `tmp/rust-env/`（rustc/cargo `1.98.1` + clang-cl/lld-link），入口 `activate-rust-env.ps1`；它只服务当前工作区，不外推到其他机器。
 - 隔离环境里跑 Cargo 时通常前置 `C:\Users\<user>\.cargo\bin` 到 `PATH`，并设 `CARGO_NET_OFFLINE=true`；不要在没有授权时联网更新依赖。
 - 本机临时证据放忽略的 `tmp/`，内容随任务变化，**不在文档里枚举目录清单**（枚举会过期）；需要长期保留的结论摘要登记到 [审计记录](audits.md)。
+- 需要验证原生宿主的界面行为时，用 debug 构建 + 三个环境变量把运行环境整体隔离到工作区：`FLUXREADER_DATA_ROOT=<repo>\tmp\app-data`（应用数据目录，含 SQLite 与 backups）、`WEBVIEW2_USER_DATA_FOLDER=<repo>\tmp\wv2-profile`（WebView2 profile）、`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>`（供 CDP 附着）。三者缺一会分别表现为：写用户真实资料库、WebView2 建 profile 失败、无法自动化。`FLUXREADER_DATA_ROOT` 只在 debug 构建生效，发布构建忽略它。
 
 ## 门禁与 CI job 对应
 

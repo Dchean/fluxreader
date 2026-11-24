@@ -138,7 +138,13 @@ pub fn run() {
         // 系统通知：新文章到达时 Windows toast（scheduler 触发）
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
-            if cfg!(debug_assertions) {
+            /* 隔离数据根下的开发运行（见下方 FLUXREADER_DATA_ROOT）：日志插件固定写
+            app_log_dir，该目录在工作区外不可写时会直接让启动失败。此分支只出现在
+            debug 构建且显式设置了隔离根，用来让本机验证不被日志目录阻断；发布构建
+            与普通 debug 运行的插件装配完全不变。 */
+            let isolated_data_root =
+                cfg!(debug_assertions) && std::env::var_os("FLUXREADER_DATA_ROOT").is_some();
+            if cfg!(debug_assertions) && !isolated_data_root {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
@@ -164,10 +170,18 @@ pub fn run() {
             // 已修的同类问题：取不到应用数据目录、或数据库被占用/损坏时，会**直接 panic
             // 导致启动即崩**，且用户只看到进程消失、没有任何可操作的提示。
             // 改为返回带上下文的错误：Tauri 会把 setup 的错误报告出来，日志里能看到根因。
-            let app_dir: PathBuf = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("无法确定应用数据目录（app_data_dir 不可用）：{e}"))?;
+            let default_app_dir = || -> Result<PathBuf, String> {
+                app.path()
+                    .app_data_dir()
+                    .map_err(|e| format!("无法确定应用数据目录（app_data_dir 不可用）：{e}"))
+            };
+            /* 开发与测试专用覆盖：debug 构建可用 FLUXREADER_DATA_ROOT 把数据目录整体
+            重定向到仓库外的工作区路径，避免开发/验证碰到用户真实资料库；发布构建
+            忽略该变量，数据位置与历史行为完全一致。备份目录由 db 路径推导，自动跟随。 */
+            let app_dir: PathBuf = match std::env::var_os("FLUXREADER_DATA_ROOT") {
+                Some(root) if cfg!(debug_assertions) => PathBuf::from(root),
+                _ => default_app_dir()?,
+            };
             std::fs::create_dir_all(&app_dir)?;
             if diagnostics::install(&app_dir.join("diagnostics")).is_err() {
                 log::warn!("无法创建同步诊断目录");
