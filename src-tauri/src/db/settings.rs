@@ -62,7 +62,10 @@ pub fn validate_app_setting(key: &str, value: &serde_json::Value) -> AppResult<(
         "fontSize" => range(13.0, 24.0),
         "lineHeight" => range(130.0, 240.0),
         "maxWidth" => range(560.0, 1100.0),
-        "listWidth" => range(280.0, 560.0),
+        // 与前端 `store/settingsValidation.ts` 的 LIST_WIDTH_RANGE（280–420）同一口径：
+        // 同步/备份恢复写进来的越界宽度在此拒绝，不让「库 500、界面 420」长期不一致
+        // （切片 4 定档 420，见 .agents/decisions.md 的 A2）。
+        "listWidth" => range(280.0, 420.0),
         "startupView" => member(&["unread", "all", "today", "starred"]),
         "themeMode" => member(&["light", "dark", "auto"]),
         "palette" => member(&["blue", "zinc", "purple", "emerald", "terracotta"]),

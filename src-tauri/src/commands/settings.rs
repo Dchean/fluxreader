@@ -1120,6 +1120,44 @@ mod update_check_tests {
 }
 
 /* ============================================================
+正文保留维护的可见失败（设置页「上次清理失败 + 重试」）
+
+调度器每分钟跑一轮有界清理；连续失败达到阈值时把错误登记到设置键并发
+`retention-error` 事件。事件只在失败当刻发一次，错过就看不到——所以健康
+状态由 `retention_health` 从库读，重启后仍然可见。
+============================================================ */
+
+/// 最近一次「连续失败达到阈值」的正文清理错误（无则 None）。
+#[tauri::command]
+pub async fn retention_health(
+    state: State<'_, AppState>,
+) -> AppResult<Option<db::body_retention::RetentionFailure>> {
+    crate::state::database_work(state.db.clone(), |conn| db::body_retention::failure(conn)).await
+}
+
+/// 立即重试正文清理：有界多片（最多 8 片，每片自带时间预算），全部无错才清除
+/// 失败标记，返回本轮释放的正文数。前台占用/库忙如实返回 busy，不假装成功。
+#[tauri::command]
+pub async fn retention_retry(state: State<'_, AppState>) -> AppResult<usize> {
+    let released = crate::state::try_database_work(state.db.clone(), |conn| {
+        let now = chrono::Utc::now().timestamp();
+        let mut cursor = db::body_retention::RetentionCursor::default();
+        let mut released = 0usize;
+        for _ in 0..8 {
+            let report = db::body_retention::retire_read_bodies_slice(conn, now, &mut cursor)?;
+            released += report.released;
+            if report.inspected == 0 {
+                break;
+            }
+        }
+        db::body_retention::clear_failure(conn)?;
+        Ok(released)
+    })
+    .await?;
+    released.ok_or_else(|| AppError::new("busy", "应用正在忙，请稍后重试"))
+}
+
+/* ============================================================
 OPT-008B 第二阶段：全文提取的异步边界（真实 loopback HTTP）
 
 网络期间不持 DB 锁；发起时捕获 (content_id, revision) 提交前提，落地时在

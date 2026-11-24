@@ -2523,6 +2523,42 @@ fn settings_patch_preserves_unobserved_remote_keys_and_rejects_partial_invalid_u
     crate::commands::apply_app_settings_patch(&a, &json!({"readBodyRetentionDays":0})).unwrap();
 }
 
+/// 写边界复核：绕过解析层的非法设置值不得落库。判别力：去掉
+/// `apply_projection` 里的 `validate_setting` 后，500 会被照收——库停留在
+/// 500 而界面归一成 420，两边长期不一致。
+#[test]
+fn projection_write_boundary_rejects_invalid_setting_values() {
+    use crate::webdav_transport::{FieldValue, Register, Stamp};
+    let c = conn();
+    db::set_setting(&c, "app_settings", r#"{"fontSize":16,"listWidth":320}"#).unwrap();
+    database::initialize(&c, LIB).unwrap();
+    let stamp = Stamp {
+        actor: format!("{:0>32}", "1"),
+        seq: 1,
+        lamport: 1,
+    };
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        "p/listWidth".to_owned(),
+        Register {
+            stamp: stamp.clone(),
+            value: FieldValue::Set(json!(500)),
+        },
+    );
+    fields.insert(
+        "p/fontSize".to_owned(),
+        Register {
+            stamp,
+            value: FieldValue::Set(json!(18)),
+        },
+    );
+    database::apply_projection(&c, &fields, None).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&db::get_setting(&c, "app_settings").unwrap().unwrap()).unwrap();
+    assert_eq!(saved["listWidth"], 320, "越界宽度必须在写边界被拒绝");
+    assert_eq!(saved["fontSize"], 18, "同批合法键必须照常写入");
+}
+
 #[test]
 fn settings_patch_and_nested_write_savepoint_roll_back_without_poisoning_outer_transaction() {
     let c = conn();

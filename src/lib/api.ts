@@ -459,6 +459,15 @@ export interface ReadWriteReceipt {
   feed_id: number;
 }
 
+/** 正文保留清理的失败记录（`retention_health` / `retention-error` 事件的载荷）。 */
+export interface RetentionFailure {
+  message: string;
+  /** 连续失败次数（达到后端阈值才会登记）。 */
+  failures: number;
+  /** 首次登记时间（unix 秒）。 */
+  since: number;
+}
+
 /** 后端聚合的精确条目计数（按 feed 分组）——侧边栏数字用，不受列表分页 limit 影响 */
 export interface FeedCountsRow {
   feed_id: number;
@@ -1037,6 +1046,17 @@ export const api = {
     const result = await inv('cache_cleanup', { days, scope }) as string;
     if (scope === 'ai') aiCacheInvalidated?.();
     return result;
+  },
+  /** 正文保留清理的健康状态：最近一次「连续失败达到阈值」的记录（无则 null）。
+   *  调度器只在失败当刻发事件，错过就看不到——设置页打开时以本命令为准。 */
+  async retentionHealth(): Promise<RetentionFailure | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('retention_health') as RetentionFailure | null) : null;
+  },
+  /** 立即重试正文清理（有界多片）；全部无错才清除失败标记，返回释放的正文数。 */
+  async retentionRetry(): Promise<number | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('retention_retry') as number) : null;
   },
   /** 首次关闭询问的应答：action='tray'|'exit'；remember=true 持久化选择 */
   async resolveClose(action: 'tray' | 'exit', remember: boolean): Promise<void> {

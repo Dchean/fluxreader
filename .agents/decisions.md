@@ -5,7 +5,7 @@
 ## A. 产品 / 界面红线（拍过板，不许被半成品代码反向抹掉）
 
 1. **对比度不能降。** 普通文字 ≥4.5:1，图标/大字 ≥3:1；深色 accent 兼作前景与白字按钮底时单值无法双向达标，只按图形口径验前景，**不得降阈值关问题**。→ `src/styles/tokens.css`
-2. **列表宽度 280–420px，一个口径。** 三栏是 `260px / clamp(280px, min(--list-width,37vw), 420px) / 1fr`；放到 560 会把 980 视口阅读列压到 160。写入校验、拖拽夹取与 CSS clamp 现已同源（`LIST_WIDTH_RANGE`）；同步/便携带入的历史越界值在读边界归一，不静默丢弃。→ `src/styles/base.css`、`src/store/settingsValidation.ts`
+2. **列表宽度 280–420px，一个口径。** 三栏是 `260px / clamp(280px, min(--list-width,37vw), 420px) / 1fr`；放到 560 会把 980 视口阅读列压到 160。写入校验、拖拽夹取与 CSS clamp 现已同源（`LIST_WIDTH_RANGE`）；后端 `validate_app_setting` 的 `listWidth` 上限同为 420（同步/恢复的越界值在写边界被拒），历史越界值仍在读边界归一、不静默丢弃。→ `src/styles/base.css`、`src/store/settingsValidation.ts`、`src-tauri/src/db/settings.rs`
 3. **J/K 五布局统一"选中驱动焦点"。** 卡片加 `aria-current` + `.active-selected`；卡被筛掉时只在焦点落 BODY 时迁到同下标，不抢侧栏/筛选焦点。→ `src/components/Timeline.tsx`
 4. **Space 让路优先级：原生控件 > 播放器 > 卡片。** 让路白名单刻意不含 `[role=button]`。→ `src/components/shortcutYield.ts`
 5. **返回位置按「条目 ID + filterKey + 卡内偏移」记账。** 属性刷新 / 切回缓存 / 关阅读器是三条独立 nonce，不能合并成一条。→ `src/lib/readingPosition.ts`
@@ -23,18 +23,21 @@
 6. **外链只经 `openExternalWithFeedback`，仅 HTTP/HTTPS**；主页面只放行应用 origin。→ `src/lib/external.ts`、`src-tauri/src/navigation.rs`
 7. **预算不放大：** 图片抓取/IPC/在途预留各 25 MiB、抓取路径 16 MiB；WebDAV XML 与批 256 KiB、单次 get ≤4 MiB；本地正文 32 MiB。→ `docs/contracts.md` 的预算行
 8. **AI 只用 OpenAI 兼容协议。** Base URL / Key / 模型由用户填；**不预填默认模型、不探测端点**，模型为空则零请求。→ `src-tauri/src/ai.rs`
+9. **URL 归一化只做无损压缩。** `query` 含无法解码为 UTF-8 的百分号字节（老站点 GBK 链接）时**不重建该 query**、保留原始字节：`form_urlencoded` 解码会把 `%FF` 与 `%FE` 都换成同一个 U+FFFD，两篇不同文章因此会被判成一篇；scheme/host/path 归一照旧。→ `src-tauri/src/db/url_norm.rs`
 
 ## C. 架构契约单点（改一处必须同步的面）
 
 1. **阅读中成员与顺序不变。** `ReadingSession` 捕获一次查询的完整有序 ID，后台同步不插入新成员、不重排。→ `src/store/readingSession.ts`
 2. **乐观写入按条目 × 字段版本**（`${id}|${field}`）；回滚要凭据匹配且不推进版本。→ `src/store/internals.ts`
 3. **同步冲突方向单点定义**，并守住"失败不是空集合"。→ `src-tauri/src/sync/conflict_policy.rs`
-4. **订阅写回 outbox**：合并同账号同 URL、未发送链保留链起点、账号屏障、`local_only` 终态。→ `src-tauri/src/db/outbox.rs`
+4. **订阅写回 outbox**：合并同账号同 URL、未发送链保留链起点、账号屏障、`local_only` 终态；**入队三步在 `with_write_savepoint` 内原子**（替换旧意图 → 清兼容 `add_feed` → 写新意图，中途失败整体回退）。→ `src-tauri/src/db/outbox.rs`
 5. **AI 三层策略唯一 resolver `selectFeedConfig`**（布局/组/源）。→ `src/store/aiPolicy.ts`
 6. **写事务唯一入口 `db::write_transaction`（IMMEDIATE）+ `db/writer.rs` FIFO**，锁序固定 业务锁 → writer。→ `src-tauri/src/db/writer.rs`
 7. **同步三通道 Content → State → Push**，每类一个运行操作；会话缓存单槽 `account_key + generation`。→ `src-tauri/src/sync/runtime.rs`
 8. **全刷 single-flight + 90s footprint + `fetch_generation` CAS**，抓取名与自定义名分域。→ `src-tauri/src/scheduler.rs`
 9. **正文/AI 实体缓存 = 内容身份 + 2000 项 LRU + contentRevision 戳。** → `src/store/bodyCache.ts`
+10. **同步投影的设置写边界复核。** `p/*` 的 Set 在 `apply_projection` 落库前复跑 `validate_setting`（与解析层同一口径）：非法值拒绝该键并记诊断，不静默夹到合法范围。→ `src-tauri/src/local_sync/database.rs`
+11. **正文清理失败必须可见。** 连续 3 次失败登记 `retention_last_failure` 并发 `retention-error`；成功一轮清标记并发 `retention-recovered`；设置页「正文保留」卡片显示失败并可「立即重试」（`retention_health` / `retention_retry`）。→ `src-tauri/src/db/body_retention.rs`、`src/components/settings/CacheCleanupSection.tsx`
 
 ## D. 仍有效的流程铁律
 

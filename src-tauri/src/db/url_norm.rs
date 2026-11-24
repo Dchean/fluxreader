@@ -67,6 +67,37 @@ fn is_x_status_url(u: &url::Url) -> bool {
         && segs[2].bytes().all(|b| b.is_ascii_digit())
 }
 
+/// 原始 percent-encoded 片段中是否存在无法解码为 UTF-8 的百分号字节序列。
+///
+/// `query_pairs()` 走 `form_urlencoded`，会把无效 UTF-8 序列替换成 U+FFFD 再
+/// 重新编码：`%FF` 与 `%FE`、GBK 的 `%D6%D0` 与 `%FF%FF` 都并成同一个键，
+/// 两篇不同文章因此被判成同一篇。检测复用同一聚合规则（连续 `%XX` 收集成
+/// 字节，遇到其它字节即按 UTF-8 校验一遍），命中即放弃该片段的解码重建。
+fn has_non_utf8_percent_bytes(fragment: &str) -> bool {
+    fn nibble(byte: u8) -> Option<u8> {
+        (byte as char).to_digit(16).map(|digit| digit as u8)
+    }
+    let bytes = fragment.as_bytes();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (nibble(bytes[index + 1]), nibble(bytes[index + 2])) {
+                pending.push(hi * 16 + lo);
+                index += 3;
+                continue;
+            }
+        }
+        if !pending.is_empty() {
+            if std::str::from_utf8(&pending).is_err() {
+                return true;
+            }
+            pending.clear();
+        }
+        index += 1;
+    }
+    !pending.is_empty() && std::str::from_utf8(&pending).is_err()
+}
 /// URL 规范化为去重匹配键：同文不同饰（明确归属的跟踪参数/协议/www./m./
 /// 尾斜杠/AMP）归一为一个键。失败（非 URL 形态）返回原串小写——匹配键退化
 /// 但可用。规则从宽到严排序：只做「无损压缩」，绝不合并可能不同的文章
@@ -95,24 +126,29 @@ pub fn normalize_url(url: &str) -> String {
             let _ = u.set_host(Some(&format!("{t}{port}")));
         }
     }
-    // 跟踪参数剥离：明确归属的全局剥；通用名只在 X 状态页剥
-    let filtered: Vec<(String, String)> = u
-        .query_pairs()
-        .filter(|(k, _)| {
-            let k = k.to_lowercase();
-            !TRACKING_PARAMS.contains(&k.as_str())
-                && !(x_status && X_STATUS_TRACKING_PARAMS.contains(&k.as_str()))
-        })
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-    if filtered.is_empty() {
-        u.set_query(None);
-    } else {
-        let mut q = url::form_urlencoded::Serializer::new(String::new());
-        for (k, v) in &filtered {
-            q.append_pair(k, v);
+    // 跟踪参数剥离：明确归属的全局剥；通用名只在 X 状态页剥。
+    // 含非 UTF-8 百分号字节的 query（老站点 GBK 链接）**不重建**：解码会把
+    // 不同字节并成同一个 U+FFFD 键、把两篇不同文章判成一篇，原字节也会被
+    // 改写（链接失真）。此时保留原始 query——去重退化为字节精确匹配。
+    if !has_non_utf8_percent_bytes(u.query().unwrap_or("")) {
+        let filtered: Vec<(String, String)> = u
+            .query_pairs()
+            .filter(|(k, _)| {
+                let k = k.to_lowercase();
+                !TRACKING_PARAMS.contains(&k.as_str())
+                    && !(x_status && X_STATUS_TRACKING_PARAMS.contains(&k.as_str()))
+            })
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if filtered.is_empty() {
+            u.set_query(None);
+        } else {
+            let mut q = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in &filtered {
+                q.append_pair(k, v);
+            }
+            u.set_query(Some(&q.finish()));
         }
-        u.set_query(Some(&q.finish()));
     }
     // 尾斜杠归一（/a/ 与 /a 同文）；AMP 页归一（/amp/x → /x）
     let mut path = u.path().trim_end_matches('/').to_string();
@@ -390,6 +426,42 @@ mod tests {
         assert_eq!(
             legacy_v1_normalize("https://www.example.com/a/#frag"),
             legacy_v1_normalize("http://example.com/a")
+        );
+    }
+
+    /// 老站点用 GBK 等非 UTF-8 字节做百分号编码时，query 解码会把这些字节
+    /// 替换成 U+FFFD：不同字节序列因此并成同一键（把两篇不同文章判成一篇），
+    /// 原字节也被改写（链接失真）。修复方向：检测到非 UTF-8 百分号字节就不
+    /// 重建该 query——去重退化为「字节原样保留」，绝不合并可能不同的文章。
+    #[test]
+    fn non_utf8_percent_bytes_never_collide_and_stay_verbatim() {
+        let n = normalize_url;
+        // GBK「中」= D6 D0；FF / FE 都不是合法 UTF-8 起始字节
+        let gbk = n("https://old.example/view.asp?id=1&q=%D6%D0");
+        let ff = n("https://old.example/view.asp?id=1&q=%FF");
+        let fe = n("https://old.example/view.asp?id=1&q=%FE");
+        assert_ne!(ff, fe, "不同非 UTF-8 字节序列不得归一为同一键");
+        assert_ne!(
+            gbk,
+            n("https://old.example/view.asp?id=1&q=%FF%FF"),
+            "多字节序列不得与等长的替换符序列同键"
+        );
+        assert!(gbk.contains("%D6%D0"), "非 UTF-8 原始字节不得被改写: {gbk}");
+        // path 侧不得碰撞，也不得被改写
+        assert_ne!(
+            n("https://old.example/a/%FF"),
+            n("https://old.example/a/%FE")
+        );
+        assert!(n("https://old.example/a/%D6%D0").contains("%D6%D0"));
+        // 合法 UTF-8 百分号编码照旧合并（%E4%B8%AD = 「中」），不得因修复退化
+        assert_eq!(
+            n("https://a.example/p?q=%E4%B8%AD"),
+            n("https://a.example/p?q=中")
+        );
+        // 含非 UTF-8 字节的 query 仍享 scheme/host/path 归一
+        assert_eq!(
+            n("https://www.a.example/p/?q=%D6%D0"),
+            n("http://a.example/p?q=%D6%D0")
         );
     }
 }

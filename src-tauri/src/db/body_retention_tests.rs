@@ -1258,3 +1258,26 @@ fn rss_revision_mixed_reference_hold_preserves_bytes_until_exact_archive_ack() {
         assert!(c.query_row("SELECT EXISTS(SELECT 1 FROM local_sync_body_receipts WHERE manifest=?1 AND body_ref=?2)", params![pending.manifest.file_name().unwrap(),mixed], |r|r.get::<_,bool>(0)).unwrap());
     }
 }
+
+/// 失败标记往返：登记 → 读到 → 清除。设置页的健康状态与「立即重试」的清除
+/// 都依赖它；损坏记录按「无失败」处理，不把读不出的提示变成第二个故障。
+#[test]
+fn retention_failure_marker_round_trips_and_clears() {
+    let c = conn();
+    assert!(failure(&c).unwrap().is_none(), "初始无失败标记");
+    record_failure(
+        &c,
+        "database is locked",
+        VISIBLE_AFTER_FAILURES,
+        1_700_000_000,
+    )
+    .unwrap();
+    let recorded = failure(&c).unwrap().expect("登记后必须读得到");
+    assert_eq!(recorded.message, "database is locked");
+    assert_eq!(recorded.failures, VISIBLE_AFTER_FAILURES);
+    assert_eq!(recorded.since, 1_700_000_000);
+    clear_failure(&c).unwrap();
+    assert!(failure(&c).unwrap().is_none(), "清除后不得残留");
+    crate::db::set_setting(&c, FAILURE_KEY, "not-json").unwrap();
+    assert!(failure(&c).unwrap().is_none(), "损坏记录按无失败处理");
+}

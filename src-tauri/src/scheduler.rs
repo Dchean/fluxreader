@@ -633,6 +633,8 @@ pub fn spawn_scheduler(app: AppHandle) {
             _ = tokio::time::sleep(Duration::from_secs(8)) => {},
         }
         let mut retention_cursor = crate::db::body_retention::RetentionCursor::default();
+        // 连续失败计数：单次跳过多由前台占用/库忙造成，只有连续失败才打扰用户。
+        let mut retention_failures: i64 = 0;
         loop {
             if runtime.is_stopped() {
                 return;
@@ -680,9 +682,60 @@ pub fn spawn_scheduler(app: AppHandle) {
                 Ok(Some((report, next_cursor))) => {
                     retention_cursor = next_cursor;
                     changed |= report.released > 0;
+                    if retention_failures > 0 {
+                        retention_failures = 0;
+                        let cleared = crate::state::try_database_work(db.clone(), |conn| {
+                            crate::db::body_retention::clear_failure(conn)
+                        })
+                        .await;
+                        match cleared {
+                            Ok(Some(())) => {
+                                let _ = app.emit("retention-recovered", serde_json::json!({}));
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                log::warn!("scheduler: 清除正文保留失败标记失败: {error}")
+                            }
+                        }
+                    }
                 }
                 Ok(None) => {}
-                Err(error) => log::debug!("scheduler: 正文保留维护本轮跳过: {error}"),
+                Err(error) => {
+                    // 失败不再只写 debug 日志：连续失败达到阈值时登记到设置键并发
+                    // 事件，设置页显示「上次清理失败 + 重试」。否则「以为在按天数
+                    // 删、磁盘一直涨」没有任何可见信号（永久保留模式本来就不清理，
+                    // 更看不出停摆）。
+                    retention_failures += 1;
+                    log::warn!(
+                        "scheduler: 正文保留维护失败（连续第 {retention_failures} 次）: {error}"
+                    );
+                    crate::diagnostics::record(0, "retention", "error", Some(&error));
+                    if retention_failures >= crate::db::body_retention::VISIBLE_AFTER_FAILURES {
+                        let message = error.message.clone();
+                        let failures = retention_failures;
+                        let now = chrono::Utc::now().timestamp();
+                        let written = crate::state::try_database_work(db.clone(), move |conn| {
+                            crate::db::body_retention::record_failure(conn, &message, failures, now)
+                        })
+                        .await;
+                        match written {
+                            Ok(Some(())) => {}
+                            Ok(None) => {
+                                log::warn!("scheduler: 前台占用，正文保留失败标记未落库")
+                            }
+                            Err(write) => {
+                                log::warn!("scheduler: 记录正文保留失败标记失败: {write}")
+                            }
+                        }
+                        let _ = app.emit(
+                            "retention-error",
+                            serde_json::json!({
+                                "message": error.message,
+                                "failures": retention_failures,
+                            }),
+                        );
+                    }
+                }
             }
             if changed {
                 let _ = app.emit(

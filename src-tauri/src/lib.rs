@@ -388,6 +388,9 @@ pub fn run() {
             commands::get_setting,
             commands::set_setting,
             commands::patch_app_settings,
+            // 正文保留维护：失败可见性（健康状态 + 立即重试）
+            commands::retention_health,
+            commands::retention_retry,
             // 数据库备份（手动完整快照；恢复边界见 docs/backup.md）
             commands::create_database_backup,
             commands::take_startup_backup_warning,

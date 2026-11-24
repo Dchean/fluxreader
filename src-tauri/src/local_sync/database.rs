@@ -930,12 +930,22 @@ pub(super) fn apply_projection(
         .as_object_mut()
         .ok_or_else(|| invalid("本机设置结构损坏"))?;
     for (key, reg) in fields.iter().filter(|(key, _)| key.starts_with("p/")) {
+        let name = &key[2..];
         match &reg.value {
             FieldValue::Set(v) => {
-                object.insert(key[2..].to_owned(), v.clone());
+                // 解析层（`model::validate_checkpoint`）已校验过一次；这里是**写
+                // 边界**的同一口径复核：绕过解析层的入口（旧对端载荷、直接调用本
+                // 函数的路径）不得把非法值写进本机设置。拒绝该键并如实记录，不静默
+                // 夹到合法范围——那会让「界面显示的值」与「库里存的值」长期不一致。
+                if let Err(error) = validate_setting(name, v) {
+                    log::warn!("local_sync: 拒绝非法设置投影 p/{name}: {}", error.message);
+                    crate::diagnostics::record(0, "local_sync", "warn", Some(&error));
+                    continue;
+                }
+                object.insert(name.to_owned(), v.clone());
             }
             FieldValue::Delete => {
-                object.remove(&key[2..]);
+                object.remove(name);
             }
         }
     }

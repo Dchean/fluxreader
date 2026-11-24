@@ -3,6 +3,7 @@
 use super::*;
 use crate::error::AppError;
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 const CANDIDATES: usize = 64;
@@ -301,6 +302,50 @@ fn retire_inner(
     tx.commit()?;
     *cursor = next;
     Ok(report)
+}
+
+/// 正文清理失败标记：只有「连续失败达到阈值」才写入，成功一轮立即清除。
+/// 设置页据此显示「上次清理失败 + 重试」；不在 SYNC_SETTING_KEYS 里，checkpoint
+/// 不会生成 p/* 字段（不参与同步）。
+pub(crate) const FAILURE_KEY: &str = "retention_last_failure";
+/// 连续失败到第几次才打扰用户：单次跳过多由前台占用/库忙造成，每分钟弹一次
+/// 反而制造噪音；连续三次说明不是偶发竞争。
+pub const VISIBLE_AFTER_FAILURES: i64 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionFailure {
+    pub message: String,
+    pub failures: i64,
+    pub since: i64,
+}
+
+pub(crate) fn record_failure(
+    conn: &Connection,
+    message: &str,
+    failures: i64,
+    now: i64,
+) -> AppResult<()> {
+    let value = serde_json::json!({
+        "message": message,
+        "failures": failures,
+        "since": now,
+    });
+    super::set_setting(conn, FAILURE_KEY, &value.to_string())
+}
+
+pub(crate) fn clear_failure(conn: &Connection) -> AppResult<()> {
+    let _writer = super::writer_guard(conn)?;
+    conn.execute("DELETE FROM settings WHERE key=?1", params![FAILURE_KEY])?;
+    Ok(())
+}
+
+/// 已登记的失败。记录损坏按「无失败」处理：提示读不出来不该变成第二个故障，
+/// 下一轮真实失败会重新登记。
+pub(crate) fn failure(conn: &Connection) -> AppResult<Option<RetentionFailure>> {
+    let Some(raw) = super::get_setting(conn, FAILURE_KEY)? else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str(&raw).ok())
 }
 
 #[cfg(test)]

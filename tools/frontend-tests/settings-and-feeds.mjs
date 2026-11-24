@@ -119,8 +119,14 @@ export async function run(ctx) {
     && k5.normalizeStoredSettings({ listWidth: 250 }).listWidth === 280
     && k5.normalizeStoredSettings({ listWidth: 420 }).listWidth === 420
     && k5.sanitizeSettingsPatch({ listWidth: 500 }).listWidth === undefined);
+  /* 421 被拦下后补一笔合法补丁：校验不得误伤正常路径——该笔必须发出并落库。
+     （切片 4 把「421 被拦」插在调用清零之后，却让本断言失去依据：断言变成
+     恒假的 0 次调用。补上真实合法写入，同时验证落库值与只发一笔。） */
+  store.getState().updateSettings({ listWidth: 400 });
+  await nTick(0);
   checkNew('(D5) 合法补丁照常落库（校验不误伤正常路径）',
-    S.invokeCalls.filter((c) => c.cmd === 'patch_app_settings').length === 1);
+    store.getState().settings.listWidth === 400
+    && S.invokeCalls.filter((c) => c.cmd === 'patch_app_settings').length === 1);
   const kSetKeys = Object.keys(store.getState().settings);
   checkNew('(D5) 校验表与设置键一一对应（漏配校验器会被 tsc 的 Record<keyof SettingsState,…> 拦下）',
     kSetKeys.every((key) => typeof k5.SETTINGS_VALIDATORS[key] === 'function')

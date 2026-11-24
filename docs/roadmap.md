@@ -78,9 +78,8 @@
 | --- | --- | --- | --- | --- |
 | roadmap.md | 维护边界末句 | 「GC17」「旧 bool/dedup 清理」代号在受跟踪内容无出处（本句下已加临时指向） | 2026-11-15 | 维护边界改动或 tmp 清档任务 |
 | `docs/audits.md` | 覆盖矩阵 | 2026-11-19 文档批已把 docs 11 篇补到「逐篇（本轮文档批）」；剩余真实缺口：仓库根 `README.md` 停在 2026-11-15（其产品面向内容本轮只改为链接入口，未逐条复核） | 2026-11-19 | 下一轮审计登记时 |
-| `docs/contracts.md` | 契约单点表的三处事实 | 阶段B 静态审计记与实际行为有出入：写事务与锁序行（`commands/sync.rs` 的 `sync_local_feeds` 入队三语句各自提交，与 outbox 模块头「同一事务落库」不符，裁决见本表 outbox 行）、设置名与值域行（`p/*` 投影值绕过 `validate_app_setting`）、条目身份与去重键行（`db/url_norm.rs` 的 query 对非 UTF-8 百分号字节有损）。**待用户裁决**：补文档声明现状，还是修代码（缺 `outbox`/`body_retention` 两行已由 2026-11-19 文档批补齐，此项已关闭） | 2026-11-19 | 裁决后或触碰契约表时 |
-| `docs/contracts.md` | 订阅写回队列（outbox）行 | 未写事务边界：`db/outbox.rs` 的 `enqueue_subscribe` 自带 SELECT/DELETE/INSERT 但不含事务，依赖调用方。**待用户裁决**：补文档，还是把入队收进调用方事务 | 2026-11-19 | 待用户裁决后 |
-| `docs/contracts.md` | 正文保留与释放（本机）行 | 未写失败语义：阶段B 静态审计记「永久保留模式下错误被静默」，本批未复核。**待用户裁决**：补文档声明失败语义，还是修代码 | 2026-11-19 | 待用户裁决后 |
+| `docs/contracts.md` | 同步投影的设置写边界 | 非法值被拒绝后，对端若持续发送同一非法值，本地会持续拒绝（每次 warn + 诊断），两边保持不一致直到对端修正；`listWidth` 上限改 420 后，旧备份/旧对端里的 500 同样被拒。这是「不得静默夹到合法范围」的代价，不是待修缺陷 | 2026-11-23 | 设置同步改动或对端校验变化时 |
+| `docs/contracts.md` | URL 归一化的非 UTF-8 边界 | 含非 UTF-8 百分号字节的链接不再享受 query 参数剥离：同一文章的不同 utm 变体会显示为不同条目（宁可重复，不可误合并） | 2026-11-23 | 去重键改动或老站点兼容问题时 |
 | `src-tauri/src/db/backup.rs` | `automatic_backup_retention_preserves_symlinks` 的文档注释 | 注释称 CI（windows-latest）仍覆盖真实文件 symlink 路径；该测试带 `#[ignore]`，CI 只跑 `cargo test --no-fail-fast`，不运行 ignored 用例 | 2026-11-19 | 备份保留测试或该注释被触碰时 |
 | `docs/sync-compat-matrix.md` 与 `docs/roadmap.md` | matrix「真实服务端的限定实测」段 vs 本页「当前组合的真实协议部署」条目 | 真实部署基线标识不一致：matrix 记客户端基线 `dev@1bb698c`，本页记「只对应 5dc3 基线」；需统一标识或各自注明指代（哪个是实测产物、哪个是范围声明） | 2026-11-19 | 下次触碰真实部署证据或这两篇时 |
 

@@ -1,7 +1,8 @@
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
-import { api, extractError } from '../../lib/api';
+import { api, extractError, type RetentionFailure } from '../../lib/api';
 import { FluxDropdown, SettingCard, ConfirmDialog } from '../primitives';
+import { useTauriEvent } from '../useTauriEvent';
 import { CACHE_PERIODS } from './shared';
 
 /* ---------- 缓存清理（文章 / AI 产物） ---------- */
@@ -23,6 +24,38 @@ export function CacheCleanupSection() {
   const [days, setDays] = useState(30);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<'articles' | 'ai' | null>(null);
+  /* 正文保留维护的可见失败：调度器连续失败达到阈值时登记到库并发事件。
+     打开设置页时读一次——事件只在失败当刻发，错过就永久看不到；重试成功后
+     后端清除标记，这里同步清空。 */
+  const [retentionFailure, setRetentionFailure] = useState<RetentionFailure | null>(null);
+  const [retentionRetrying, setRetentionRetrying] = useState(false);
+  useEffect(() => {
+    if (dataMode !== 'tauri') return;
+    let disposed = false;
+    void api.retentionHealth()
+      .then((failure) => { if (!disposed) setRetentionFailure(failure); })
+      .catch(() => { /* 读不到失败状态不制造第二个故障 */ });
+    return () => { disposed = true; };
+  }, [dataMode]);
+  useTauriEvent<{ message: string; failures: number }>('retention-error', (e) => {
+    setRetentionFailure((prev) => prev
+      ? { ...prev, message: e.message, failures: e.failures }
+      : { message: e.message, failures: e.failures, since: Math.floor(Date.now() / 1000) });
+  });
+  useTauriEvent('retention-recovered', () => setRetentionFailure(null));
+
+  const retryRetention = async () => {
+    setRetentionRetrying(true);
+    try {
+      const released = await api.retentionRetry();
+      setRetentionFailure(null);
+      showToast(released === null ? '清理完成' : `清理完成，释放 ${released} 篇正文`);
+    } catch (e) {
+      showToast(`重试清理失败：${extractError(e)}`);
+    } finally {
+      setRetentionRetrying(false);
+    }
+  };
 
   if (dataMode !== 'tauri') return null;
 
@@ -85,6 +118,17 @@ export function CacheCleanupSection() {
             options={[{ value: 'permanent', label: '永久保留' }, { value: 'limited', label: '限定天数' }]} />
         </div>
       </SettingCard>
+      {retentionFailure && (
+        <div className="settings-action-row">
+          <span className="settings-action-help" role="alert">
+            正文清理连续失败 {retentionFailure.failures} 次：{retentionFailure.message}
+          </span>
+          <button className="toggle-action-btn" disabled={retentionRetrying}
+            onClick={() => void retryRetention()}>
+            {retentionRetrying ? '重试中…' : '立即重试'}
+          </button>
+        </div>
+      )}
       {limited && <>
         <SettingCard title="保留天数（1–3650）">
           <input key={libraryGeneration} className="setting-input" style={{ width: 100 }} type="text" inputMode="numeric"

@@ -94,41 +94,46 @@ pub fn enqueue_subscribe(
     desired_title: Option<&str>,
     desired_folder: Option<&str>,
 ) -> AppResult<i64> {
-    let _writer = crate::db::writer_guard(conn)?;
-    let inherited_prev: Option<String> = conn
-        .query_row(
-            "SELECT prev_folder FROM subscription_outbox
+    // 三步（替换旧意图 / 清兼容 add_feed / 写新意图）必须整体成立：中途失败
+    // 只留「旧意图已删、新意图未写」的窗口——远端该建的订阅不建、该删的不删，
+    // 且界面看不出异常。SAVEPOINT 可安全嵌套在调用方事务内（账号提交内核、
+    // add_feed、导入路径都已在事务里），autocommit 下 RELEASE 即提交。
+    crate::db::contents::with_write_savepoint(conn, "outbox_enqueue_subscribe", || {
+        let inherited_prev: Option<String> = conn
+            .query_row(
+                "SELECT prev_folder FROM subscription_outbox
               WHERE feed_url = ?1 AND account_key = ?2 AND status = 'pending'
                 AND prev_folder IS NOT NULL
               ORDER BY id DESC LIMIT 1",
+                params![feed_url, account_key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        conn.execute(
+            "DELETE FROM subscription_outbox WHERE feed_url = ?1 AND account_key = ?2",
             params![feed_url, account_key],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    conn.execute(
-        "DELETE FROM subscription_outbox WHERE feed_url = ?1 AND account_key = ?2",
-        params![feed_url, account_key],
-    )?;
-    conn.execute(
-        "DELETE FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
-        params![feed_url],
-    )?;
-    conn.execute(
-        "INSERT INTO subscription_outbox
+        )?;
+        conn.execute(
+            "DELETE FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
+            params![feed_url],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_outbox
             (account_generation, account_key, action, feed_url, desired_title, desired_folder,
              prev_folder)
          VALUES (?1, ?2, 'subscribe', ?3, ?4, ?5, ?6)",
-        params![
-            account_generation,
-            account_key,
-            feed_url,
-            desired_title,
-            desired_folder,
-            inherited_prev
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
+            params![
+                account_generation,
+                account_key,
+                feed_url,
+                desired_title,
+                desired_folder,
+                inherited_prev
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    })
 }
 
 /// 退订入队（本地删除 feed 的同一事务内调用）。
@@ -165,59 +170,63 @@ pub fn enqueue_unsubscribe(
     remote_id: Option<i64>,
     prev_folder: Option<&str>,
 ) -> AppResult<bool> {
-    let _writer = crate::db::writer_guard(conn)?;
-    let inherited: Option<i64> = conn
-        .query_row(
-            "SELECT remote_id FROM subscription_outbox
+    // 与 subscribe 同构：删旧意图 + 清兼容 add_feed + 写新意图必须整体成立。
+    // `return Ok(false)`（无创建证据）退出的是本保存点：RELEASE 语义与原先
+    // 逐条提交一致，清掉的兼容 add_feed 项照旧生效。
+    crate::db::contents::with_write_savepoint(conn, "outbox_enqueue_unsubscribe", || {
+        let inherited: Option<i64> = conn
+            .query_row(
+                "SELECT remote_id FROM subscription_outbox
               WHERE feed_url = ?1 AND account_key = ?2 AND remote_id IS NOT NULL
               ORDER BY id DESC LIMIT 1",
-            params![feed_url, account_key],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    let inherited_prev: Option<String> = conn
-        .query_row(
-            "SELECT prev_folder FROM subscription_outbox
+                params![feed_url, account_key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let inherited_prev: Option<String> = conn
+            .query_row(
+                "SELECT prev_folder FROM subscription_outbox
               WHERE feed_url = ?1 AND account_key = ?2 AND status = 'pending'
                 AND prev_folder IS NOT NULL
               ORDER BY id DESC LIMIT 1",
-            params![feed_url, account_key],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    // 创建证据必须在删除之前采集：同账号同 URL 仍有 pending 队项 = 可能已发出
-    // quick_add（响应在途/丢失），远端可能已被创建。旧账号的队项不算证据
-    // （key 屏障：A 的在途创建与 B 的本地删除无关）。
-    let may_exist_remote: bool = conn.query_row(
-        "SELECT COUNT(*) FROM subscription_outbox
+                params![feed_url, account_key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        // 创建证据必须在删除之前采集：同账号同 URL 仍有 pending 队项 = 可能已发出
+        // quick_add（响应在途/丢失），远端可能已被创建。旧账号的队项不算证据
+        // （key 屏障：A 的在途创建与 B 的本地删除无关）。
+        let may_exist_remote: bool = conn.query_row(
+            "SELECT COUNT(*) FROM subscription_outbox
           WHERE feed_url = ?1 AND account_key = ?2 AND status = 'pending'",
-        params![feed_url, account_key],
-        |r| r.get::<_, i64>(0),
-    )? > 0;
-    conn.execute(
-        "DELETE FROM subscription_outbox WHERE feed_url = ?1 AND account_key = ?2",
-        params![feed_url, account_key],
-    )?;
-    conn.execute(
-        "DELETE FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
-        params![feed_url],
-    )?;
-    let rid = remote_id.or(inherited);
-    if rid.is_none() && !may_exist_remote {
-        return Ok(false);
-    }
-    // 链起点优先于调用方快照（P3-A）：被替换行仍带未发送移动链的起点时，那就是
-    // 远端当前持有的 label。没有链起点（如被替换的 subscribe 行尚无 prev）才用快照。
-    let base = inherited_prev.or_else(|| prev_folder.map(str::to_string));
-    conn.execute(
-        "INSERT INTO subscription_outbox
+            params![feed_url, account_key],
+            |r| r.get::<_, i64>(0),
+        )? > 0;
+        conn.execute(
+            "DELETE FROM subscription_outbox WHERE feed_url = ?1 AND account_key = ?2",
+            params![feed_url, account_key],
+        )?;
+        conn.execute(
+            "DELETE FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
+            params![feed_url],
+        )?;
+        let rid = remote_id.or(inherited);
+        if rid.is_none() && !may_exist_remote {
+            return Ok(false);
+        }
+        // 链起点优先于调用方快照（P3-A）：被替换行仍带未发送移动链的起点时，那就是
+        // 远端当前持有的 label。没有链起点（如被替换的 subscribe 行尚无 prev）才用快照。
+        let base = inherited_prev.or_else(|| prev_folder.map(str::to_string));
+        conn.execute(
+            "INSERT INTO subscription_outbox
             (account_generation, account_key, action, feed_url, remote_id, prev_folder)
          VALUES (?1, ?2, 'unsubscribe', ?3, ?4, ?5)",
-        params![account_generation, account_key, feed_url, rid, base],
-    )?;
-    Ok(true)
+            params![account_generation, account_key, feed_url, rid, base],
+        )?;
+        Ok(true)
+    })
 }
 
 /// 合并基线：既有 pending 行的 (desired_title, desired_folder, prev_folder, action)。
@@ -253,65 +262,68 @@ pub fn enqueue_edit(
     desired_folder: Option<&str>,
     prev_folder: Option<&str>,
 ) -> AppResult<()> {
-    let _writer = crate::db::writer_guard(conn)?;
-    // 合并基线：同账号同 URL 的既有 pending 队项（若有）。
-    let previous: Option<OutboxMergeBaseline> = conn
-        .query_row(
-            "SELECT desired_title, desired_folder, prev_folder, action FROM subscription_outbox
+    // 与 subscribe/unsubscribe 同构：合并计算 + 删旧行 + 清兼容 add_feed + 写新
+    // 行必须整体成立，否则只留下半条链（远端收不到改名/移动）。
+    crate::db::contents::with_write_savepoint(conn, "outbox_enqueue_edit", || {
+        // 合并基线：同账号同 URL 的既有 pending 队项（若有）。
+        let previous: Option<OutboxMergeBaseline> = conn
+            .query_row(
+                "SELECT desired_title, desired_folder, prev_folder, action FROM subscription_outbox
               WHERE feed_url = ?1 AND account_key = ?2 AND status = 'pending'
               ORDER BY id DESC LIMIT 1",
+                params![feed_url, account_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (prev_title, prev_desired_folder, prev_prev_folder, prev_action) =
+            previous.unwrap_or((None, None, None, String::new()));
+        let title = desired_title.map(str::to_string).or(prev_title);
+        let folder = desired_folder
+            .map(str::to_string)
+            .or_else(|| prev_desired_folder.clone());
+        // 既有行带未发送的移动/挂载目标 → 远端尚未收到任何 a=，仍持有链起点；
+        // 用链起点作为移除基准（A-P2-3① 起覆盖两类行）：
+        // - edit 行：未发送移动链的起点（B1-R3 复审 P2-1）；
+        // - subscribe 行：挂载目标未发送，远端持有其 prev_folder（删除后重加继承
+        //   的基准 / remote_created 窗口首值）。挂载失败的窗口同此——这正是
+        //   roadmap A-P2-3① 的「挂载失败后用户再移动，远端旧分类永不移除」。
+        //   subscribe 行没有链起点（prev NULL）时维持既有口径：用新操作的 prev
+        //   （远端从无此 label 时 r= 是无害 no-op，与 remote_created 窗口挂载的
+        //   既有假定同级）。
+        // Note: 订阅行链起点与挂载成功的后继重定 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+        let chain_origin_is_remote_state = prev_desired_folder.is_some()
+            && (prev_action == ACTION_EDIT
+                || (prev_action == ACTION_SUBSCRIBE && prev_prev_folder.is_some()));
+        let old_label = if chain_origin_is_remote_state {
+            prev_prev_folder.clone()
+        } else {
+            prev_folder.map(str::to_string).or(prev_prev_folder)
+        };
+        conn.execute(
+            "DELETE FROM subscription_outbox WHERE feed_url = ?1 AND account_key = ?2",
             params![feed_url, account_key],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    let (prev_title, prev_desired_folder, prev_prev_folder, prev_action) =
-        previous.unwrap_or((None, None, None, String::new()));
-    let title = desired_title.map(str::to_string).or(prev_title);
-    let folder = desired_folder
-        .map(str::to_string)
-        .or_else(|| prev_desired_folder.clone());
-    // 既有行带未发送的移动/挂载目标 → 远端尚未收到任何 a=，仍持有链起点；
-    // 用链起点作为移除基准（A-P2-3① 起覆盖两类行）：
-    // - edit 行：未发送移动链的起点（B1-R3 复审 P2-1）；
-    // - subscribe 行：挂载目标未发送，远端持有其 prev_folder（删除后重加继承
-    //   的基准 / remote_created 窗口首值）。挂载失败的窗口同此——这正是
-    //   roadmap A-P2-3① 的「挂载失败后用户再移动，远端旧分类永不移除」。
-    //   subscribe 行没有链起点（prev NULL）时维持既有口径：用新操作的 prev
-    //   （远端从无此 label 时 r= 是无害 no-op，与 remote_created 窗口挂载的
-    //   既有假定同级）。
-    // Note: 订阅行链起点与挂载成功的后继重定 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
-    let chain_origin_is_remote_state = prev_desired_folder.is_some()
-        && (prev_action == ACTION_EDIT
-            || (prev_action == ACTION_SUBSCRIBE && prev_prev_folder.is_some()));
-    let old_label = if chain_origin_is_remote_state {
-        prev_prev_folder.clone()
-    } else {
-        prev_folder.map(str::to_string).or(prev_prev_folder)
-    };
-    conn.execute(
-        "DELETE FROM subscription_outbox WHERE feed_url = ?1 AND account_key = ?2",
-        params![feed_url, account_key],
-    )?;
-    conn.execute(
-        "DELETE FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
-        params![feed_url],
-    )?;
-    conn.execute(
-        "INSERT INTO subscription_outbox
+        )?;
+        conn.execute(
+            "DELETE FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
+            params![feed_url],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_outbox
             (account_generation, account_key, action, feed_url, remote_id,
              desired_title, desired_folder, prev_folder)
          VALUES (?1, ?2, 'edit', ?3, ?4, ?5, ?6, ?7)",
-        params![
-            account_generation,
-            account_key,
-            feed_url,
-            remote_id,
-            title,
-            folder,
-            old_label
-        ],
-    )?;
-    Ok(())
+            params![
+                account_generation,
+                account_key,
+                feed_url,
+                remote_id,
+                title,
+                folder,
+                old_label
+            ],
+        )?;
+        Ok(())
+    })
 }
 
 /// remote_created 窗口的编辑合并原语：本地订阅尚无 remote_id、但存在同账号
@@ -796,6 +808,35 @@ mod t_opt009_tests {
             .into_iter()
             .map(|i| i.id)
             .collect()
+    }
+
+    /// 故障原子性：三步入队同处一个保存点。INSERT 失败时被删掉的旧待推队项
+    /// 必须仍在——否则「旧意图已删、新意图未写」会静默丢失这次推送。
+    /// 判别力：若去掉保存点，DELETE 先提交、INSERT 再失败，下面断言即红。
+    #[test]
+    fn enqueue_failure_rolls_back_replaced_intent() {
+        let c = conn();
+        let old = enqueue_subscribe(&c, 0, "k", "https://f.example/rss", None, None).unwrap();
+        c.execute_batch(
+            "CREATE TRIGGER injected_outbox_insert_failure
+               BEFORE INSERT ON subscription_outbox
+               WHEN NEW.action = 'subscribe' AND NEW.desired_title = 'boom'
+             BEGIN SELECT RAISE(ABORT, 'injected outbox insert failure'); END",
+        )
+        .unwrap();
+        let failed = enqueue_subscribe(&c, 1, "k", "https://f.example/rss", Some("boom"), None);
+        assert!(failed.is_err(), "注入的 INSERT 失败必须如实返回");
+        assert_eq!(ids(&c), vec![old], "被替换的旧队项必须在失败后原样保留");
+        // 退订路径同保护：删旧行后写入失败，旧行仍在
+        c.execute_batch(
+            "CREATE TRIGGER injected_outbox_unsubscribe_failure
+               BEFORE INSERT ON subscription_outbox
+               WHEN NEW.action = 'unsubscribe'
+             BEGIN SELECT RAISE(ABORT, 'injected outbox unsubscribe failure'); END",
+        )
+        .unwrap();
+        assert!(enqueue_unsubscribe(&c, 2, "k", "https://f.example/rss", Some(7), None).is_err());
+        assert_eq!(ids(&c), vec![old], "退订写入失败同样不得删掉旧队项");
     }
 
     /// 合并纪律：同 URL 的新意图替换旧意图且**换新 id**；旧 id 的确认落空，
