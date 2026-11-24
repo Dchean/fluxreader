@@ -104,11 +104,11 @@ export function FeedsTab() {
     ? pending.kind === 'category'
       ? {
           title: '删除订阅分类',
-          message: withRemote(`确定删除分类「${pending.catName}」吗？其下 ${memberCount} 个订阅源及全部本地条目将一并移除`),
+          message: withRemote(`确定删除分类「${pending.catName}」吗？其下 ${memberCount} 个订阅源将退订；未收藏的本地条目一并移除，收藏条目与读藏状态保留`),
         }
       : {
           title: '删除订阅源',
-          message: withRemote(`确定删除订阅源「${pending.feedName}」吗？该源的全部本地条目将一并移除`),
+          message: withRemote(`确定删除订阅源「${pending.feedName}」吗？该源将退订；未收藏的本地条目一并移除，收藏条目与读藏状态保留`),
         }
     : null;
 
