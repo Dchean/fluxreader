@@ -23,8 +23,8 @@
 | --- | --- | --- | --- |
 | 1 | 收口 D8/X25 在飞改动 | 传输层不再有旧 probe/lease/MOVE 生产路径，错误归属正确 | 定向 `cargo check/clippy/test` 绿 + 旧 ignored WsgiDAV 测试按约定跑通 + 全新只读独审 |
 | 2 | 退订收藏界面闭环 | 退订后仍能读收藏、计数正确、新设备恢复可见 | headless 已覆盖并通过。真实宿主完成两轮：①发现并**已修复**「添加订阅源后计数变了、列表仍空」（`reloadFromBackend({ recapture: true })`，回归 `add-feed-refresh.test.mjs`，做过变异验证）；②**退订后收藏可读已验证**——删源后 `feeds.active=0`、未收藏条目被删、收藏条目保留，收藏计数 1，切「收藏」视图卡片来源标签仍为「复现源」，打开 Reader 的 `reader-col` 显示「复现源 · 保留收藏样本 1 · 正文」。同批修正删除确认框文案（原文写「全部本地条目一并移除」，与后端只删未收藏条目的实际行为不符）。**仍缺**：换机恢复组合未验 |
-| 3 | 正文保留控件真实 Edge 验证 | 默认永久/1–3650 天、原子保存、失败回滚在真实宿主可用 | **已在真实 WebView2 验证通过**（隔离数据根 + CDP 驱动）：`dataMode=tauri` 控件才渲染；默认「永久保留」；切「限定天数」出现输入框且默认 30；输入 0 / 3651 → `aria-invalid=true`，3650 → 通过；Enter 提交后隔离库 `readBodyRetentionDays=90` 落盘。未覆盖：保存失败回滚（需注入后端失败）、真实键盘 Tab 顺序 |
-| 4 | 列表宽度口径统一 | 校验区间与 UI 夹取一致，不再"能存但显示被夹" | 二选一拍板（放宽 UI 到 560 或收紧校验到 420）后补回归 |
+| 3 | 正文保留控件真实 Edge 验证 | 默认永久/1–3650 天、原子保存、失败回滚在真实宿主可用 | **已完成**（真实 WebView2 + 隔离数据根 + CDP）：`dataMode=tauri` 才渲染；默认「永久保留」；切「限定天数」出现天数输入且默认 30；0 / 3651 → `aria-invalid=true`，3650 通过；Enter 提交后隔离库 `readBodyRetentionDays=90` 落盘。**真实键盘**（CDP `Input.dispatchKeyEvent` 可信事件）：combobox → Tab → 天数输入，Shift+Tab 回到 combobox，焦点始终留在弹窗内。**失败回滚**（另一进程 `BEGIN EXCLUSIVE` 占写锁）：提交 240 时约 9.7s 后出现 toast「设置保存失败：database is locked」，输入框回落到 90，库内仍为 90——不谎报成功 |
+| 4 | 列表宽度口径统一 | 校验区间与 UI 夹取一致，不再"能存但显示被夹" | **已收口，定为 280–420 单一区间**：`LIST_WIDTH_RANGE` 作为写入校验、拖拽夹取与 CSS clamp 的共同来源；写入仍严格拒绝越界（421 被拦且不落库），同步/便携带入的历史越界值在读边界 `normalizeStoredSettings` 归一为 420。实测依据见 `docs/roadmap.md` 同名条目；回归在 `tools/frontend-tests/settings-and-feeds.mjs`（D5 段两条） |
 
 ## 三、仍有效的未完成需求（来自 roadmap）
 

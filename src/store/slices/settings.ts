@@ -2,7 +2,7 @@ import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
 import { STARTUP_VIEWS, type ViewFilterType } from '../../types';
 import { appStore } from '../internals';
-import { isValidSetting, sanitizeSettingsPatch } from '../settingsValidation';
+import { isValidSetting, normalizeStoredSettings, sanitizeSettingsPatch } from '../settingsValidation';
 import type { AppState, SettingsState } from '../types';
 
 /** 设置 slice：设置项初值、乐观更新与启动恢复。
@@ -207,7 +207,7 @@ function projectSettings(): void {
     Object.assign(next, parseSettingsRaw(confirmedAppSettings));
   }
   for (const intent of pendingIntents) Object.assign(next, intent.patch);
-  store.setState({ settings: next as unknown as SettingsState });
+  store.setState({ settings: normalizeStoredSettings(next) as unknown as SettingsState });
 }
 
 /** 接受一份基线原文（启动读取 / 应用回读 / 有界校准共用）：置 base 并投影

@@ -20,6 +20,9 @@ import type { SettingsState } from './types';
    区间与设置页滑杆的 min/max 同源（ReadingTab/GeneralTab/App 拖拽）。
    ============================================================ */
 
+/** 列表列宽度的唯一区间：写入校验、拖拽夹取与 CSS clamp 共用。 */
+export const LIST_WIDTH_RANGE = [280, 420] as const;
+
 /** 数值设置项的允许区间 [min, max]，与设置页 <input type="range"> 一致 */
 const NUMERIC_RANGES: Record<string, readonly [number, number]> = {
   refreshInterval: [5, 720],   // GeneralTab: min 5 / max 720（与 Rust scheduler 同区间）
@@ -27,7 +30,7 @@ const NUMERIC_RANGES: Record<string, readonly [number, number]> = {
   fontSize: [13, 24],          // ReadingTab: min 13 / max 24
   lineHeight: [130, 240],      // ReadingTab: min 130 / max 240
   maxWidth: [560, 1100],       // ReadingTab: min 560 / max 1100
-  listWidth: [280, 560],       // App.tsx 拖拽夹取与 base.css clamp 实际为 280–420；此上限更宽，差异未合并（行为项）
+  listWidth: [LIST_WIDTH_RANGE[0], LIST_WIDTH_RANGE[1]], // 与 App.tsx 拖拽夹取、base.css clamp 同口径
 };
 
 const isBool = (v: unknown): boolean => typeof v === 'boolean';
@@ -98,4 +101,17 @@ export function sanitizeSettingsPatch(patch: Record<string, unknown>): Partial<S
     if (isValidSetting(k, v)) out[k] = v;
   }
   return out as Partial<SettingsState>;
+}
+
+/** 读边界归一：历史上限 560 时期同步/便携带入的值可能越界；写入路径仍严格拒绝，
+    这里只在落地到 UI 前夹到当前区间，避免"存 500 显 420"的分裂事实。 */
+export function normalizeStoredSettings<T extends Record<string, unknown>>(values: T): T {
+  const width = values.listWidth;
+  if (typeof width === 'number' && Number.isFinite(width)) {
+    return {
+      ...values,
+      listWidth: Math.min(LIST_WIDTH_RANGE[1], Math.max(LIST_WIDTH_RANGE[0], Math.round(width))),
+    } as T;
+  }
+  return values;
 }

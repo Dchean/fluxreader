@@ -108,6 +108,17 @@ export async function run(ctx) {
   checkNew('(D5) 滑杆边界值合法可写：13px / 240% / 1100px / 5min / 1路 / 280px',
     k5Edge.fontSize === 13 && k5Edge.lineHeight === 240 && k5Edge.maxWidth === 1100
     && k5Edge.refreshInterval === 5 && k5Edge.fetchConcurrency === 1 && k5Edge.listWidth === 280);
+  S.invokeCalls.length = 0;
+  store.getState().updateSettings({ listWidth: 421 });
+  await nTick(0);
+  checkNew('(D5) 列表宽度上限收敛为 420：421 被拦下且不落库',
+    store.getState().settings.listWidth === 280
+    && S.invokeCalls.filter((c) => c.cmd === 'patch_app_settings').length === 0);
+  checkNew('(D5) 越界历史值在读边界按上限归一为 420（同步/便携带入的旧值不被静默丢弃）',
+    k5.normalizeStoredSettings({ listWidth: 500 }).listWidth === 420
+    && k5.normalizeStoredSettings({ listWidth: 250 }).listWidth === 280
+    && k5.normalizeStoredSettings({ listWidth: 420 }).listWidth === 420
+    && k5.sanitizeSettingsPatch({ listWidth: 500 }).listWidth === undefined);
   checkNew('(D5) 合法补丁照常落库（校验不误伤正常路径）',
     S.invokeCalls.filter((c) => c.cmd === 'patch_app_settings').length === 1);
   const kSetKeys = Object.keys(store.getState().settings);

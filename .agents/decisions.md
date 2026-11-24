@@ -5,7 +5,7 @@
 ## A. 产品 / 界面红线（拍过板，不许被半成品代码反向抹掉）
 
 1. **对比度不能降。** 普通文字 ≥4.5:1，图标/大字 ≥3:1；深色 accent 兼作前景与白字按钮底时单值无法双向达标，只按图形口径验前景，**不得降阈值关问题**。→ `src/styles/tokens.css`
-2. **列表宽度硬上限 420px。** 三栏是 `260px / clamp(280px, min(--list-width,37vw), 420px) / 1fr`；放到 560 会把 980 视口阅读列压到 160。校验区间与 UI 夹取不一致是已登记行为项，未拍板前不擅自改。→ `src/styles/base.css`、`src/store/settingsValidation.ts`
+2. **列表宽度 280–420px，一个口径。** 三栏是 `260px / clamp(280px, min(--list-width,37vw), 420px) / 1fr`；放到 560 会把 980 视口阅读列压到 160。写入校验、拖拽夹取与 CSS clamp 现已同源（`LIST_WIDTH_RANGE`）；同步/便携带入的历史越界值在读边界归一，不静默丢弃。→ `src/styles/base.css`、`src/store/settingsValidation.ts`
 3. **J/K 五布局统一"选中驱动焦点"。** 卡片加 `aria-current` + `.active-selected`；卡被筛掉时只在焦点落 BODY 时迁到同下标，不抢侧栏/筛选焦点。→ `src/components/Timeline.tsx`
 4. **Space 让路优先级：原生控件 > 播放器 > 卡片。** 让路白名单刻意不含 `[role=button]`。→ `src/components/shortcutYield.ts`
 5. **返回位置按「条目 ID + filterKey + 卡内偏移」记账。** 属性刷新 / 切回缓存 / 关阅读器是三条独立 nonce，不能合并成一条。→ `src/lib/readingPosition.ts`
