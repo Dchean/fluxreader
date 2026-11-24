@@ -22,7 +22,7 @@
 | # | 切片 | 能演示什么 | 验收口径（草案） |
 | --- | --- | --- | --- |
 | 1 | 收口 D8/X25 在飞改动 | 传输层不再有旧 probe/lease/MOVE 生产路径，错误归属正确 | 定向 `cargo check/clippy/test` 绿 + 旧 ignored WsgiDAV 测试按约定跑通 + 全新只读独审 |
-| 2 | 退订收藏界面闭环 | 退订后仍能读收藏、计数正确、新设备恢复可见 | headless 部分已覆盖并通过（`tools/component-tests/reading-session.test.mjs`）。**真实宿主已验证到一半**：在隔离库中用本地 RSS 夹具走完"添加订阅 → 后端抓取 2 篇 → 计数变 全部 2/未读 2"，但加完源后时间线仍显示"没有未读文章"，整页重载后才出现文章（**疑似缺陷，待复现确认**）。退订与 Reader 显示原来源名一步尚未在真实宿主走完；换机恢复仍缺 |
+| 2 | 退订收藏界面闭环 | 退订后仍能读收藏、计数正确、新设备恢复可见 | headless 部分已覆盖并通过（`tools/component-tests/reading-session.test.mjs`）。真实宿主发现并**已修复**一个缺陷：添加订阅源后新文章入库、计数变了、列表仍空 —— 根因是 `reloadFromBackend` 的 refresh 分支（为后台同步保成员）不重捕获成员，而 addFeed 走的正是它。现由 `reloadFromBackend({ recapture: true })` 重新捕获，回归 `tools/component-tests/add-feed-refresh.test.mjs`（已做变异验证：去掉 recapture 两条用例即红），真机复验同一操作 t+3s 即出现文章。**仍缺**：退订后 Reader 显示原来源名一步未在真实宿主走完；换机恢复未验 |
 | 3 | 正文保留控件真实 Edge 验证 | 默认永久/1–3650 天、原子保存、失败回滚在真实宿主可用 | **已在真实 WebView2 验证通过**（隔离数据根 + CDP 驱动）：`dataMode=tauri` 控件才渲染；默认「永久保留」；切「限定天数」出现输入框且默认 30；输入 0 / 3651 → `aria-invalid=true`，3650 → 通过；Enter 提交后隔离库 `readBodyRetentionDays=90` 落盘。未覆盖：保存失败回滚（需注入后端失败）、真实键盘 Tab 顺序 |
 | 4 | 列表宽度口径统一 | 校验区间与 UI 夹取一致，不再"能存但显示被夹" | 二选一拍板（放宽 UI 到 560 或收紧校验到 420）后补回归 |
 

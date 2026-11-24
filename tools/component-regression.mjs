@@ -62,6 +62,8 @@ if (args.length === 0) {
     await import('./component-tests/modifier-shortcuts.test.mjs');
     await import('./component-tests/entry-actions.test.mjs');
     await import('./component-tests/reading-session.test.mjs');
+    /* 添加订阅源必须重捕获成员：否则新文章入库、计数变了、列表仍是空的。 */
+    await import('./component-tests/add-feed-refresh.test.mjs');
     await import('./component-tests/reading-session-audit.test.mjs');
     /* 资料库恢复替代旧OAuth授权关闭守卫；正常设置关闭仍覆盖。 */
     await import('./component-tests/local-library.test.mjs');

@@ -162,9 +162,11 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
          订阅（含失败前已导入的部分）不能不可见。无同步选择/未连接时保持原有
          单次回读，不额外请求。 */
       const finishAdd = async (token: number, feedId: number | null): Promise<void> => {
-        /* ① 首次回读：本地新订阅立即可见（无同步选择/未连接时就是唯一一次）。 */
+        /* ① 首次回读：本地新订阅立即可见（无同步选择/未连接时就是唯一一次）。
+           recapture 是必需的：新抓到的文章属于结构性变更，只刷新计数不重捕获成员
+           会让列表停留在旧会话（实测「全部/未读 都变 2，列表仍显示空」）。 */
         try {
-          await get().reloadFromBackend();
+          await get().reloadFromBackend({ recapture: true });
         } catch (e) {
           get().finishSyncActivity(token, 'error');
           get().showToast(`订阅已添加，刷新失败：${extractError(e)}`, {

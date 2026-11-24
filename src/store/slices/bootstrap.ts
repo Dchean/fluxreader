@@ -224,7 +224,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         if (!startupGate && !sameReadingNavigation(initialNavigation, navigationOf(get()))) return;
         const nav = navigationOf(get());
         const previousSession = get().readingSession;
-        const refresh = previousSession?.ready === true && sameReadingNavigation(previousSession.query, nav);
+        /* recapture：显式结构变更（添加/导入订阅源等）必须重新捕获成员。
+           默认 refresh 分支是为后台同步保成员顺序设计的，它只刷新属性与计数；
+           若结构性变更也走 refresh，就会出现「计数变了、列表还是空的」。 */
+        const refresh = !opts?.recapture
+          && previousSession?.ready === true && sameReadingNavigation(previousSession.query, nav);
         const requeryWindow = !refresh && opts?.keepReadingPosition && previousSession
           && sameReadingNavigation(previousSession.query, nav) ? previousSession : undefined;
         let session = refresh ? previousSession : createReadingSession(++sessionGeneration, captureReadingQuery(nav));

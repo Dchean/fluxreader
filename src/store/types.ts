@@ -388,7 +388,7 @@ export interface AppState {
   /** 从后端拉全量快照替换本地状态。TASK-111②：opts.keepReadingPosition 仅由
       内容刷新路径（feeds-updated / 手动同步 / 单源刷新）传入，落地时发出保位
       信号；导航路径（selectFeed/selectView/selectLayout 等）不传，不触发回位。 */
-  reloadFromBackend: (opts?: { keepReadingPosition?: boolean }) => Promise<void>;
+  reloadFromBackend: (opts?: { keepReadingPosition?: boolean; recapture?: boolean }) => Promise<void>;
   /** 当前视图的加载进度镜像，亦供 mock 写入视图缓存时兜底。 */
   articlesLimit: number;
   /** 既有视图缓存的进度镜像；新会话续页只消费 readingSession 的固定成员与 loadedCount。 */
